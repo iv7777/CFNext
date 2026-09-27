@@ -81,7 +81,7 @@ $('hamb').addEventListener('click', function(){ $('sidebar').classList.toggle('o
 
 /* ===== 主题 ===== */
 function systemIsLight(){ return window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches; }
-function storedTheme(){ var t = 'dark'; try { t = localStorage.getItem('tp_theme') || 'dark'; } catch(e) {} return t; }
+function storedTheme(){ var t = 'light'; try { t = localStorage.getItem('tp_theme') || 'light'; } catch(e) {} return t; }
 function resolveTheme(t){ if (t === 'auto') return systemIsLight() ? 'light' : 'dark'; return t; }
 function setThemeIcon(t){
   var p = document.getElementById('themeIcon');
