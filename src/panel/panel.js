@@ -148,20 +148,18 @@ function checkUpdate(){
     sv.classList.remove('checking');
     if (!r || !r.ok || !r.data) { sv.textContent = topVerText; toast('检测更新失败，请稍后重试', 'err'); return; }
     var d = r.data;
-    var kindName = (d.kind === '混淆') ? '混淆版' : '明文版';
-    topVerText = 'v' + d.current + ' ' + kindName;
+    topVerText = 'v' + d.current;
     sv.textContent = topVerText;
     if (d.hasUpdate && d.code) {
       sv.classList.add('has-update');
-      var kind = (d.kind === '混淆') ? '混淆' : '明文';
       copyClipboard(d.code).then(function(copied){
-        toast(copied ? '检测到更新，已复制最新' + kind + '代码到剪贴板' : '检测到更新（v' + d.latest + '），复制失败，请前往仓库获取', copied ? 'ok' : 'err');
+        toast(copied ? '检测到更新（v' + d.latest + '），已复制最新代码到剪贴板' : '检测到更新（v' + d.latest + '），复制失败，请前往仓库获取', copied ? 'ok' : 'err');
       });
     } else if (d.hasUpdate) {
       toast('检测到更新（v' + d.latest + '），但未能获取代码', 'err');
     } else if (d.latest) {
       sv.classList.remove('has-update');
-      toast('已是最新版本（v' + d.current + ' ' + kindName + '）', 'ok');
+      toast('已是最新版本（v' + d.current + '）', 'ok');
     } else {
       toast('检测更新失败：' + (d.error || '仓库暂不可达'), 'err');
     }
@@ -217,10 +215,9 @@ function renderStatus(d){
   $('aKv').textContent = kvTxt;
   $('aKv').className = 'v ' + (kv ? 'ok' : 'bad');
   var v = d.version || '—';
-  var kindName = (d.kind === '混淆版') ? '混淆版' : '明文版';   // 部署形态（明文版 / 混淆版），由后端自检
-  $('sideVer').textContent = 'v' + v + ' ' + kindName;
-  topVerText = 'v' + v + ' ' + kindName;
-  $('aVer').textContent = v + ' ' + kindName;
+  $('sideVer').textContent = 'v' + v;
+  topVerText = 'v' + v;
+  $('aVer').textContent = v;
 }
 function protoText(){
   if (!CFG) return '—';
@@ -377,7 +374,7 @@ var sharedCheck = /*@CFNEXT_CHECK@*/null;
 var SCHEMA_BY_KEY = {};
 SCHEMA.forEach(function(d){ SCHEMA_BY_KEY[d.key] = d; });
 function checkValue(def, v){
-  // 共用校验函数不可用（如混淆版改写了函数体）时跳过前端校验，由服务端校验兜底
+  // 共用校验函数不可用时跳过前端校验，由服务端校验兜底
   if (typeof sharedCheck !== 'function') return { value: v };
   try { return sharedCheck(def, v); } catch (e) { return { value: v }; }
 }

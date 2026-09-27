@@ -232,7 +232,7 @@ test('面板页面注入字段表与共用校验函数', async () => {
   }
 });
 
-test('检测更新：以仓库 CFNext.js 为基准，明文版直接复用其内容，60 秒内走缓存', async () => {
+test('检测更新：以仓库 CFNext.js 为基准，有更新时直接返回其内容，60 秒内走缓存', async () => {
   const env = baseEnv();
   const cookie = await login(env);
   const offline = globalThis.fetch;
@@ -249,7 +249,6 @@ test('检测更新：以仓库 CFNext.js 为基准，明文版直接复用其内
     assert.equal(r.ok, true);
     assert.equal(r.data.latest, '9.9.9');
     assert.equal(r.data.hasUpdate, true);
-    assert.equal(r.data.kind, '明文');
     assert.match(r.data.code, /const VERSION = '9\.9\.9'/);
     assert.deepEqual(seen, ['https://raw.githubusercontent.com/iv7777/CFNext/main/CFNext.js'], '只请求一次 CFNext.js');
     const again = await (await call(env, `/${UUID}/api/update`, { cookie })).json();

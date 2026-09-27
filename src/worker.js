@@ -14,7 +14,6 @@
 //    TROJAN_PASSWORD  Trojan 密码（开启 Trojan 时必填）
 //    ALPN         自定义 ALPN 协商（可选）
 //    YX           自定义优选 IP 列表（可选，格式 IP:port#名称，逗号分隔）
-//    DEPLOY_EDITION 部署形态标注：明文版 / 混淆版（手动维护），决定检测更新时拉取的仓库代码（明文版 CFNext.js / 混淆版 CFNext 混淆版.js）
 //    CF_ACCOUNT_ID CF 账户监控：账户 ID（可选，与 CF_API_TOKEN 同时设置后可在面板查看当日用量）
 //    CF_API_TOKEN  CF 账户监控：API 令牌（可选，需 Workers 用量分析读取权限，如 Account Analytics 读权限）
 //    K            已绑定 KV 命名空间时读取图形化配置
@@ -23,22 +22,10 @@ import { connect } from 'cloudflare:sockets';
 
 const VERSION = '2.0.2';
 
-// 部署形态标注（手动维护）：明文版部署保持「明文版」；生成混淆版部署前，请将下方标注手动改为「混淆版」。
-// 更新检测时：统一以仓库「CFNext.js」的版本号为比对基准（明文与混淆同步发布同一版本号），
-// 有更新时按本标注拉取对应仓库代码——明文版 → CFNext.js，混淆版 → CFNext 混淆版.js。
-const DEPLOY_EDITION = '明文版';
-
-function deployKind(){
-  try {
-    return DEPLOY_EDITION === '混淆版' ? 'obfuscated' : 'plain';
-  } catch (e) { return 'plain'; }
-}
-
 // 更新检测：点击版本号后拉取仓库代码比对版本号；有新版本时返回最新代码供面板复制
-// 明文版与混淆版同步发布同一版本号：版本基准统一用仓库根目录的「CFNext.js」，按自身形态复制对应代码
+// 版本基准为仓库 main 分支根目录的 CFNext.js（由 build.mjs 生成的部署文件）
 const UPDATE_REPO = 'iv7777/CFNext';
-const UPDATE_FILE_PLAIN = 'CFNext.js';          // 明文版（即仓库中由 build.mjs 生成的部署文件）
-const UPDATE_FILE_OBF = 'CFNext 混淆版.js';      // 混淆版
+const UPDATE_FILE = 'CFNext.js';
 let UPDATE_CACHE = null; // { t, r } 60 秒缓存
 
 function parseVer(v){
@@ -71,23 +58,11 @@ async function fetchRepoFile(name){
 async function checkUpdate(env){
   const now = Date.now();
   if (UPDATE_CACHE && now - UPDATE_CACHE.t < 60000) return UPDATE_CACHE.r;
-  const kindName = deployKind() === 'obfuscated' ? '混淆' : '明文';   // 自身形态（读取 DEPLOY_EDITION 标注）
-  const done = (latest, code) => {
-    UPDATE_CACHE = { t: now, r: { current: VERSION, kind: kindName, latest, hasUpdate: cmpVer(latest, VERSION) > 0, code, checkedAt: now } };
-    return UPDATE_CACHE.r;
-  };
-  // 版本基准统一用明文文件（明文与混淆同步发布同一版本号）；明文版直接复用这次拉取的内容作为最新代码，不再重复请求
-  const plain = await fetchRepoFile(UPDATE_FILE_PLAIN);
-  if (plain.version) {
-    if (kindName !== '混淆') return done(plain.version, plain.txt);
-    // 混淆版：按自身形态拉取混淆文件；拉取失败时 code 为空，面板提示「未能获取代码」
-    const obf = await fetchRepoFile(UPDATE_FILE_OBF);
-    return done(plain.version, obf.txt || '');
-  }
-  // 兜底：明文文件不可达时尝试混淆文件版本（混淆版部署可直接使用其内容）
-  const obf = await fetchRepoFile(UPDATE_FILE_OBF);
-  if (obf.version) return done(obf.version, kindName === '混淆' ? obf.txt : '');
-  return { current: VERSION, kind: kindName, latest: null, hasUpdate: false, code: '', error: plain.error || obf.error || '未在仓库中找到版本信息' };
+  // 拉取仓库 CFNext.js：比对版本号，有更新时直接把这次拉取的内容作为最新代码返回
+  const r = await fetchRepoFile(UPDATE_FILE);
+  if (!r.version) return { current: VERSION, latest: null, hasUpdate: false, code: '', error: r.error || '未在仓库中找到版本信息' };
+  UPDATE_CACHE = { t: now, r: { current: VERSION, latest: r.version, hasUpdate: cmpVer(r.version, VERSION) > 0, code: r.txt, checkedAt: now } };
+  return UPDATE_CACHE.r;
 }
 
 const CLASH_TEMPLATE = `
@@ -2309,8 +2284,8 @@ async function handleXhttpProxy(request, cfg) {
 // 从任意数据源文本提取 IP 候选（兼容 txt 行式、HTML 表格、JSON 文本；仅保留合法 IPv4/IPv6）
 // 内容解码：优先 UTF-8（fatal 严格解码），否则按 GBK 解码（对齐 edgetunnel 请求优选API 的编码检测；
 // 国内优选 API 常返回 GB2312/GBK 编码，直接 text() 会乱码导致解析不到 IP）
-// 重要：不使用 U+FFFD 替换符字符串字面量判定（该转义会被部分混淆器改写为空格，导致 UTF-8 源被误判 GBK 而乱码），
-// 改用 TextDecoder('utf-8', { fatal: true }) 严格解码：非法字节直接抛错才落入 GBK 兜底，混淆后行为不变
+// 使用 TextDecoder('utf-8', { fatal: true }) 严格解码：非法字节直接抛错才落入 GBK 兜底
+// （不依赖 U+FFFD 替换符判定，避免含空格等正常内容的 UTF-8 源被误判为 GBK 而乱码）
 function decodeUtf8OrGbk(buf) {
   const bytes = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
   try {
@@ -3850,7 +3825,6 @@ async function serveSubscription(request, env, cfg, fmt, commit) {
 }
 
 // 面板页面：注入字段表与共用校验函数（每个 isolate 只组装一次）。
-// 注意：混淆版中 checkFieldValue.toString() 可能引用混淆器的全局辅助函数，面板对此做了兜底（校验失败时交由服务端校验）
 let PANEL_PAGE = null;
 function panelPage() {
   if (!PANEL_PAGE) {
@@ -4015,13 +3989,13 @@ async function handleRequest(request, env) {
     }
 
     if (apiName === 'status') {
-      return json({ ok: true, data: { version: VERSION, kind: deployKind() === 'obfuscated' ? '混淆版' : '明文版', host: url.hostname, path: panelPath, region: (request.cf && request.cf.colo) || 'unknown', kv: !!(env.K && typeof env.K.get === 'function'), workersDev: /\.workers\.dev$/i.test(url.hostname) } });
+      return json({ ok: true, data: { version: VERSION, host: url.hostname, path: panelPath, region: (request.cf && request.cf.colo) || 'unknown', kv: !!(env.K && typeof env.K.get === 'function'), workersDev: /\.workers\.dev$/i.test(url.hostname) } });
     }
 
     if (apiName === 'update') {
       try {
         const r = await checkUpdate(env);
-        const d = { current: r.current, latest: r.latest, hasUpdate: r.hasUpdate, kind: r.kind, error: r.error || '' };
+        const d = { current: r.current, latest: r.latest, hasUpdate: r.hasUpdate, error: r.error || '' };
         if (r.hasUpdate && r.code) d.code = r.code;
         return json({ ok: true, data: d });
       } catch (e) { return json({ ok: false, msg: '检测失败: ' + (e.message || e) }, 500); }
