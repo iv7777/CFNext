@@ -5,7 +5,7 @@
 //  环境变量：
 //    U            VLESS UUID（必填，同时用作面板访问路径，除非设置了 D）
 //    D / PATH     自定义面板路径（可选）
-//    ADMIN        面板管理密码（可选，设置后访问面板需登录）
+//    ADMIN        面板管理密码（必填：未设置时面板与管理 API 一律禁用）
 //    HOST         自定义 SNI/Host（可选，默认使用 Worker 域名）
 //    PROXYIP      自定义反代/落地 IP（可选，填写后作为固定出口优先使用；留空则直连失败时由内置地区反代兜底，格式 host 或 host:port）
 //    S / OUTBOUND 出站代理（可选，socks5:// / http:// / ss:// 或 host:port）
@@ -14,8 +14,6 @@
 //    TROJAN_PASSWORD  Trojan 密码（开启 Trojan 时必填）
 //    ALPN         自定义 ALPN 协商（可选）
 //    YX           自定义优选 IP 列表（可选，格式 IP:port#名称，逗号分隔）
-//    YXURL        优选器自定义数据源 URL（可选）
-//    BESTIP_AUTO  设为 1 启用定时自动优选（scheduled 触发，刷新优选节点）
 //    DEPLOY_EDITION 部署形态标注：明文版 / 混淆版（手动维护），决定版本号检测更新时拉取的仓库代码
 //    CF_ACCOUNT_ID CF 账户监控：账户 ID（可选，与 CF_API_TOKEN 同时设置后可在面板查看当日用量）
 //    CF_API_TOKEN  CF 账户监控：API 令牌（可选，需 Workers 用量分析读取权限，如 Account Analytics 读权限）
@@ -23,7 +21,7 @@
 // ============================================================================
 import { connect } from 'cloudflare:sockets';
 
-const VERSION = '2.0.0';
+const VERSION = '2.0.1';
 
 // 部署形态标注（手动维护）：明文版部署保持「明文版」；生成混淆版部署前，请将下方标注手动改为「混淆版」。
 // 更新检测时：统一以仓库「CFNext 明文版.js」的版本号为比对基准（明文与混淆同步发布同一版本号），
@@ -38,7 +36,7 @@ function deployKind(){
 
 // 更新检测：点击版本号后拉取仓库代码比对版本号；有新版本时返回最新代码供面板复制
 // 明文版与混淆版同步发布同一版本号：版本基准统一用「CFNext 明文版.js」，按自身形态复制对应代码
-const UPDATE_REPO = 'PAICNI/CFNext';
+const UPDATE_REPO = 'iv7777/CFNext';
 let UPDATE_CACHE = null; // { t, r } 60 秒缓存
 
 function parseVer(v){
@@ -509,7 +507,8 @@ const DEFAULT_REGION_POOLS = [
 // 允许绕过「仅 CF 段」过滤直接下发；其余来源仍保持 CF 段硬性要求
 const TRUSTED_REGION_POOL_RE = /random-region\/[A-Z]{2,}\/\d+\.txt/i;
 function isTrustedRegionPool(url) {
-  return TRUSTED_REGION_POOL_RE.test(String(url || ''));
+  // 安全修复：不再信任非 CF 段的社区中转 IP（第三方服务器可作为中间人），统一按 CF 段过滤
+  return false;
 }
 
 const DEFAULT_CONFIG = {
@@ -553,15 +552,9 @@ const DEFAULT_CONFIG = {
   // 优选节点（保存后随订阅下发到客户端）
   preferredDomains: 'https://bestcf.pages.dev/random-region/HK/100.txt\nhttps://bestcf.pages.dev/random-region/TW/100.txt\nhttps://bestcf.pages.dev/random-region/JP/100.txt\nhttps://bestcf.pages.dev/random-region/SG/100.txt\nhttps://bestcf.pages.dev/random-region/US/100.txt\nhttps://bestcf.pages.dev/random-region/KR/100.txt',   // 自定义订阅模式下使用的地址（每行/逗号分隔）
   preferredIPs: [],       // [{ip, port, name}]
-  // 优选器（在线测速参数）
+  // 订阅模式参数
   optimizer: {
-    source: 'wetest_v4', // 预设数据源键，见 OPTIMIZE_SOURCES
-    sourceURL: '',       // 自定义数据源 URL
-    port: 443,
-    threads: 5,
-    count: 20,
-    useCidr: true,
-    fillCount: 0,        // 节点 IP 不足时用 CF CIDR 随机补足（0 关闭；默认关闭，只下发真实优选节点）
+    fillCount: 0,        // 随机补足已移除：保持 0（仅为兼容旧 KV 配置保留字段）
     subMode: '',         // 订阅模式：'' 关闭（使用面板默认）/ custom 自定义订阅（支持汇聚）/ random 随机优选
     subRandomCount: 16,  // random 模式随机优选数量
     subIncludeDefault: false // 自定义订阅模式下是否同时下发内置及默认地区节点（false 仅自定义）
@@ -693,13 +686,6 @@ const DEFAULT_PREFERRED_DOMAINS = [
 const HTTP_PORTS = new Set([80, 8080, 8880, 2052, 2082, 2086, 2095]);
 
 // 优选器预设数据源：微测网接口 + 优选 IP 来源
-const OPTIMIZE_SOURCES = {
-  wetest_v4:    { label: '微测网 IPv4', url: 'https://www.wetest.vip/page/cloudflare/address_v4.html' },
-  wetest_v6:    { label: '微测网 IPv6', url: 'https://www.wetest.vip/page/cloudflare/address_v6.html' },
-  bestcf:       { label: '优选 IP 列表', url: 'https://cf.090227.xyz/ip.164746.xyz' },
-  hostmonit:    { label: 'HostMonit 优选', url: 'https://stock.hostmonit.com/CloudFlareYes' },
-  wetest_cname: { label: '微测网 优选域名', url: 'https://www.wetest.vip/page/cloudflare/cname.html' }
-};
 
 // ---------------------------------------------------------------------------
 // 工具函数
@@ -995,7 +981,6 @@ async function loadConfig(env) {
   if (env.TROJAN_PASSWORD) cfg.trojanPassword = String(env.TROJAN_PASSWORD);
   if (env.ALPN) cfg.alpn = String(env.ALPN);
   if (env.YX) cfg.preferredIPs = parseIPList(env.YX);
-  if (env.YXURL) cfg.optimizer.sourceURL = String(env.YXURL);
   // 节点测活：环境变量 PROBE_ALIVE=1/true 强制开启，=0/false 强制关闭（不走面板也能改）
   if (env.PROBE_ALIVE === '1' || env.PROBE_ALIVE === 'true') cfg.probeAlive = true;
   if (env.PROBE_ALIVE === '0' || env.PROBE_ALIVE === 'false') cfg.probeAlive = false;
@@ -1138,11 +1123,28 @@ function readAddress(data, view, offset, atyp) {
 }
 
 // VLESS 请求头：Version(1) | UUID(16) | AddonsLen(1) | Addons | Cmd(1) | Port(2) | Atyp(1) | Addr | [TCP]1字节User | [UDP]数据包
-function parseVlessHeader(data) {
+// 安全修复：校验 VLESS UUID（原版读过 16 字节 UUID 却从不比对，任意 UUID 都能使用代理）
+let UUID_BYTES_CACHE = { s: null, b: null };
+function uuidToBytes(u) {
+  const str = String(u || '');
+  if (UUID_BYTES_CACHE.s === str) return UUID_BYTES_CACHE.b;
+  const h = str.replace(/-/g, '').toLowerCase();
+  if (!/^[0-9a-f]{32}$/.test(h)) throw new Error('服务端 UUID 配置无效');
+  const b = new Uint8Array(16);
+  for (let i = 0; i < 16; i++) b[i] = parseInt(h.substr(i * 2, 2), 16);
+  UUID_BYTES_CACHE = { s: str, b };
+  return b;
+}
+function parseVlessHeader(data, cfg) {
   if (!data || data.byteLength < 1) throw new Error('VLESS 头部过短');
   const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
   let offset = 0;
   if (view.getUint8(0) !== 0) throw new Error('不支持的 VLESS 版本');
+  if (data.byteLength < 17) throw new Error('VLESS 头部过短');
+  const want = uuidToBytes(cfg && cfg.uuid);
+  let diff = 0;
+  for (let i = 0; i < 16; i++) diff |= (view.getUint8(1 + i) ^ want[i]);
+  if (diff !== 0) throw new Error('UUID 不匹配');
   offset += 1 + 16;                       // version + uuid
   if (offset >= data.byteLength) throw new Error('VLESS 头部过短');
   const addonsLen = view.getUint8(offset); offset += 1;
@@ -1251,15 +1253,8 @@ function trojanPasswordHash(pass) {
 function detectTrojan(pending, cfg) {
   if (!cfg.enableTrojan || !pending || pending.byteLength < 58) return false;
   const head = pending.subarray(0, 56);
-  if (TD.decode(head).toLowerCase() === trojanPasswordHash(cfg.trojanPassword || cfg.uuid)) return true;
-  if (pending[56] === 0x0d && pending[57] === 0x0a) {
-    for (let i = 0; i < 56; i++) {
-      const c = head[i];
-      if (!((c >= 48 && c <= 57) || (c >= 97 && c <= 102) || (c >= 65 && c <= 70))) return false;
-    }
-    return true;
-  }
-  return false;
+  // 安全修复：仅密码哈希匹配才视为 Trojan（原版任意 56 位十六进制都放行）
+  return TD.decode(head).toLowerCase() === trojanPasswordHash(cfg.trojanPassword || cfg.uuid);
 }
 
 // DoH 端点池（UDP/DNS → DoH 转换用；v1.0.5 修复：V2rayNG 关闭「本地 DNS」时远端 DNS 不可用）
@@ -1968,7 +1963,7 @@ async function handleWebSocketProxy(request, cfg) {
           // 此时 pending[0] 为 hex 字符（非 0）且不足 58 字节，不能按 VLESS 解析（会报版本错误而关闭连接），应等待后续分片
           if (!isTrojan && pending.byteLength > 0 && pending[0] !== 0 && pending.byteLength < 58) return;
           isVless = !isTrojan;
-          parsed = isTrojan ? parseTrojanHeader(pending) : parseVlessHeader(pending);
+          parsed = isTrojan ? parseTrojanHeader(pending) : parseVlessHeader(pending, cfg);
         } catch (err) {
           if (/头部过短/.test(err.message || '')) return;   // 等下一个分片
           throw err;
@@ -2018,7 +2013,7 @@ async function handleXhttpProxy(request, cfg) {
   const bodyReader = request.body.getReader();
   const first = await bodyReader.read();
   if (first.done) return new Response('empty', { status: 400 });
-  const parsed = parseVlessHeader(first.value);
+  const parsed = parseVlessHeader(first.value, cfg);
   const conn = await openOutbound(parsed, cfg, request.cf && request.cf.colo, true);
   const writer = conn.writable.getWriter();
   await writer.write(first.value.subarray(parsed.headerLength));
@@ -2099,21 +2094,6 @@ function extractCandidates(text) {
   return out;
 }
 
-// 从文本提取域名（用于微测网优选域名源，支持 *. 通配前缀）
-function extractDomains(text) {
-  const seen = new Set();
-  const out = [];
-  const re = /(?:\*\.)?(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}/gi;
-  let m;
-  while ((m = re.exec(text))) {
-    const d = m[0].toLowerCase();
-    if (!seen.has(d) && (d.includes('cloudflare') || d.includes('bestcf') || d.includes('182682') || d.includes('090227') || d.endsWith('.xyz') || d.endsWith('.top'))) {
-      seen.add(d); out.push(d);
-    }
-  }
-  return out.slice(0, 10);
-}
-
 // 订阅时自动拉取最新优选 IP：HostMonit 优选源，10 分钟缓存；
 // 失败返回 null，由内置优选池兜底。保证 IP 节点为「当前优选」而非静态过期快照，显著提升可用率。
 const SUBPREF_CACHE = { t: 0, ips: null };
@@ -2129,110 +2109,6 @@ async function fetchLatestPreferredIPs(maxCount) {
     return out;
   }
   return null;
-}
-
-// 按数据源键 + 自定义 URL 收集候选 IP
-async function collectCandidates(opt) {
-  opt = opt || {};
-  const out = [];
-  // 源拉取统计：预设源 / 自定义源 各自拉到的 IP 数与失败原因（前端展示，便于排查"源未生效"）
-  const stats = { preset: 0, presetErr: '', custom: 0, customErr: '', cidr: 0 };
-  // 统一使用所选测速端口：忽略源文本自带端口，保证测速结果只出现所选端口；
-  // 仅保留 Cloudflare Anycast IP：非 CF IP 无法作为 Worker 入口，测速/加入优选均无意义
-  const push = (x) => { if (x && x.ip && isCloudflareIP(x.ip)) out.push({ ip: x.ip, port: opt.port || x.port || 443, name: x.name || '' }); };
-  if (opt.source && OPTIMIZE_SOURCES[opt.source]) {
-    const res = await fetchTimeout(OPTIMIZE_SOURCES[opt.source].url, { headers: { 'User-Agent': 'Mozilla/5.0' } }, 6000);
-    if (res && res.ok) {
-      const arr = extractCandidates(await res.text());
-      arr.forEach(push);
-      stats.preset = arr.length;
-    } else stats.presetErr = res ? ('HTTP ' + res.status) : '超时/网络错误';
-  }
-  if (opt.sourceURL) {
-    const res = await fetchTimeout(opt.sourceURL, { headers: { 'User-Agent': 'Mozilla/5.0' } }, 6000);
-    if (res && res.ok) {
-      const arr = extractCandidates(await res.text());
-      arr.forEach(push);
-      stats.custom = arr.length;
-    } else stats.customErr = res ? ('HTTP ' + res.status) : '超时/网络错误';
-  }
-  // 按 IP 去重（忽略端口）：同一 IP 无论来源/端口如何只保留一条，避免候选框出现重复 IP
-  const seen = new Set();
-  const dedup = [];
-  for (const x of out) {
-    if (seen.has(x.ip)) continue;
-    seen.add(x.ip);
-    dedup.push(x);
-  }
-  // 高可用补足：去重后仍不足目标数量时，优先并入 bestcf 区域优选池（实时测速过的优质 IP），
-  // 其次才用 CF CIDR 随机生成（参考 TunnelBoard：真实优选池可用性远高于随机 CIDR）
-  if (dedup.length < (opt.count || 20)) {
-    let need = (opt.count || 20) - dedup.length;
-    try {
-      const pool = await fetchBestcfPool();
-      for (const p of pool) {
-        if (need <= 0) break;
-        if (seen.has(p.ip)) continue;
-        if (!isCloudflareIP(p.ip)) continue;
-        seen.add(p.ip);
-        dedup.push({ ip: p.ip, port: opt.port || p.port || 443, name: p.name || '' });
-        need--;
-      }
-    } catch (e) {}
-    stats.bestcf = (opt.count || 20) - dedup.length - need;
-  }
-  if (opt.useCidr !== false && dedup.length < (opt.count || 20)) {
-    const need = (opt.count || 20) - dedup.length;
-    const pool = randomIPsFromCidrs(CLOUDFLARE_CIDRS, need * 3);
-    let filled = 0;
-    for (const ip of pool) {
-      if (filled >= need) break;
-      if (seen.has(ip)) continue;
-      seen.add(ip);
-      dedup.push({ ip, port: opt.port || 443, name: '' });
-      filled++;
-    }
-    stats.cidr = filled;
-  }
-  return { candidates: dedup, stats };
-}
-
-// 单个 IP 的 TCP 连接延迟测试
-function testOneLatency(ip, port, timeout) {
-  return new Promise((resolve) => {
-    const start = Date.now();
-    let socket, done = false;
-    const finish = (ok, latency) => {
-      if (done) return; done = true;
-      clearTimeout(timer);
-      try { if (socket) socket.close(); } catch (e) { /* 忽略 */ }
-      resolve({ ip, port, ok, latency });
-    };
-    const timer = setTimeout(() => finish(false, -1), timeout);
-    try {
-      socket = connect({ hostname: ip, port });
-    } catch (e) { return finish(false, -1); }
-    socket.opened.then(() => finish(true, Date.now() - start))
-      .catch(() => finish(false, -1));
-  });
-}
-
-// 并发延迟测试
-async function runLatencyTest(candidates, threads, timeout) {
-  threads = Math.max(1, Math.min(50, Number(threads) || 5));
-  timeout = Math.max(500, Number(timeout) || 5000);
-  const results = [];
-  let idx = 0;
-  async function worker() {
-    while (idx < candidates.length) {
-      const c = candidates[idx++];
-      const r = await testOneLatency(c.ip, c.port, timeout);
-      results.push(r);
-    }
-  }
-  await Promise.all(Array.from({ length: threads }, worker));
-  results.sort((a, b) => (a.latency < 0 ? 1e9 : a.latency) - (b.latency < 0 ? 1e9 : b.latency));
-  return results;
 }
 
 // ---------------------------------------------------------------------------
@@ -2486,14 +2362,7 @@ async function resolvePreferredDomains(domainsStr, limitPerDomain = 100, maxTota
           if (nm) { counters[nm] = (counters[nm] || 0) + 1; rec.push({ ip, port, name: nm + '-' + String(counters[nm]).padStart(2, '0'), ...(relay ? { relay: true } : {}) }); }
           else rec.push({ ip, port, name: '', ...(relay ? { relay: true } : {}) });
         }
-        if (!rec.length && allowRegionFallback) {
-          // 追加模式兜底：源内无可解析 IP 时，按 URL 路径地区码（如 /HK/）用可达 CF 段生成该地区节点
-          const tag = (String(d).match(/\/([A-Z]{2})\//) || [])[1] || String(d).replace(/^https?:\/\//, '').split('.')[0];
-          if (REGION_CN[tag]) {
-            const gen = randomIPsFromCidrs(v6 ? REACHABLE_CIDRS_V6 : REACHABLE_CIDRS, limitPerDomain);
-            gen.forEach((ip, i) => rec.push({ ip, port: 443, name: REGION_CN[tag] + '-' + String(i + 1).padStart(2, '0') }));
-          }
-        }
+        // 已移除「地区回退生成」：源内无可用 IP 时不再用随机 CF IP 冒充该地区节点
         DNH_CACHE.set(ck, { t: now, ips: rec });
         return rec.slice();   // 返回副本：均衡截断的 shift() 会原地修改数组，直接返回引用会污染缓存
       } catch (e) {
@@ -2655,7 +2524,7 @@ async function buildNodes(cfg, cap = 800, skipSet = null) {
   }
   // CF CIDR 随机补足：节点数不足 fillCount（封顶 cap）时随机生成补齐（大量下发，客户端自动择优；对齐 1.0.6/2.0 第一版）
   // 补足候选做小范围 TCP 测活（可达排前，不足由未测活补齐），保证节点数量充足
-  const fillCount = Math.min(Math.max(parseInt((cfg.optimizer && cfg.optimizer.fillCount) || 0) || 0, 0), 5000);
+  const fillCount = 0;   // 已移除随机补足（忽略旧 KV 中的 fillCount）
   const need = Math.min(fillCount, cap) - used.size;   // 按唯一 IP 数补足，而非节点数（多协议节点会膨胀 nodes.length）
   if (need > 0) {
     // 优先用实测高存活率大站任播轮换补足（随机 CIDR 生成的任播 IP 大量不可达、客户端测速 -1）；
@@ -2816,7 +2685,7 @@ function clashProxyYaml(p) {
   L.push('    udp: true');
   if (p.tls) {
     L.push('    tls: true');
-    L.push('    skip-cert-verify: true');   // CF 优选 IP 场景：server 为 CF Anycast IP，证书是域名证书（无 IP SAN），mihomo 校验 IP 主机名必失败，须跳过（与 edgetunnel/subconverter 一致）
+    L.push('    skip-cert-verify: false');   // 安全修复：校验证书（按 servername 校验，与 server 是否为 IP 无关）
     // ALPN：ws/trojan 强制 HTTP/1.1（CF Worker 的 WebSocket 仅支持 HTTP/1.1 升级，mihomo utls(chrome) 默认 ALPN 含 h2 → WS 升级失败）；
     // xhttp 必须 h2（stream-one 依赖 HTTP/2 双向流，h1.1 请求体未发完 CF 边缘无法回传响应 → Clash Verge 节点全部超时）
     L.push(p.network === 'xhttp' ? '    alpn: [h2]' : '    alpn: [http/1.1]');
@@ -2871,7 +2740,7 @@ function generateClash(cfg, nodes) {
     seen.add(name);
     const base = {
       name, server: srv, port: prt, udp: true,
-      ...(tls ? { tls: true, 'skip-cert-verify': true, servername: host, 'client-fingerprint': 'chrome', alpn: ['http/1.1'] } : {}),
+      ...(tls ? { tls: true, 'skip-cert-verify': false, servername: host, 'client-fingerprint': 'chrome', alpn: ['http/1.1'] } : {}),
       ...(cfg.ech && tls ? { 'ech-opts': { enable: true, 'query-server-name': cfg.echHost || 'cloudflare-ech.com' } } : {})   // 修复 #6：mihomo ECH 官方格式为顶层 ech-opts（enable + query-server-name），旧 tls-opts.ech 不被识别导致 ECH 未生效
     };
     if (isTrojan) {
@@ -2923,7 +2792,7 @@ function generateSurfboard(cfg, nodes) {
   }
   const lines = sb.map((n, i) => {
     const { user, srv, prt, name } = parseShareNode(n, i);
-    return `${name} = trojan, ${srv}, ${prt}, password=${user}, ws=true, ws-path=${path}, ws-headers=Host:${host}, tls=true, skip-cert-verify=true, sni=${host}`;
+    return `${name} = trojan, ${srv}, ${prt}, password=${user}, ws=true, ws-path=${path}, ws-headers=Host:${host}, tls=true, skip-cert-verify=false, sni=${host}`;
   });
   return `#!MANAGED-CONFIG
 [General]
@@ -2952,12 +2821,12 @@ function generateSingbox(cfg, nodes) {
     const { user, srv, prt, name, isTrojan, tls } = parseShareNode(n, i);
     const type = getParam(n, 'type') || 'ws';
     // XHTTP 在 sing-box 中不支持 uTLS（官方限制，xhttp+utls 会导致 outbound 异常/流量不通），xhttp 模式禁用 utls
-    // insecure/alpn：CF 优选 IP 场景 server 为 Anycast IP（证书为域名证书无 IP SAN）须跳过校验；
+    // insecure=false：证书按 server_name 校验，即使 server 为 IP 也能通过；关闭校验会让中间人可解密流量
     // 强制 HTTP/1.1 ALPN 避免 CF 边缘协商 h2 导致 WS 升级失败（v1.0.5 修复）
     // xhttp stream-one 依赖 HTTP/2 双向流，ALPN 必须 h2（h1.1 经 CF 边缘请求体未发完响应无法回传 → 超时）；ws 才用 http/1.1
     const tlsObj = tls ? (type === 'xhttp'
-      ? { enabled: true, server_name: host, insecure: true, alpn: ['h2'] }
-      : { enabled: true, server_name: host, insecure: true, alpn: ['http/1.1'], utls: { enabled: true, fingerprint: 'chrome' } })
+      ? { enabled: true, server_name: host, insecure: false, alpn: ['h2'] }
+      : { enabled: true, server_name: host, insecure: false, alpn: ['http/1.1'], utls: { enabled: true, fingerprint: 'chrome' } })
       : { enabled: false };
     // early data：TLS 下的 ws 走 2048 字节 early data（ed=2048），
     // 减少首包往返；明文 ws 与 xhttp 不启用
@@ -3055,7 +2924,7 @@ function generateSurge(cfg, nodes) {
   const host = cfg.host, path = '/' + cfg.path;
   const proxies = nodes.map((n, i) => {
     const { user, srv, prt, name, isTrojan, tls } = parseShareNode(n, i);
-    const tlsPart = tls ? ', tls=true, skip-cert-verify=true, sni=' + host : ', tls=false';
+    const tlsPart = tls ? ', tls=true, skip-cert-verify=false, sni=' + host : ', tls=false';
     return isTrojan
       ? `${name} = trojan, ${srv}, ${prt}, password=${user}, ws=true, ws-path=${path}, ws-headers=Host:${host}${tlsPart}`
       : `${name} = vless, ${srv}, ${prt}, username=${user}, ws=true, ws-path=${path}, ws-headers=Host:${host}${tlsPart}`;
@@ -3084,7 +2953,7 @@ function generateLoon(cfg, nodes) {
   const host = cfg.host, path = '/' + cfg.path;
   const proxies = nodes.map((n, i) => {
     const { user, srv, prt, name, isTrojan, tls } = parseShareNode(n, i);
-    const tlsPart = tls ? ', tls=true, skip-cert-verify=true, sni=' + host : ', tls=false';
+    const tlsPart = tls ? ', tls=true, skip-cert-verify=false, sni=' + host : ', tls=false';
     return isTrojan
       ? `${name} = trojan, ${srv}, ${prt}, password=${user}, ws=true, ws-path=${path}, ws-headers=Host:${host}${tlsPart}`
       : `${name} = vless, ${srv}, ${prt}, username=${user}, ws=true, ws-path=${path}, ws-headers=Host:${host}${tlsPart}`;
@@ -3218,7 +3087,7 @@ async function testRelayAliveRaw(server, port, timeoutMs) {
     const chunk = await Promise.race([reader.read(), new Promise((_, rej) => setTimeout(() => rej(new Error('http timeout')), ms))]);
     try { conn.close(); } catch (e) {}
     const head = new TextDecoder().decode(chunk.value || new Uint8Array(0));
-    return /^HTTP\/1\\.[01] (200|204)/.test(head);
+    return /^HTTP\/1\.[01] (200|204)/.test(head);
   } catch (e) { return false; }
 }
 
@@ -3267,7 +3136,7 @@ async function fetchBestcfPool() {
       const got = [];
       for (const line of text.split(/[\r\n]+/)) {
         const m = line.trim().match(/^(\d{1,3}(?:\.\d{1,3}){3})(?::(\d+))?$/);
-        if (m && got.length < rp.count) got.push({ ip: m[1], port: m[2] ? parseInt(m[2], 10) : 443, name: rp.label + '-' + String(got.length + 1).padStart(2, '0') });
+        if (m && isCloudflareIP(m[1]) && got.length < rp.count) got.push({ ip: m[1], port: m[2] ? parseInt(m[2], 10) : 443, name: rp.label + '-' + String(got.length + 1).padStart(2, '0') });
       }
       got.forEach(g => out.push(g));
     } catch (e) {}
@@ -3354,8 +3223,8 @@ async function generateSubscription(cfg, requestUrl, format, ua, colo) {
         if (!x || !x.ip || seen.has(x.ip)) continue;
         seen.add(x.ip);
         const entry = { ip: x.ip, port: x.port || 443, name: x.name || '', relay: !!x.relay };
-        if (entry.relay || !isCloudflareIP(entry.ip)) relayNew.push(entry);
-        else cfNew.push(entry);
+        if (entry.relay || !isCloudflareIP(entry.ip)) continue;   // 安全修复：丢弃非 CF 段中转 IP
+        cfNew.push(entry);
       }
       const relayToTest = relayNew.slice(0, 100);
       const cfToTest = cfNew.slice(0, 150);
@@ -3406,8 +3275,7 @@ async function generateSubscription(cfg, requestUrl, format, ua, colo) {
       resolved = [...def, ...resolved.filter(x => !seen.has(x.ip))];
       rc.preferredIPs = [...(rc.preferredIPs || []), ...builtinIPs];
       if (!rc.optimizer) rc.optimizer = {};
-      // 追加模式下按接近上限的数量补足（fillCount 决定 buildNodes 的 CF CIDR 随机补足 IP 数，默认 0 时强制大量补足），满足"下发全部节点"预期
-      rc.optimizer.fillCount = Math.max(parseInt(rc.optimizer.fillCount) || 0, 800);
+      rc.optimizer.fillCount = 0;   // 已移除随机补足：追加模式只合并真实来源节点
     }
   } else if (mode === '') {
     // 关闭（使用面板默认）：
@@ -3490,7 +3358,7 @@ async function generateSubscription(cfg, requestUrl, format, ua, colo) {
     if (!rc.optimizer) rc.optimizer = {};
     // 单选 IPv6 时内置实测池已全量转 embedded IPv6（真实可达），无需 CIDR 随机补足（随机 v6 不可达会拖低可用率）；
     // 纯 IPv4 / 混合保留少量随机补足供海量下发
-    rc.optimizer.fillCount = Math.max(parseInt(rc.optimizer.fillCount) || 0, onlyV6 ? 0 : 1000);
+    rc.optimizer.fillCount = 0;   // 默认模式不再用随机 CIDR 补足
     // 连通率提升（纯排序，不删节点）：实测存活率最高的 20 条大站任播 IP（BUILTIN_STABLE_IPS）排到优选池最前——
     // 客户端默认选第一个可用节点，头部放最稳 IP = 用户优先踩到高存活率节点；其它来源顺序与数量不变（appendStableNodes 自带 used 去重不会重复）
     if (rc.preferredIPs && rc.preferredIPs.length) {
@@ -3565,8 +3433,7 @@ async function generateSubscription(cfg, requestUrl, format, ua, colo) {
   if (cfg.nodeLimit && mode && !strictCustom && nodes.length < cap) {
     const need = cap - nodes.length;
     // 该补足块仅服务「自定义订阅（追加内置）/ 随机优选」两种模式：
-    // 优先用 bestcf 区域优选池（实时测速过的优质 IP）补齐，不足再回退 CF CIDR 随机补足——
-    // 避免纯随机 CIDR 灌入大量「延迟 -1」死节点；两模式均不进行测活（按 1.0.6 机制）
+    // 仅用 bestcf 区域优选池（已过滤为 CF 段）补齐；不再回退 CF CIDR 随机补足
     const seen = new Set();
     for (const n of nodes) { try { seen.add(parseNodeServer(n).host); } catch (e) {} }
     const pushFill = (ip, port, name) => {
@@ -3575,26 +3442,13 @@ async function generateSubscription(cfg, requestUrl, format, ua, colo) {
       seen.add(ip);
       nodes.push(vlessNode(rc, ip, port || 443, name));
     };
-    let fi = 0;
     try {
       const pool = await fetchBestcfPool();
       const fresh = skipSet ? pool.filter(p => !skipSet.has(p.ip)) : pool;
       const ordered = fresh.length >= need ? fresh : pool;
       for (const p of ordered) { pushFill(p.ip, p.port, p.name || ('优选IP-' + String(p.port))); if (nodes.length >= cap) break; }
     } catch (e) {}
-    if (nodes.length < cap) {
-      const left = cap - nodes.length;
-      const v6c = OFFICIAL_V6_CIDRS;
-      const fillCidrs = onlyV6 ? v6c : (wantV6 ? [...REACHABLE_CIDRS, ...v6c] : REACHABLE_CIDRS);
-      const pool = randomIPsFromCidrs(fillCidrs, left * 3);
-      const freshP = skipSet ? pool.filter(ip => !skipSet.has(ip)) : pool;
-      const fillIPs = (freshP.length >= left) ? freshP : pool;
-      for (const ip of fillIPs) {
-        if (nodes.length >= cap) break;
-        fi++;
-        pushFill(ip, 443, '优选IP-' + String(fi).padStart(3, '0'));
-      }
-    }
+    // 已移除 CF CIDR 随机补足：bestcf 池（仅 CF 段）不足时不再生成随机 IP
   }
   // 严格封顶：多协议膨胀可能越过 cap 一个 IP（3 条），统一截断到上限；节点数量控制开启时同样按设定值精确截断
   if (nodes.length > cap) nodes.length = cap;
@@ -4033,52 +3887,7 @@ pre.code{background:var(--bg2);border:1px solid var(--border);border-radius:8px;
 
     <!-- ===== 视图：优选配置 ===== -->
     <section class="view" data-view="optimizer">
-      <div class="view-head"><h2>优选配置</h2><p>拉取候选 IP → 本地测速 → 最优节点加入订阅</p></div>
-      <div class="card">
-        <h3><span class="tick"></span>在线优选</h3>
-        <div class="grid3">
-          <div class="field" style="grid-column:span 2;margin:0"><label>数据源</label>
-            <select id="o-source">
-              <option value="wetest_v4">微测网 IPv4</option>
-              <option value="wetest_v6">微测网 IPv6</option>
-              <option value="bestcf">优选 IP 列表（bestcf）</option>
-              <option value="hostmonit">HostMonit 优选</option>
-              <option value="cidr">内置 Cloudflare 地址段</option>
-              <option value="custom">自定义 URL</option>
-            </select>
-          </div>
-          <div class="field" style="margin:0"><label>测速端口</label>
-            <select id="o-port" onchange="onPortSel()">
-              <optgroup label="HTTPS"><option value="443">443</option><option value="2053">2053</option><option value="2083">2083</option><option value="2087">2087</option><option value="2096">2096</option><option value="8443">8443</option></optgroup>
-              <optgroup label="HTTP"><option value="80">80</option><option value="8080">8080</option><option value="8880">8880</option><option value="2052">2052</option><option value="2082">2082</option><option value="2086">2086</option><option value="2095">2095</option></optgroup>
-              <option value="custom">自定义…</option>
-            </select>
-            <input type="text" id="o-portC" style="display:none;margin-top:8px" placeholder="自定义端口号" autocomplete="off">
-          </div>
-        </div>
-        <div class="field" id="o-customWrap" style="display:none"><label>自定义数据源 URL</label><input type="text" id="o-sourceURL" placeholder="https://example.com/ip.txt" autocomplete="off"></div>
-        <div class="grid3" style="margin-top:6px">
-          <div class="field" style="margin:0"><label>并发线程（1-50）</label><input type="number" id="o-threads" min="1" max="50" value="5"></div>
-          <div class="field" style="margin:0"><label>候选数量</label><input type="number" id="o-count" min="1" value="20"></div>
-          <div class="field" style="margin:0"><label>随机补足（0 关闭）</label><input type="number" id="o-fill" min="0" value="0"></div>
-        </div>
-        <div class="row" style="margin-top:14px">
-          <label class="switch"><input type="checkbox" id="o-useCidr" checked><span class="sl"></span></label>
-          <span style="font-size:13px;color:var(--dim)">候选不足时用 Cloudflare 地址段随机补足</span>
-          <span style="flex:1"></span>
-          <button class="btn primary" onclick="runPick()">开始优选</button>
-          <button class="btn" onclick="addAllBest()">全部加入最优</button>
-        </div>
-        <div class="msg" id="oMsg"></div>
-      </div>
-      <div class="card">
-        <h3><span class="tick"></span>测速结果 <span class="sub">本地（浏览器）→ 目标 IP</span></h3>
-        <div class="tbl-wrap">
-          <table><colgroup><col style="width:42%"><col style="width:18%"><col style="width:16%"><col style="width:24%"></colgroup>
-          <thead><tr><th>IP : 端口</th><th>延迟</th><th>状态</th><th>操作</th></tr></thead>
-          <tbody id="oTableBody"><tr><td colspan="4" style="text-align:center;color:var(--faint)">尚未测速 — 点击「开始优选」拉取候选</td></tr></tbody></table>
-        </div>
-      </div>
+      <div class="view-head"><h2>优选配置</h2><p>订阅模式与自定义优选节点</p></div>
       <div class="card">
         <h3><span class="tick"></span>优选节点</h3>
         <div class="grid2">
@@ -4099,8 +3908,7 @@ pre.code{background:var(--bg2);border:1px solid var(--border);border-radius:8px;
         <div class="field" id="sm-custom" style="margin-top:14px;display:none">
           <label>优选节点（域名 / 优选 API / IP，每行一个；IP 格式 IP:端口#名称）</label>
           <textarea id="f-preferred" rows="6" placeholder="*.cloudflare.182682.xyz&#10;104.25.246.53:443#香港&#10;https://bestcf.pages.dev/random-region/HK/100.txt"></textarea>
-          <div class="hint">开启「自定义订阅」后生效；域名与优选 API 保存后自动解析为可用 IP 下发。测速结果里的「加入优选」会把最优 IP 写入此列表，保存全部后生效。</div>
-          <button class="btn sm" style="margin-top:8px" onclick="fetchDomains()">拉取微测网优选域名</button>
+          <div class="hint">开启「自定义订阅」后生效；域名与优选 API 保存后自动解析为可用 IP 下发。可用本地工具（如 CloudflareSpeedTest）在自己的网络下测速后，把结果填入此列表。</div>
         </div>
         <div class="field" id="sm-random" style="margin-top:14px;display:none">
           <label>随机优选数量（1-99）</label>
@@ -4181,7 +3989,7 @@ pre.code{background:var(--bg2);border:1px solid var(--border);border-radius:8px;
         </div>
         <div class="field"><label>面板路径（访问入口，留空用 UUID）</label><input type="text" id="a-path" placeholder="留空自动使用 UUID" autocomplete="off"></div>
         <div class="field"><label>自定义订阅路径（只填 UUID/别名段，如 AAZ；留空用面板路径）</label><input type="text" id="a-suburl" placeholder="AAZ" autocomplete="off"></div>
-        <div class="field"><label>管理密码（留空则面板免登录）</label><input type="password" id="a-admin" placeholder="设置后访问面板需登录" autocomplete="new-password"></div>
+        <div class="field"><label>管理密码（留空保持不变；未设置时面板禁用）</label><input type="password" id="a-admin" placeholder="设置后访问面板需登录" autocomplete="new-password"></div>
         <div class="field" style="margin-bottom:0"><label>绑定域名（留空使用 *.workers.dev）</label><input type="text" id="a-host" placeholder="node.example.com" autocomplete="off"></div>
         <p class="hint" style="margin-top:10px">「绑定域名」仅用于订阅节点主机名（XHTTP 协议要求绑定自定义域名），不负责域名解析。自定义域名访问面板需先在 Cloudflare 面板 → Workers 与 Pages → 该 Worker → Domains &amp; Routes 添加自定义域名（DNS 由 Cloudflare 托管，证书自动签发），此字段留空即使用 *.workers.dev。KV 未绑定时配置只在内存中生效，重置后回到默认值。</p>
       </div>
@@ -4256,7 +4064,7 @@ pre.code{background:var(--bg2);border:1px solid var(--border);border-radius:8px;
             <tr><td>bestcf 地区优选池</td><td class="mono">bestcf.pages.dev/random-region/{HK|TW|JP|SG|US|KR}/100.txt</td></tr>
             <tr><td>DoH 解析</td><td class="mono">cloudflare-dns.com / dns.alidns.com / doh.pub</td></tr>
             <tr><td>Cloudflare 用量监控（GraphQL）</td><td class="mono">api.cloudflare.com/client/v4/graphql</td></tr>
-            <tr><td>版本更新检测</td><td class="mono">raw.githubusercontent.com/PAICNI/CFNext/...</td></tr>
+            <tr><td>版本更新检测</td><td class="mono">raw.githubusercontent.com/iv7777/CFNext/...</td></tr>
             <tr><td>远程规则集（sing-box / Clash）</td><td class="mono">raw.githubusercontent.com/MetaCubeX/meta-rules-dat/...</td></tr>
             <tr><td>面板二维码库</td><td class="mono">cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.min.js</td></tr>
           </tbody>
@@ -4278,7 +4086,6 @@ pre.code{background:var(--bg2);border:1px solid var(--border);border-radius:8px;
 /* ===== 基础 ===== */
 var APIPATH = location.pathname.replace(/\/+$/, '');
 var CFG = null;
-var LAST = [];
 var toastTimer = null;
 function $(id){ return document.getElementById(id); }
 function api(p, opts){
@@ -4611,14 +4418,6 @@ function renderPreferred(){
   });
   $('f-preferred').value = lines.join('\n');
 }
-function fillPort(pv){
-  pv = String(pv == null ? 443 : pv);
-  var sel = $('o-port');
-  var found = false;
-  for (var i = 0; i < sel.options.length; i++){ if (sel.options[i].value === pv){ found = true; break; } }
-  if (found){ sel.value = pv; $('o-portC').style.display = 'none'; }
-  else { sel.value = 'custom'; $('o-portC').value = pv; $('o-portC').style.display = ''; }
-}
 function fillForm(){
   if (!CFG) return;
   $('en-vless').checked = CFG.enableVless !== false;
@@ -4648,13 +4447,6 @@ function fillForm(){
   $('fl-pref-ip').checked = src.prefIp !== false;
   $('fl-custom-pref').checked = src.customPref === true;
   var o = CFG.optimizer || {};
-  $('o-source').value = o.source || 'wetest_v4';
-  $('o-sourceURL').value = o.sourceURL || '';
-  fillPort(o.port);
-  $('o-threads').value = o.threads || 5;
-  $('o-count').value = o.count || 20;
-  $('o-fill').value = (o.fillCount == null ? 0 : o.fillCount);
-  $('o-useCidr').checked = o.useCidr !== false;
   $('o-submode').value = o.subMode || '';
   $('o-subinc').value = (o.subIncludeDefault ? '1' : '0');
   $('o-rand').value = o.subRandomCount == null ? 16 : o.subRandomCount;
@@ -4666,17 +4458,18 @@ function fillForm(){
   $('a-uuid').value = CFG.uuid || '';
   $('a-path').value = CFG.path || '';
   $('a-suburl').value = CFG.subUrl || '';
-  $('a-admin').value = CFG.admin || '';
+  $('a-admin').value = '';
+  $('a-admin').placeholder = CFG.adminSet ? '已设置（留空保持不变）' : '未设置';
   $('a-host').value = CFG.host || '';
   $('a-cfid').value = CFG.cfAccountId || '';
-  $('a-cftoken').value = CFG.cfApiToken || '';
+  $('a-cftoken').value = '';
+  $('a-cftoken').placeholder = CFG.cfApiTokenSet ? '已设置（留空保持不变）' : '40 位令牌（My Profile → API Tokens 创建）';
   $('s-proxyIP').value = CFG.proxyIP || '';
   $('s-outbound').value = CFG.outboundProxy || '';
   $('s-outmode').value = CFG.outboundMode || '';
   renderPreferred();
   bindRegionPills();
   onSubMode();
-  $('o-customWrap').style.display = ($('o-source').value === 'custom') ? '' : 'none';
 }
 // 节点地区多选互斥：勾选具体地区时取消「全部地区」；全部取消时自动恢复「全部地区」（保证筛选非空）
 function bindRegionPills(){
@@ -4738,13 +4531,7 @@ function collectForm(){
     preferredDomains: domLines.join('\n'),
     preferredIPs: ips,
     optimizer: {
-      source: $('o-source').value,
-      sourceURL: $('o-sourceURL').value.trim(),
-      port: parseInt($('o-port').value === 'custom' ? $('o-portC').value : $('o-port').value) || 443,
-      threads: parseInt($('o-threads').value) || 5,
-      count: parseInt($('o-count').value) || 20,
-      fillCount: parseInt($('o-fill').value) || 0,
-      useCidr: $('o-useCidr').checked,
+      fillCount: 0,
       subMode: $('o-submode').value,
       subRandomCount: parseInt($('o-rand').value) || 16,
       subIncludeDefault: $('o-subinc').value === '1'
@@ -4938,11 +4725,6 @@ function previewSub(){
 }
 
 /* ===== 优选配置 ===== */
-function onPortSel(){
-  var sel = $('o-port');
-  var c = $('o-portC');
-  c.style.display = sel.value === 'custom' ? '' : 'none';
-}
 function onSubMode(){
   var m = $('o-submode').value;
   $('sm-custom').style.display = (m === 'custom') ? '' : 'none';
@@ -4990,139 +4772,6 @@ $('fl-random-pref').addEventListener('change', function(){
   }
   onSubMode();
 });
-$('o-source').addEventListener('change', function(){
-  $('o-customWrap').style.display = ($('o-source').value === 'custom') ? '' : 'none';
-});
-function pingIp(ip, port, timeout){
-  var t0 = Date.now();
-  var addr = ip.indexOf(':') >= 0 ? '[' + ip + ']' : ip;
-  var proto = (port === 80 || port === 8080 || port === 8880 || port === 2052 || port === 2082 || port === 2086 || port === 2095) ? 'http' : 'https';
-  var ctrl = new AbortController();
-  var timer = setTimeout(function(){ ctrl.abort(); }, timeout);
-  return fetch(proto + '://' + addr + ':' + port + '/', { mode: 'no-cors', cache: 'no-store', redirect: 'manual', signal: ctrl.signal })
-    .then(function(){ clearTimeout(timer); return { ok: true, latency: Date.now() - t0 }; })
-    .catch(function(){
-      clearTimeout(timer);
-      var ms = Date.now() - t0;
-      if (proto === 'http' && ms < 100) return pingHttps(ip, port, timeout);
-      return { ok: ms < timeout, latency: ms };
-    });
-}
-function pingHttps(ip, port, timeout){
-  var t0 = Date.now();
-  var addr = ip.indexOf(':') >= 0 ? '[' + ip + ']' : ip;
-  var ctrl = new AbortController();
-  var timer = setTimeout(function(){ ctrl.abort(); }, timeout);
-  return fetch('https://' + addr + ':' + port + '/', { mode: 'no-cors', cache: 'no-store', redirect: 'manual', signal: ctrl.signal })
-    .then(function(){ clearTimeout(timer); return { ok: true, latency: Date.now() - t0 }; })
-    .catch(function(){ clearTimeout(timer); var ms = Date.now() - t0; return { ok: ms < timeout, latency: ms }; });
-}
-function localTest(cands, threads, timeout){
-  var results = [], idx = 0, pending = 0;
-  return new Promise(function(resolve){
-    function next(){
-      while (pending < threads && idx < cands.length) {
-        (function(c){
-          pending++;
-          pingIp(c.ip, c.port, timeout).then(function(r){
-            pending--;
-            results.push({ ip: c.ip, port: c.port, ok: r.ok, latency: r.latency });
-            if (results.length === cands.length) resolve(results);
-            else next();
-          });
-        })(cands[idx++]);
-      }
-    }
-    next();
-  });
-}
-function runPick(){
-  if (!CFG){ toast('配置尚未加载', 'err'); return; }
-  var o = collectForm().optimizer;
-  showMsg('oMsg', '正在拉取候选 IP…', 'info');
-  api('candidates', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(o) })
-    .then(function(r){
-      if (!r || !r.ok){ showMsg('oMsg', (r && r.msg) || '拉取失败', 'err'); return; }
-      var cands = r.data || [];
-      if (!cands.length){ showMsg('oMsg', (r && r.msg) || '没有可测的 IP，请换一个数据源', 'err'); return; }
-      var st = r.stats || {};
-      var parts = [];
-      if (st.preset) parts.push('预设源 ' + st.preset + ' 条');
-      if (st.presetErr) parts.push('预设源失败(' + st.presetErr + ')');
-      if (st.custom) parts.push('自定义源 ' + st.custom + ' 条');
-      if (st.customErr) parts.push('自定义源失败(' + st.customErr + ')');
-      if (st.cidr) parts.push('CF 补足 ' + st.cidr + ' 条');
-      showMsg('oMsg', '拉取 ' + cands.length + ' 条（' + (parts.join('，') || '无') + '），本地测速中…', 'info');
-      localTest(cands, o.threads || 5, 3000).then(function(results){
-        results.sort(function(a, b){ return (a.latency < 0 ? 1e9 : a.latency) - (b.latency < 0 ? 1e9 : b.latency); });
-        renderResults(results);
-        var okc = results.filter(function(x){ return x.ok; }).length;
-        showMsg('oMsg', '测速完成：' + okc + '/' + results.length + ' 可用（本地 → 目标）', okc ? 'ok' : 'err');
-      });
-    })
-    .catch(function(){ showMsg('oMsg', '拉取失败：无法连接服务器', 'err'); });
-}
-function renderResults(list){
-  var seen = {};
-  var dedup = [];
-  (list || []).forEach(function(r){
-    if (seen[r.ip]) return;
-    seen[r.ip] = 1;
-    dedup.push(r);
-  });
-  LAST = dedup;
-  var tb = $('oTableBody');
-  tb.innerHTML = '';
-  if (!LAST.length){ tb.innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--faint)">没有可用结果</td></tr>'; return; }
-  LAST.forEach(function(r, i){
-    var tr = document.createElement('tr');
-    var ok = r.ok;
-    var lag = ok ? (r.latency + 'ms') : '超时';
-    var badge = '<span class="badge ' + (ok ? 'g' : 'r') + '">' + (ok ? '可用' : '超时') + '</span>';
-    var btn = ok ? '<button class="btn sm primary" onclick="useIp(' + i + ')">加入优选</button>' : '<span style="color:var(--faint)">—</span>';
-    tr.innerHTML = '<td class="ip">' + r.ip + ':' + r.port + '</td><td>' + lag + '</td><td>' + badge + '</td><td>' + btn + '</td>';
-    tb.appendChild(tr);
-  });
-}
-function useIp(i){
-  var r = LAST[i];
-  if (!r) return;
-  var ta = $('f-preferred');
-  var line = r.ip + ':' + r.port + (r.name ? ('#' + r.name) : '');
-  var exists = false;
-  String(ta.value || '').split(/[\n,;]+/).forEach(function(s){
-    var p = parseIps(s);
-    if (p.length && p[0].ip === r.ip) exists = true;
-  });
-  if (exists){ toast('该 IP 已在优选列表中', 'warn'); return; }
-  var s = ta.value.trim();
-  ta.value = s ? (s + '\n' + line) : line;
-  markDirty();
-  toast('已加入优选列表，点击「保存全部」下发', 'ok');
-}
-function addAllBest(){
-  var n = parseInt($('o-count').value) || 20;
-  var seen = {};
-  var list = [];
-  LAST.filter(function(r){ return r.ok; }).forEach(function(r){
-    if (seen[r.ip] || list.length >= n) return;
-    seen[r.ip] = 1;
-    list.push(r);
-  });
-  if (!list.length){ toast('没有可用结果', 'err'); return; }
-  var arr = [];
-  list.forEach(function(r, i){ arr.push(r.ip + ':' + r.port + '#优选' + (i + 1)); });
-  $('f-preferred').value = arr.join('\n');
-  markDirty();
-  toast('已加入最快的 ' + list.length + ' 个优选 IP，点击「保存全部」下发', 'ok');
-}
-function fetchDomains(){
-  api('domains').then(function(r){
-    if (r && r.ok && r.data && r.data.length){ $('f-preferred').value = r.data.join('\n'); markDirty(); toast('已拉取优选域名', 'ok'); }
-    else toast((r && r.msg) || '拉取失败', 'err');
-  }).catch(function(){ toast('拉取失败：无法连接服务器', 'err'); });
-}
-
 /* ===== 启动 ===== */
 buildNav();
 var initView = 'dashboard';
@@ -5226,11 +4875,64 @@ function isBrowserUA(ua) {
   return (ua || '').toLowerCase().includes('mozilla');
 }
 
+// 安全修复：
+//  - 未设置 ADMIN 时一律拒绝（原版未设密码 = 面板对所有人开放）
+//  - Cookie 改为带过期时间的 HMAC-SHA256 签名令牌（原版为固定的 md5(密码)，泄露后永久有效）
+//  - 常量时间比较 + 登录失败限速
+function timingSafeEqual(a, b) {
+  a = String(a); b = String(b);
+  let r = a.length ^ b.length;
+  const n = Math.max(a.length, b.length);
+  for (let i = 0; i < n; i++) r |= (a.charCodeAt(i) || 0) ^ (b.charCodeAt(i) || 0);
+  return r === 0;
+}
+async function hmacHex(key, msg) {
+  const k = await crypto.subtle.importKey('raw', TE.encode(key), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  const sig = await crypto.subtle.sign('HMAC', k, TE.encode(msg));
+  return Array.from(new Uint8Array(sig)).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+const AUTH_TTL_MS = 24 * 60 * 60 * 1000;
+function authKey(cfg) { return 'cfnext-auth|' + String(cfg.admin) + '|' + String(cfg.uuid); }
+async function makeAuthToken(cfg) {
+  const exp = Date.now() + AUTH_TTL_MS;
+  return exp + '.' + await hmacHex(authKey(cfg), String(exp));
+}
 async function requireAuth(request, cfg) {
-  if (!cfg.admin) return true;
+  if (!cfg.admin) return false;
   const cookies = request.headers.get('Cookie') || '';
   const m = cookies.match(/(?:^|;\s*)luma_auth=([^;]+)/);
-  return !!(m && m[1] === md5hex(String(cfg.admin)));
+  if (!m) return false;
+  const [exp, sig] = m[1].split('.');
+  if (!exp || !sig || !/^\d+$/.test(exp) || Number(exp) < Date.now()) return false;
+  return timingSafeEqual(sig, await hmacHex(authKey(cfg), exp));
+}
+// 登录失败限速（按客户端 IP，同一 Worker 实例内生效，属尽力而为）：15 分钟内最多 5 次失败
+const LOGIN_FAILS = new Map();
+const LOGIN_MAX_FAILS = 5, LOGIN_WINDOW_MS = 15 * 60 * 1000;
+function loginBlocked(ip) {
+  const r = LOGIN_FAILS.get(ip);
+  if (!r) return false;
+  if (Date.now() - r.t > LOGIN_WINDOW_MS) { LOGIN_FAILS.delete(ip); return false; }
+  return r.n >= LOGIN_MAX_FAILS;
+}
+function loginFail(ip) {
+  const r = LOGIN_FAILS.get(ip);
+  if (!r || Date.now() - r.t > LOGIN_WINDOW_MS) LOGIN_FAILS.set(ip, { n: 1, t: Date.now() });
+  else r.n++;
+  if (LOGIN_FAILS.size > 5000) LOGIN_FAILS.clear();
+}
+function safeNext(next, panelPath) {
+  next = String(next || '');
+  return (/^\/[^\/\\]/.test(next)) ? next : ('/' + panelPath);
+}
+// 返回给面板的配置：不下发管理密码与 CF API 令牌明文
+function publicConfig(cfg) {
+  const out = Object.assign({}, cfg, { version: VERSION });
+  out.adminSet = !!cfg.admin;
+  out.cfApiTokenSet = !!cfg.cfApiToken;
+  delete out.admin;
+  delete out.cfApiToken;
+  return out;
 }
 
 async function handleRequest(request, env) {
@@ -5255,12 +4957,17 @@ async function handleRequest(request, env) {
 
   // ---------- 登录 ----------
   if (segs[0] === 'login') {
+    // 安全修复：未设置 ADMIN 时登录页不存在（原版会 302 跳转并暴露面板路径）
+    if (!cfg.admin) return new Response('Not Found', { status: 404 });
     if (request.method === 'POST') {
+      const clientIp = request.headers.get('CF-Connecting-IP') || 'unknown';
+      if (loginBlocked(clientIp)) return json({ ok: false, msg: '尝试次数过多，请 15 分钟后再试' }, 429);
       const body = await request.text();
       const params = new URLSearchParams(body);
-      if (params.get('password') === cfg.admin) {
-        const token = md5hex(String(cfg.admin));
-        return new Response(JSON.stringify({ ok: true, next: params.get('next') || '/' }), {
+      if (timingSafeEqual(params.get('password') || '', cfg.admin)) {
+        LOGIN_FAILS.delete(clientIp);
+        const token = await makeAuthToken(cfg);
+        return new Response(JSON.stringify({ ok: true, next: safeNext(params.get('next'), panelPath) }), {
           status: 200,
           headers: {
             'Content-Type': 'application/json; charset=utf-8',
@@ -5268,12 +4975,10 @@ async function handleRequest(request, env) {
           }
         });
       }
+      loginFail(clientIp);
       return json({ ok: false, msg: '密码错误' }, 403);
     }
-    if (cfg.admin) {
-      return new Response(loginHTML, { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8' } });
-    }
-    return Response.redirect(new URL('/' + panelPath, request.url).href, 302);
+    return new Response(loginHTML, { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8' } });
   }
 
   // 自定义订阅路径（基础配置中设置）作为订阅别名入口：/AAZ/sub 同样命中订阅处理；
@@ -5281,9 +4986,9 @@ async function handleRequest(request, env) {
   const subAlias = String(cfg.subUrl || '').trim().replace(/^\/+/, '').replace(/\/+$/, '');
   const isPanelRoot = segs[0] === panelPath || (!!subAlias && segs[0] === subAlias);
 
-  // 根路径：浏览器访问自动跳转到面板入口，避免 Not Found 困惑（上手即用）
-  if (segs[0] === '' && isBrowserUA(UA)) {
-    return Response.redirect(new URL('/' + panelPath, request.url).href, 302);
+  // 安全修复：根路径不再跳转到面板入口（原版会把面板路径 / UUID 直接告诉任何访问者）
+  if (segs[0] === '') {
+    return new Response('Not Found', { status: 404 });
   }
 
   // ---------- 代理：WebSocket / xhttp ----------
@@ -5346,6 +5051,9 @@ async function handleRequest(request, env) {
 
   // ---------- 面板（浏览器访问） ----------
   if (isPanelRoot && segs.length === 1 && isBrowserUA(UA)) {
+    if (!cfg.admin) {
+      return new Response('面板已禁用：请先在 Worker 环境变量中设置 ADMIN（管理密码），然后重新访问。', { status: 403, headers: { 'Content-Type': 'text/plain; charset=utf-8' } });
+    }
     if (!(await requireAuth(request, cfg))) {
       return Response.redirect(new URL('/login?next=' + encodeURIComponent('/' + panelPath), request.url).href, 302);
     }
@@ -5362,11 +5070,14 @@ async function handleRequest(request, env) {
 
     if (apiName === 'config') {
       if (request.method === 'GET') {
-        return json({ ok: true, data: Object.assign({}, cfg, { version: VERSION }) });
+        return json({ ok: true, data: publicConfig(cfg) });
       }
       if (request.method === 'POST') {
         try {
           const body = await request.json();
+          // 密码 / 令牌留空表示保持不变（面板不再回显明文）
+          if (body.admin === '' || body.admin == null) delete body.admin;
+          if (body.cfApiToken === '' || body.cfApiToken == null) delete body.cfApiToken;
           // 首次保存联动：KV 从未显式设置过 quotaAuto 时，本次保存若已配置 Cloudflare 监控 → 自动调节默认开启
           // （否则表单默认 false 会写入 KV，导致刷新后联动失效；用户后续手动关闭并保存后以用户为准）
           let kvHadQuota = false;
@@ -5385,7 +5096,7 @@ async function handleRequest(request, env) {
           if (body.preferredIPs && Array.isArray(body.preferredIPs)) merged.preferredIPs = body.preferredIPs;
           await saveConfig(env, merged);
           const fresh = await loadConfig(env, request.url);
-          return json({ ok: true, data: Object.assign({}, fresh, { version: VERSION }), msg: '已保存并生效' });
+          return json({ ok: true, data: publicConfig(fresh), msg: '已保存并生效' });
         } catch (e) { return json({ ok: false, msg: '保存失败: ' + (e.message || e) }, 500); }
       }
     }
@@ -5429,58 +5140,14 @@ async function handleRequest(request, env) {
       } catch (e) { return json({ ok: false, msg: '订阅生成失败: ' + (e.message || e) }, 500); }
     }
 
-    if (apiName === 'candidates') {
-      if (request.method !== 'POST') return json({ ok: false, msg: '仅支持 POST' }, 405);
-      try {
-        const body = await request.json().catch(() => ({}));
-        const cand = await collectCandidates(Object.assign({}, cfg.optimizer, body));
-        if (!cand.candidates.length) {
-          const st = cand.stats || {};
-          const why = [st.presetErr && ('预设源: ' + st.presetErr), st.customErr && ('自定义源: ' + st.customErr)].filter(Boolean).join('；');
-          return json({ ok: false, msg: '没有可测的 IP' + (why ? '（' + why + '）' : '，请换一个数据源') }, 400);
-        }
-        return json({ ok: true, data: cand.candidates, stats: cand.stats });
-      } catch (e) { return json({ ok: false, msg: '拉取失败: ' + (e.message || e) }, 500); }
-    }
-
-    if (apiName === 'domains') {
-      try {
-        const src = OPTIMIZE_SOURCES[url.searchParams.get('source') || 'wetest_cname'] || OPTIMIZE_SOURCES.wetest_cname;
-        const res = await fetch(src.url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
-        if (!res.ok) return json({ ok: false, msg: '拉取失败 HTTP ' + res.status });
-        const domains = extractDomains(await res.text());
-        return json({ ok: true, data: domains });
-      } catch (e) { return json({ ok: false, msg: '拉取失败: ' + (e.message || e) }, 500); }
-    }
-
     return json({ ok: false, msg: '未知 API: ' + apiName }, 404);
   }
 
   return new Response('Not Found', { status: 404 });
 }
 
-// 定时自动优选：拉取候选 → 测速 → 取最优写入优选节点
-async function handleScheduled(_controller, env, _ctx) {
-  const auto = String(env.BESTIP_AUTO || '').toLowerCase();
-  if (auto !== '1' && auto !== 'true') return;
-  try {
-    const cfg = await loadConfig(env);
-    const cand = await collectCandidates(cfg.optimizer);
-    const candidates = cand.candidates || [];
-    if (!candidates.length) return;
-    const results = await runLatencyTest(candidates, cfg.optimizer.threads || 5, 5000);
-    const best = results.filter(r => r.ok).slice(0, cfg.optimizer.count || 20);
-    if (!best.length) return;
-    cfg.preferredIPs = best.map(r => ({ ip: r.ip, port: r.port || 443, name: '' }));
-    await saveConfig(env, cfg);
-  } catch (e) { /* 忽略 */ }
-}
-
 export default {
   async fetch(request, env, ctx) {
     return handleRequest(request, Object.assign({}, env, { _ctx: ctx }));
-  },
-  async scheduled(controller, env, ctx) {
-    return handleScheduled(controller, env, ctx);
   }
 };
