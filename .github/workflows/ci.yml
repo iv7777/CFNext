@@ -1,0 +1,20 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: CFNext.js 与 src/ 同步
+        run: node build.mjs --check
+      - name: 语法检查
+        run: node --check CFNext.js
+      - name: 测试
+        run: node --test
