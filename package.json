@@ -1,0 +1,11 @@
+{
+  "name": "cfnext",
+  "private": true,
+  "type": "module",
+  "description": "CFNext：Cloudflare Workers / Pages 代理订阅管理面板（src/ 为源码，CFNext.js 为构建产物）",
+  "scripts": {
+    "build": "node build.mjs",
+    "check": "node build.mjs --check && node --check CFNext.js",
+    "test": "node build.mjs --check && node --test test/"
+  }
+}

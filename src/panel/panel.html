@@ -1,0 +1,402 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CFNext · Cloudflare 隧道面板</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect x='3' y='3' width='18' height='18' rx='5' fill='%23f6821f'/%3E%3Cpath d='M8 15V9l8 6V9' stroke='%230d131b' stroke-width='2' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.min.js"></script>
+<style>
+@include panel.css
+</style>
+</head>
+<body>
+<div class="app">
+
+<!-- ===== 侧边栏 ===== -->
+<aside class="sidebar" id="sidebar">
+  <div class="brand">
+    <div class="mark"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12h4l3-7 4 14 3-7h2"/></svg></div>
+    <div class="bt"><b>CFNext</b><span>Cloudflare 隧道面板</span></div>
+  </div>
+  <nav class="nav" id="nav"></nav>
+  <div class="side-foot">
+    <span>部署版本</span>
+    <span class="ver-chip" id="sideVer" title="点击检测更新" onclick="checkUpdate()">v—</span>
+  </div>
+</aside>
+
+<!-- ===== 主区 ===== -->
+<div class="main">
+  <div class="topbar">
+    <button class="icon-btn hamb" id="hamb" title="菜单"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
+    <h1 id="pageTitle">仪表盘</h1>
+    <span class="pill" id="connPill"><span class="dot"></span><span id="connText">连接中</span></span>
+    <button class="icon-btn" id="themeBtn" title="切换日间 / 夜间"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path id="themeIcon" d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg></button>
+  </div>
+  <div class="wdwarn" id="wdwarn">当前运行在 *.workers.dev 域名上：订阅与节点下发功能正常；若遇连接不稳或访问受限，建议在 Cloudflare 面板绑定自定义域名后使用。</div>
+
+  <div class="content" id="content">
+    <!-- ===== 视图：仪表盘 ===== -->
+    <section class="view" data-view="dashboard">
+      <div class="view-head"><h2>仪表盘</h2><p>快速开始、订阅管理、配额速览与运行状态</p></div>
+      <div class="card">
+        <h3><span class="tick"></span>快速开始</h3>
+        <ol class="steps">
+          <li><b>部署即用</b>：绑定域名后客户端订阅即可获得海量节点（内置 300 条优选 IP 与地区域名源），默认已配好大陆直连分流（大陆应用、微软、苹果直连，国外服务走代理）。</li>
+          <li><b>调优节点</b>：在「优选配置」在线测速，把最优 IP 加入优选列表（自定义订阅模式内置常用订阅源，可自行增删，可追加内置优选池与默认节点）。</li>
+          <li><b>保障额度</b>：在「配额安全」开启用量监控与自动调节，防止免费额度超支（需在面板设置中配置 Cloudflare 账户 ID 与 API 令牌）。</li>
+        </ol>
+      </div>
+      <div class="card">
+        <h3><span class="tick"></span>订阅地址</h3>
+        <div class="row" style="margin-bottom:12px">
+          <div class="field grow" style="margin:0"><label>订阅格式</label>
+            <select id="subFmt">
+              <option value="auto">自动识别</option>
+              <option value="clash">Clash / Mihomo</option>
+              <option value="singbox">Sing-box</option>
+              <option value="surge">Surge</option>
+              <option value="surfboard">Surfboard</option>
+              <option value="loon">Loon</option>
+              <option value="quanx">Quantumult X</option>
+              <option value="v2ray">v2rayN / Shadowrocket</option>
+              <option value="stash">Stash</option>
+              <option value="plain">明文 vless</option>
+            </select>
+          </div>
+        </div>
+        <div class="field"><label>订阅链接</label>
+          <div class="inrow">
+            <input type="text" id="subUrl" readonly onclick="this.select()">
+            <button class="btn sm" onclick="copySub()">复制</button>
+            <button class="btn sm" onclick="toggleQR()">二维码</button>
+            <button class="btn sm" onclick="downloadSub()">下载</button>
+            <button class="btn sm primary" onclick="previewSub()">预览</button>
+          </div>
+        </div>
+        <div id="qrWrap" style="display:none"></div>
+        <p class="hint" style="margin-top:12px" id="subHint"></p>
+        <div id="subPrev" style="display:none;margin-top:12px">
+          <div class="kv"><span class="k">订阅类型</span><span class="v" id="prevType">—</span></div>
+          <div class="kv"><span class="k">节点数量</span><span class="v" id="prevCount">—</span></div>
+          <pre class="code" id="prevBody" style="margin-top:10px"></pre>
+        </div>
+      </div>
+      <div class="card">
+        <h3><span class="tick"></span>地区与线路筛选</h3>
+        <div class="filter-region">
+          <span class="filter-region-label">节点地区</span>
+          <div class="pills">
+            <label class="spill"><input type="checkbox" id="fl-region-all" checked><span>全部地区</span></label>
+            <label class="spill"><input type="checkbox" id="fl-region-HK"><span>香港</span></label>
+            <label class="spill"><input type="checkbox" id="fl-region-TW"><span>台湾</span></label>
+            <label class="spill"><input type="checkbox" id="fl-region-US"><span>美国</span></label>
+            <label class="spill"><input type="checkbox" id="fl-region-SG"><span>新加坡</span></label>
+            <label class="spill"><input type="checkbox" id="fl-region-JP"><span>日本</span></label>
+            <label class="spill"><input type="checkbox" id="fl-region-KR"><span>韩国</span></label>
+            <label class="spill"><input type="checkbox" id="fl-region-DE"><span>德国</span></label>
+          </div>
+        </div>
+        <div class="filter-row">
+          <div class="filter-group">
+            <div class="filter-group-title">IP 类型</div>
+            <div class="pills">
+              <label class="spill"><input type="checkbox" id="fl-ip4" checked><span>IPv4</span></label>
+              <label class="spill"><input type="checkbox" id="fl-ip6" checked><span>IPv6</span></label>
+            </div>
+          </div>
+          <div class="filter-group">
+            <div class="filter-group-title">运营商偏好</div>
+            <div class="pills">
+              <label class="spill"><input type="checkbox" id="fl-isp-m" checked><span>移动</span></label>
+              <label class="spill"><input type="checkbox" id="fl-isp-c" checked><span>联通</span></label>
+              <label class="spill"><input type="checkbox" id="fl-isp-t" checked><span>电信</span></label>
+            </div>
+          </div>
+          <div class="filter-group">
+            <div class="filter-group-title">地址来源</div>
+            <div class="pills nowrap">
+              <label class="spill"><input type="checkbox" id="fl-native"><span>原生地址</span></label>
+              <label class="spill"><input type="checkbox" id="fl-pref-domain" checked><span>优选域名</span></label>
+              <label class="spill"><input type="checkbox" id="fl-pref-ip" checked><span>优选 IP</span></label>
+              <label class="spill"><input type="checkbox" id="fl-custom-pref"><span>自定义优选</span></label>
+              <label class="spill"><input type="checkbox" id="fl-random-pref"><span>随机优选</span></label>
+            </div>
+          </div>
+        </div>
+        <p class="hint" style="margin-top:12px">筛选按 地区 → IP 类型 → 运营商 逐级放宽，任一维度无节点时自动放宽，保证订阅始终非空。「运营商偏好」按节点名称中的运营商标记过滤（移动=移动/CM/CHINAMOBILE、联通=联通/CU/UNICOM、电信=电信/CT/CHINATELECOM），三个全选或节点池无任何运营商标记时不生效。「节点地区」支持多选，仅剔除明确标记为其它地区的节点。「地址来源」控制下发节点的来源：原生地址（工作器域名）、优选域名（第三方优选域名列表）、优选 IP（内置与实时拉取的优选 IP）、自定义优选（「优选配置」保存的优选列表）、随机优选（「优选配置」随机优选模式，与自定义优选互斥）。</p>
+      </div>
+      <div class="card">
+        <h3><span class="tick"></span>配额速览 <span class="sub" id="dbSub">未配置监控</span></h3>
+        <div id="dbWrap" style="display:none">
+          <div class="kv"><span class="k">当日请求量</span><span class="v" id="dbReq">—</span></div>
+          <div style="margin:10px 0 6px;height:8px;border-radius:6px;background:var(--card2);overflow:hidden">
+            <div id="dbBar" style="height:100%;width:0%;border-radius:6px;background:linear-gradient(90deg,var(--ok),var(--accent));transition:width .5s"></div>
+          </div>
+          <div class="kv"><span class="k">已用额度</span><span class="v" id="dbPct">—</span></div>
+        </div>
+        <p class="hint" style="margin-top:10px">免费计划 100,000 次/日。在「面板设置」配置 Cloudflare 监控选项后即可在此查看当日用量；详细策略与自动调节见「配额安全」。</p>
+      </div>
+      <div class="card">
+        <h3><span class="tick"></span>运行状态</h3>
+        <div class="kv"><span class="k">协议</span><span class="v" id="stProto">—</span></div>
+        <div class="kv"><span class="k">KV 持久化</span><span class="v" id="stKv">—</span></div>
+        <div class="kv"><span class="k">面板入口</span><span class="v" id="stEntry">—</span></div>
+      </div>
+    </section>
+
+    <!-- ===== 视图：节点配置（协议 / TLS / ECH / 落地出站） ===== -->
+    <section class="view" data-view="nodes">
+      <div class="view-head"><h2>节点配置</h2><p>代理协议、TLS/ECH、节点测活与落地出站（保存后立即生效）</p></div>
+      <div class="grid3">
+        <div class="card">
+          <h3><span class="tick"></span>协议开关</h3>
+          <div class="proto-row"><label class="switch"><input type="checkbox" id="en-vless" checked><span class="sl"></span></label><span>VLESS 协议（默认开启）</span></div>
+          <div class="proto-row"><label class="switch"><input type="checkbox" id="en-trojan"><span class="sl"></span></label><span>Trojan 协议（支持Mihomo内核）</span></div>
+          <div class="proto-row"><label class="switch"><input type="checkbox" id="en-xhttp"><span class="sl"></span></label><span>XHTTP 协议（支持Mihomo内核，须绑定自定义域名并开启gRPC）</span></div>
+          <div class="field" style="margin-top:12px"><label>Trojan 密码（留空使用 UUID）</label><input type="text" id="tp-pass" placeholder="Trojan 密码" autocomplete="off"></div>
+        </div>
+        <div class="card">
+          <h3><span class="tick"></span>TLS 与传输</h3>
+          <div class="proto-row"><label class="switch"><input type="checkbox" id="tls-only"><span class="sl"></span></label><span>仅 TLS 端口（跳过 80/8080 等明文端口）</span></div>
+          <div class="field" style="margin-top:12px"><label>ALPN 协商（h2 / http/1.1，逗号分隔）</label><input type="text" id="alpn" placeholder="留空自动，如 h2,http/1.1" autocomplete="off"></div>
+          <p class="hint">明文端口节点（80/8080/8880/2052/2082/2086/2095）在开启「仅 TLS」后将从订阅中剔除。</p>
+        </div>
+        <div class="card">
+          <h3><span class="tick"></span>节点测活</h3>
+          <div class="proto-row"><label class="switch"><input type="checkbox" id="q-probe-on"><span class="sl"></span></label><span>节点测活（TCP 探测）</span></div>
+          <p class="hint" style="margin-top:12px">关闭：不做任何 TCP 握手 / HTTP 探测与剔除，节点的下发策略、出入站方式、ProxyIP 等节点相关均按 V1.x版本处理方式处理——按数据源原始顺序全量下发，客户端自行择优。<br>开启：对候选地址做 TCP 探测并剔除判死项（含精选池 / 优选 IP / 域名预检 / ProxyIP 兜底）；Cloudflare 运行时禁止出站连接 CF IP 段，故对 CF 段 IP 跳过探测、直接视为可用（内置精选池实测 97% 可用，不会被误判清空），仅对非 CF 段（反代 / ProxyIP）真实测活剔除死节点。自定义订阅 / 随机优选模式不测活。</p>
+        </div>
+      </div>
+      <div class="card">
+        <h3><span class="tick"></span>ECH 加密（可选）</h3>
+        <div class="proto-row"><label class="switch"><input type="checkbox" id="ech-on"><span class="sl"></span></label><span>启用 ECH 加密（需绑定自定义域名）</span></div>
+        <div class="grid2" style="margin-top:12px">
+          <div class="field" style="margin-bottom:0"><label>ECH 域名（留空用默认 cloudflare-ech.com）</label><input type="text" id="ech-host" placeholder="cloudflare-ech.com" autocomplete="off"></div>
+          <div class="field" style="margin-bottom:0"><label>自定义 ECH DNS（DoH 地址，留空用客户端默认）</label><input type="text" id="ech-dns" placeholder="https://223.5.5.5/dns-query" autocomplete="off"></div>
+        </div>
+        <p class="hint">开启后订阅节点将附带 ech 参数与 alpn 协商，客户端需支持 ECH 才能生效。</p>
+      </div>
+      <div class="card">
+        <h3><span class="tick"></span>落地与出站</h3>
+        <div class="field"><label>反代 / 落地 IP（填写后作为固定出口优先使用；留空则直连失败后由内置地区反代兜底，格式 host 或 host:port）</label><input type="text" id="s-proxyIP" placeholder="留空则直连失败后走内置地区反代" autocomplete="off"></div>
+        <div class="field"><label>出站代理（可选）</label><input type="text" id="s-outbound" placeholder="socks5://user:pass@1.2.3.4:1080 或 ss://chacha20-ietf-poly1305:密码@1.2.3.4:8388" autocomplete="off"></div>
+        <p class="hint">支持 socks5://（可带 user:pass@）、http(s)://、ss:// 或 host:port（默认按 socks5，端口 1080）。SS 加密支持 aes-128-gcm / aes-256-gcm / chacha20-ietf-poly1305。</p>
+        <div class="field" style="margin-bottom:0"><label>出站方式</label>
+          <select id="s-outmode">
+            <option value="">默认（优先代理，失败直连）</option>
+            <option value="no">直连优先（no）</option>
+            <option value="only">仅走代理（only）</option>
+          </select>
+        </div>
+      </div>
+      <div class="card">
+        <h3><span class="tick"></span>保存与生效</h3>
+        <div class="note-box" style="margin:0">所有配置修改后点击右下角「保存全部」才会写入 KV 并生效，保存成功后订阅地址与节点构成立即更新；「重置」将清空 KV 中全部数据并还原为初始部署状态。</div>
+      </div>
+    </section>
+
+    <!-- ===== 视图：优选配置 ===== -->
+    <section class="view" data-view="optimizer">
+      <div class="view-head"><h2>优选配置</h2><p>订阅模式与自定义优选节点</p></div>
+      <div class="card">
+        <h3><span class="tick"></span>优选节点</h3>
+        <div class="grid2">
+          <div class="field" style="margin:0"><label>订阅模式</label>
+            <select id="o-submode" onchange="onSubMode()">
+              <option value="">关闭（使用面板默认节点池）</option>
+              <option value="custom">自定义订阅（支持汇聚）</option>
+              <option value="random">随机优选模式（官方接口）</option>
+            </select>
+          </div>
+          <div class="field" style="margin:0"><label>自定义模式下追加默认节点</label>
+            <select id="o-subinc">
+              <option value="0">关闭（仅自定义节点）</option>
+              <option value="1">开启（追加内置优选池与默认地区源）</option>
+            </select>
+          </div>
+        </div>
+        <div class="field" id="sm-custom" style="margin-top:14px;display:none">
+          <label>优选节点（域名 / 优选 API / IP，每行一个；IP 格式 IP:端口#名称）</label>
+          <textarea id="f-preferred" rows="6" placeholder="*.cloudflare.182682.xyz&#10;104.25.246.53:443#香港&#10;https://bestcf.pages.dev/random-region/HK/100.txt"></textarea>
+          <div class="hint">开启「自定义订阅」后生效；域名与优选 API 保存后自动解析为可用 IP 下发。可用本地工具（如 CloudflareSpeedTest）在自己的网络下测速后，把结果填入此列表。</div>
+        </div>
+        <div class="field" id="sm-random" style="margin-top:14px;display:none">
+          <label>随机优选数量（1-99）</label>
+          <input type="number" id="o-rand" min="1" max="99" value="16">
+          <div class="hint">从 Cloudflare 地址段随机生成指定数量的优选节点直接下发，不经域名解析。</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===== 视图：配额安全 ===== -->
+    <section class="view" data-view="quota">
+      <div class="view-head"><h2>配额安全</h2><p>监控 Cloudflare 账户当日用量，按免费额度自动调节下发规模（需在面板设置中配置 Cloudflare 账户 ID 及 API 令牌）</p></div>
+      <div class="card">
+        <h3><span class="tick"></span>Cloudflare 用量监控 <span class="sub" id="qQuotaSub">未配置</span></h3>
+        <div id="qQuotaWrap">
+          <div class="kv"><span class="k">当日请求量</span><span class="v" id="qReq">—</span></div>
+          <div style="margin:10px 0 6px;height:10px;border-radius:6px;background:var(--card2);overflow:hidden">
+            <div id="qBar" style="height:100%;width:0%;border-radius:6px;background:linear-gradient(90deg,var(--ok),var(--accent));transition:width .5s"></div>
+          </div>
+          <div class="kv"><span class="k">已用额度</span><span class="v" id="qPct">—</span></div>
+          <div class="kv"><span class="k">剩余额度</span><span class="v" id="qRemain">—</span></div>
+          <div class="kv"><span class="k">CPU 时间</span><span class="v" id="qCpu">—</span></div>
+          <div class="kv"><span class="k">子请求数</span><span class="v" id="qSub">—</span></div>
+          <div class="kv"><span class="k">数据更新</span><span class="v" id="qAt">—</span></div>
+        </div>
+        <div id="qQuotaEmpty" style="display:none">
+          <div class="note-box" style="margin:0">尚未配置 Cloudflare 监控：在「面板设置」填写 Cloudflare 账户 ID 与 API 令牌（或部署时配置环境变量 CF_ACCOUNT_ID / CF_API_TOKEN），即可实时查看当日请求量并启用自动调节。</div>
+        </div>
+        <div id="qQuotaErr" style="display:none">
+          <div class="note-box" style="margin:0;border-left-color:var(--err)" id="qQuotaErrText">用量查询失败</div>
+        </div>
+        <div class="row" style="margin-top:14px">
+          <label class="switch"><input type="checkbox" id="q-auto-on"><span class="sl"></span></label>
+          <span style="font-size:13px">自动调节：当日用量 ≥ 60% 时按比例收缩节点上限（保护账户免费额度）</span>
+          <span style="flex:1"></span>
+          <button class="btn sm" onclick="refreshQuota()">刷新用量</button>
+        </div>
+        <p class="hint">自动调节：当日用量达到免费额度 60% 后，节点上限按比例收缩（基准上限 1000 条）——60% 时下发 1000 条、70% 时 750 条、80% 时 500 条、90% 时 250 条、100% 时 100 条（保底下限），用量越高下发越少，保护账户免费额度。</p>
+      </div>
+      <div class="grid2">
+        <div class="card">
+          <h3><span class="tick"></span>下发控制</h3>
+          <div class="proto-row"><label class="switch"><input type="checkbox" id="q-nl-on"><span class="sl"></span></label><span>精确节点数量控制</span></div>
+          <div class="field" style="margin-top:10px"><label>精确节点上限（1-1000）</label><input type="number" id="q-nl-count" min="1" max="1000" value="500"></div>
+          <p class="hint">默认开启：所有格式订阅精确下发到设定数量（默认 500，范围 1-1000），替代原轮询模式的 300/800 分档上限；勾选三种协议时节点总数仍为设定值（不再按协议 3 倍膨胀）。</p>
+        </div>
+        <div class="card">
+          <h3><span class="tick"></span>轮询换新</h3>
+          <div class="proto-row"><label class="switch"><input type="checkbox" id="q-poll-on"><span class="sl"></span></label><span>启用轮询（默认关闭）</span></div>
+          <p class="hint" style="margin-top:12px">默认关闭：一次性下发全部节点，不受 300/800 上限限制；开启后按格式上限轮换下发新 IP（200 条去重窗口，避免重复下发）；端口固定 443（1.0.6 机制），换新通过 IP 轮换实现。</p>
+        </div>
+      </div>
+      <div class="card">
+        <h3><span class="tick"></span>当前下发策略</h3>
+        <div class="grid3">
+          <div class="field" style="margin:0"><div class="kv"><span class="k">节点数量控制</span><span class="v" id="qNl">—</span></div><div class="kv"><span class="k">精确节点上限</span><span class="v" id="qNlCount">—</span></div></div>
+          <div class="field" style="margin:0"><div class="kv"><span class="k">节点测活</span><span class="v" id="qProbe">—</span></div><div class="kv"><span class="k">轮询换新机制</span><span class="v" id="qPoll">—</span></div></div>
+          <div class="field" style="margin:0"><div class="kv"><span class="k">行式格式上限</span><span class="v">800 节点</span></div><div class="kv"><span class="k">结构化格式上限</span><span class="v">300 节点</span></div></div>
+        </div>
+        <p class="hint" style="margin-top:10px">每次订阅请求都会消耗 Worker 的 CPU 时间（免费计划 10ms/请求）。面板按「免费额度 → 格式 → 节点数」逐层设防，保证稳定运行。</p>
+      </div>
+      <div class="card">
+        <h3><span class="tick"></span>保护机制说明</h3>
+        <div class="note-box">四道防线（按生效优先级从高到低）：① 用量监控——查看当日请求量，为自动调节提供数据；② 自动调节——用量 ≥60% 时按比例收缩节点上限，位于计算链末端以 min 收敛，只收紧、永不放大，优先级最高且与轮询状态无关；③ 数量上限（下发控制）——按设定值精确限制，全局生效（轮询开/关均受限）；④ 格式分档与轮询去重——结构化/行式格式上限与轮询去重换新。各层上限冲突时取较小值，让订阅生成的 CPU 消耗始终处于免费额度内。</div>
+      </div>
+    </section>
+
+    <!-- ===== 视图：面板设置 ===== -->
+    <section class="view" data-view="account">
+      <div class="view-head"><h2>面板设置</h2><p>部署基础信息：UUID、面板路径、管理密码与绑定域名</p></div>
+      <div class="card">
+        <h3><span class="tick"></span>基础配置</h3>
+        <div class="field"><label>UUID（订阅节点身份）</label>
+          <div class="inrow">
+            <input type="text" id="a-uuid" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" autocomplete="off">
+            <button class="btn sm" onclick="genUuid()">生成</button>
+          </div>
+        </div>
+        <div class="field"><label>面板路径（访问入口，留空用 UUID）</label><input type="text" id="a-path" placeholder="留空自动使用 UUID" autocomplete="off"></div>
+        <div class="field"><label>自定义订阅路径（只填 UUID/别名段，如 AAZ；留空用面板路径）</label><input type="text" id="a-suburl" placeholder="AAZ" autocomplete="off"></div>
+        <div class="field"><label>管理密码（留空保持不变；未设置时面板禁用）</label><input type="password" id="a-admin" placeholder="设置后访问面板需登录" autocomplete="new-password"></div>
+        <div class="field" style="margin-bottom:0"><label>绑定域名（留空使用 *.workers.dev）</label><input type="text" id="a-host" placeholder="node.example.com" autocomplete="off"></div>
+        <p class="hint" style="margin-top:10px">「绑定域名」仅用于订阅节点主机名（XHTTP 协议要求绑定自定义域名），不负责域名解析。自定义域名访问面板需先在 Cloudflare 面板 → Workers 与 Pages → 该 Worker → Domains &amp; Routes 添加自定义域名（DNS 由 Cloudflare 托管，证书自动签发），此字段留空即使用 *.workers.dev。KV 未绑定时配置只在内存中生效，重置后回到默认值。</p>
+      </div>
+      <div class="card">
+        <h3><span class="tick"></span>Cloudflare 监控选项（可选）</h3>
+        <div class="grid2">
+          <div class="field" style="margin:0"><label>账户 ID（Account Tag）</label><input type="text" id="a-cfid" placeholder="32 位十六进制 ID，位于 dash.cloudflare.com 右侧栏「账户 ID」" autocomplete="off"></div>
+          <div class="field" style="margin:0"><label>API 令牌（Bearer）</label><input type="password" id="a-cftoken" placeholder="40 位令牌（My Profile → API Tokens 创建）" autocomplete="new-password"></div>
+        </div>
+        <p class="hint" style="margin-top:10px">账户 ID 是 32 位十六进制字符串（<b>不是邮箱</b>），打开并登录Cloudflare账户后，点击「左侧栏」→「管理账户」→「帐户 API 令牌」→「创建令牌」。查询失败提示 401 时请检查这两项是否填错。</p>
+      </div>
+      <div class="card">
+        <h3><span class="tick"></span>备份与恢复</h3>
+        <p class="hint" style="margin-top:0;margin-bottom:12px">以 JSON 格式导出全部面板设置（含协议、优选、筛选、配额监控），可保存到本地或迁移到其他部署；导入后请点右下角「保存全部」生效。</p>
+        <div class="inrow">
+          <button class="btn" onclick="exportConfig()">导出配置</button>
+          <button class="btn" onclick="$('importFile').click()">导入配置</button>
+          <input type="file" id="importFile" accept=".json,application/json" style="display:none" onchange="importConfig(this)">
+        </div>
+      </div>
+      <div class="card">
+        <h3><span class="tick"></span>运行信息</h3>
+        <div class="kv"><span class="k">面板版本</span><span class="v" id="aVer">—</span></div>
+        <div class="kv"><span class="k">KV 持久化</span><span class="v" id="aKv">—</span></div>
+        <div class="kv"><span class="k">轮询窗口</span><span class="v">最近 200 条</span></div>
+        <div class="kv"><span class="k">构建日期</span><span class="v">2026-09-21</span></div>
+      </div>
+      <div class="danger-zone">
+        <h3 style="margin-bottom:8px;color:var(--err)">危险操作</h3>
+        <p style="font-size:13px;color:var(--dim);margin-bottom:12px">重置将清空 KV 中全部数据（面板配置 + 已下发节点记录），面板还原为初始部署状态，不可恢复。</p>
+        <button class="btn danger" onclick="resetAll()">重置全部数据</button>
+      </div>
+    </section>
+
+    <!-- ===== 视图：关于 ===== -->
+    <section class="view" data-view="about">
+      <div class="view-head"><h2>关于项目</h2><p>CFNext — Cloudflare 全新代理管理面板（独立界面 + 独立实现）</p></div>
+      <div class="card">
+        <h3><span class="tick"></span>相关链接</h3>
+        <p style="font-size:13px;color:var(--dim)">YouTube @数字派：<a href="https://www.youtube.com/@PAI_CN" target="_blank" rel="noopener">youtube.com/@PAI_CN</a></p>
+        <p style="font-size:13px;color:var(--dim);margin-top:6px">Telegram 交流群：<a href="https://t.me/SZ_PAI" target="_blank" rel="noopener">t.me/SZ_PAI</a></p>
+      </div>
+      <div class="card">
+        <h3><span class="tick"></span>特别鸣谢</h3>
+        <p style="font-size:13px;color:var(--dim);margin-bottom:10px">本面板为全新独立设计/全新编写：后端代理、订阅与优选逻辑参考以下开源项目的功能清单</p>
+        <div class="tbl-wrap"><table>
+          <colgroup><col style="width:34%"><col style="width:66%"></colgroup>
+          <thead><tr><th>参考仓库</th><th>地址</th></tr></thead>
+          <tbody>
+            <tr><td>cmliu/edgetunnel</td><td><a href="https://github.com/cmliu/edgetunnel" target="_blank" rel="noopener">github.com/cmliu/edgetunnel</a></td></tr>
+            <tr><td>zizifn/edgetunnel</td><td><a href="https://github.com/zizifn/edgetunnel" target="_blank" rel="noopener">github.com/zizifn/edgetunnel</a></td></tr>
+            <tr><td>6Kmfi6HP/EDtunnel</td><td><a href="https://github.com/6Kmfi6HP/EDtunnel" target="_blank" rel="noopener">github.com/6Kmfi6HP/EDtunnel</a></td></tr>
+            <tr><td>IonRh/Cloudflare-BestIP</td><td><a href="https://github.com/IonRh/Cloudflare-BestIP" target="_blank" rel="noopener">github.com/IonRh/Cloudflare-BestIP</a></td></tr>
+            <tr><td>zvos/CF-Workers-Monitor</td><td><a href="https://github.com/zvos/CF-Workers-Monitor" target="_blank" rel="noopener">github.com/zvos/CF-Workers-Monitor</a></td></tr>
+            <tr><td>MetaCubeX/meta-rules-dat</td><td><a href="https://github.com/MetaCubeX/meta-rules-dat" target="_blank" rel="noopener">github.com/MetaCubeX/meta-rules-dat</a></td></tr>
+            <tr><td>666OS/rules</td><td><a href="https://github.com/666OS/rules" target="_blank" rel="noopener">github.com/666OS/rules</a></td></tr>
+            <tr><td>DustinWin/ruleset_geodata</td><td><a href="https://github.com/DustinWin/ruleset_geodata" target="_blank" rel="noopener">github.com/DustinWin/ruleset_geodata</a></td></tr>
+            <tr><td>blackmatrix7/ios_rule_script</td><td><a href="https://github.com/blackmatrix7/ios_rule_script" target="_blank" rel="noopener">github.com/blackmatrix7/ios_rule_script</a></td></tr>
+            <tr><td>TG-Twilight/AWAvenue-Ads-Rule</td><td><a href="https://github.com/TG-Twilight/AWAvenue-Ads-Rule" target="_blank" rel="noopener">github.com/TG-Twilight/AWAvenue-Ads-Rule</a></td></tr>
+            <tr><td>Koolson/Qure</td><td><a href="https://github.com/Koolson/Qure" target="_blank" rel="noopener">github.com/Koolson/Qure</a></td></tr>
+          </tbody>
+        </table></div>
+      </div>
+      <div class="card">
+        <h3><span class="tick"></span>调用接口</h3>
+        <div class="tbl-wrap"><table>
+          <colgroup><col style="width:40%"><col style="width:60%"></colgroup>
+          <thead><tr><th>用途</th><th>接口</th></tr></thead>
+          <tbody>
+            <tr><td>HostMonit 优选</td><td class="mono">stock.hostmonit.com/CloudFlareYes</td></tr>
+            <tr><td>优选 IP 列表</td><td class="mono">cf.090227.xyz/ip.164746.xyz</td></tr>
+            <tr><td>bestcf 地区优选池</td><td class="mono">bestcf.pages.dev/random-region/{HK|TW|JP|SG|US|KR}/100.txt</td></tr>
+            <tr><td>DoH 解析</td><td class="mono">cloudflare-dns.com / dns.alidns.com / doh.pub</td></tr>
+            <tr><td>Cloudflare 用量监控（GraphQL）</td><td class="mono">api.cloudflare.com/client/v4/graphql</td></tr>
+            <tr><td>版本更新检测</td><td class="mono">raw.githubusercontent.com/iv7777/CFNext/...</td></tr>
+            <tr><td>远程规则集（sing-box / Clash）</td><td class="mono">raw.githubusercontent.com/MetaCubeX/meta-rules-dat/...</td></tr>
+            <tr><td>面板二维码库</td><td class="mono">cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.min.js</td></tr>
+          </tbody>
+        </table></div>
+      </div>
+    </section>
+  </div>
+</div>
+</div>
+
+<div class="fbar">
+  <span class="saved-at" id="savedAt">尚未保存</span>
+  <button class="btn danger" id="resetBtn" onclick="resetAll()">重置</button>
+  <button class="btn primary" id="saveBtn" onclick="saveAll()"><span class="dirty-dot"></span>保存全部</button>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+@include panel.js
+</script>
+</body>
+</html>
+
