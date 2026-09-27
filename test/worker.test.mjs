@@ -231,3 +231,31 @@ test('面板页面注入字段表与共用校验函数', async () => {
     for (const id of [d.el, ...Object.values(d.els || {})].filter(Boolean)) assert.ok(html.includes(`id="${id}"`), `缺少控件 #${id}（${d.key}）`);
   }
 });
+
+test('检测更新：以仓库 CFNext.js 为基准，明文版直接复用其内容，60 秒内走缓存', async () => {
+  const env = baseEnv();
+  const cookie = await login(env);
+  const offline = globalThis.fetch;
+  const seen = [];
+  globalThis.fetch = async (url) => {
+    seen.push(String(url));
+    if (String(url) === 'https://raw.githubusercontent.com/iv7777/CFNext/main/CFNext.js') {
+      return new Response("// banner\nconst VERSION = '9.9.9';\n// …\n");
+    }
+    return new Response('Not Found', { status: 404 });
+  };
+  try {
+    const r = await (await call(env, `/${UUID}/api/update`, { cookie })).json();
+    assert.equal(r.ok, true);
+    assert.equal(r.data.latest, '9.9.9');
+    assert.equal(r.data.hasUpdate, true);
+    assert.equal(r.data.kind, '明文');
+    assert.match(r.data.code, /const VERSION = '9\.9\.9'/);
+    assert.deepEqual(seen, ['https://raw.githubusercontent.com/iv7777/CFNext/main/CFNext.js'], '只请求一次 CFNext.js');
+    const again = await (await call(env, `/${UUID}/api/update`, { cookie })).json();
+    assert.equal(again.data.latest, '9.9.9');
+    assert.equal(seen.length, 1, '60 秒内复用缓存');
+  } finally {
+    globalThis.fetch = offline;
+  }
+});

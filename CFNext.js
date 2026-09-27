@@ -15,7 +15,7 @@
 //    TROJAN_PASSWORD  Trojan 密码（开启 Trojan 时必填）
 //    ALPN         自定义 ALPN 协商（可选）
 //    YX           自定义优选 IP 列表（可选，格式 IP:port#名称，逗号分隔）
-//    DEPLOY_EDITION 部署形态标注：明文版 / 混淆版（手动维护），决定版本号检测更新时拉取的仓库代码
+//    DEPLOY_EDITION 部署形态标注：明文版 / 混淆版（手动维护），决定检测更新时拉取的仓库代码（明文版 CFNext.js / 混淆版 CFNext 混淆版.js）
 //    CF_ACCOUNT_ID CF 账户监控：账户 ID（可选，与 CF_API_TOKEN 同时设置后可在面板查看当日用量）
 //    CF_API_TOKEN  CF 账户监控：API 令牌（可选，需 Workers 用量分析读取权限，如 Account Analytics 读权限）
 //    K            已绑定 KV 命名空间时读取图形化配置
@@ -25,8 +25,8 @@ import { connect } from 'cloudflare:sockets';
 const VERSION = '2.0.2';
 
 // 部署形态标注（手动维护）：明文版部署保持「明文版」；生成混淆版部署前，请将下方标注手动改为「混淆版」。
-// 更新检测时：统一以仓库「CFNext 明文版.js」的版本号为比对基准（明文与混淆同步发布同一版本号），
-// 有更新时按本标注拉取对应仓库代码——明文版 → CFNext 明文版.js，混淆版 → CFNext 混淆版.js。
+// 更新检测时：统一以仓库「CFNext.js」的版本号为比对基准（明文与混淆同步发布同一版本号），
+// 有更新时按本标注拉取对应仓库代码——明文版 → CFNext.js，混淆版 → CFNext 混淆版.js。
 const DEPLOY_EDITION = '明文版';
 
 function deployKind(){
@@ -36,8 +36,10 @@ function deployKind(){
 }
 
 // 更新检测：点击版本号后拉取仓库代码比对版本号；有新版本时返回最新代码供面板复制
-// 明文版与混淆版同步发布同一版本号：版本基准统一用「CFNext 明文版.js」，按自身形态复制对应代码
+// 明文版与混淆版同步发布同一版本号：版本基准统一用仓库根目录的「CFNext.js」，按自身形态复制对应代码
 const UPDATE_REPO = 'iv7777/CFNext';
+const UPDATE_FILE_PLAIN = 'CFNext.js';          // 明文版（即仓库中由 build.mjs 生成的部署文件）
+const UPDATE_FILE_OBF = 'CFNext 混淆版.js';      // 混淆版
 let UPDATE_CACHE = null; // { t, r } 60 秒缓存
 
 function parseVer(v){
@@ -55,47 +57,38 @@ function extractVersion(txt){
   const m = txt.match(/const\s+VERSION\s*=\s*['"]([^'"]+)['"]/);
   return m ? m[1] : null;
 }
+function updateFileUrl(name){
+  return 'https://raw.githubusercontent.com/' + UPDATE_REPO + '/main/' + encodeURIComponent(name);
+}
+// 拉取仓库文件：返回 { txt, version }，失败返回 { error }
+async function fetchRepoFile(name){
+  try {
+    const res = await fetch(updateFileUrl(name), { headers: { 'User-Agent': 'Mozilla/5.0 (CFNext)' } });
+    if (!res.ok) return { error: name + ' HTTP ' + res.status };
+    const txt = await res.text();
+    return { txt, version: extractVersion(txt) };
+  } catch (e) { return { error: (e && e.message) || String(e) }; }
+}
 async function checkUpdate(env){
   const now = Date.now();
   if (UPDATE_CACHE && now - UPDATE_CACHE.t < 60000) return UPDATE_CACHE.r;
   const kindName = deployKind() === 'obfuscated' ? '混淆' : '明文';   // 自身形态（读取 DEPLOY_EDITION 标注）
-  let latest = null, code = '', err = '';
-  // 版本基准统一用明文文件（明文与混淆同步发布同一版本号）
-  const plainUrl = 'https://raw.githubusercontent.com/' + UPDATE_REPO + '/main/' + encodeURIComponent('CFNext 明文版.js');
-  try {
-    const res = await fetch(plainUrl, { headers: { 'User-Agent': 'Mozilla/5.0 (CFNext)' } });
-    if (res.ok) {
-      const txt = await res.text();
-      const v = extractVersion(txt);
-      if (v) latest = v;
-    }
-  } catch (e) { err = (e && e.message) || String(e); }
-  if (latest) {
-    // 按自身形态拉取对应最新代码：明文→明文文件；混淆→轻混淆文件
-    const wantFile = kindName === '混淆' ? 'CFNext 混淆版.js' : 'CFNext 明文版.js';
-    const codeUrl = 'https://raw.githubusercontent.com/' + UPDATE_REPO + '/main/' + encodeURIComponent(wantFile);
-    try {
-      const res = await fetch(codeUrl, { headers: { 'User-Agent': 'Mozilla/5.0 (CFNext)' } });
-      if (res.ok) code = await res.text();
-    } catch (e) { /* 代码拉取失败不阻断版本判断 */ }
+  const done = (latest, code) => {
     UPDATE_CACHE = { t: now, r: { current: VERSION, kind: kindName, latest, hasUpdate: cmpVer(latest, VERSION) > 0, code, checkedAt: now } };
     return UPDATE_CACHE.r;
+  };
+  // 版本基准统一用明文文件（明文与混淆同步发布同一版本号）；明文版直接复用这次拉取的内容作为最新代码，不再重复请求
+  const plain = await fetchRepoFile(UPDATE_FILE_PLAIN);
+  if (plain.version) {
+    if (kindName !== '混淆') return done(plain.version, plain.txt);
+    // 混淆版：按自身形态拉取混淆文件；拉取失败时 code 为空，面板提示「未能获取代码」
+    const obf = await fetchRepoFile(UPDATE_FILE_OBF);
+    return done(plain.version, obf.txt || '');
   }
-  // 兜底：明文文件不可达时尝试混淆文件版本
-  const obfUrl = 'https://raw.githubusercontent.com/' + UPDATE_REPO + '/main/' + encodeURIComponent('CFNext 混淆版.js');
-  try {
-    const res = await fetch(obfUrl, { headers: { 'User-Agent': 'Mozilla/5.0 (CFNext)' } });
-    if (res.ok) {
-      const txt = await res.text();
-      const v = extractVersion(txt);
-      if (v) latest = v;
-    }
-  } catch (e) { err = (e && e.message) || String(e); }
-  if (latest) {
-    UPDATE_CACHE = { t: now, r: { current: VERSION, kind: kindName, latest, hasUpdate: cmpVer(latest, VERSION) > 0, code: '', checkedAt: now } };
-    return UPDATE_CACHE.r;
-  }
-  return { current: VERSION, kind: kindName, latest: null, hasUpdate: false, code: '', error: err || '未在仓库中找到版本信息' };
+  // 兜底：明文文件不可达时尝试混淆文件版本（混淆版部署可直接使用其内容）
+  const obf = await fetchRepoFile(UPDATE_FILE_OBF);
+  if (obf.version) return done(obf.version, kindName === '混淆' ? obf.txt : '');
+  return { current: VERSION, kind: kindName, latest: null, hasUpdate: false, code: '', error: plain.error || obf.error || '未在仓库中找到版本信息' };
 }
 
 const CLASH_TEMPLATE = `
