@@ -21,7 +21,7 @@
 // ============================================================================
 import { connect } from 'cloudflare:sockets';
 
-const VERSION = '2.0.1';
+const VERSION = '2.0.2';
 
 // 部署形态标注（手动维护）：明文版部署保持「明文版」；生成混淆版部署前，请将下方标注手动改为「混淆版」。
 // 更新检测时：统一以仓库「CFNext 明文版.js」的版本号为比对基准（明文与混淆同步发布同一版本号），
@@ -999,6 +999,10 @@ async function loadConfig(env) {
       }
     } catch (e) { /* KV 读取失败忽略 */ }
   }
+  // 修复：ADMIN / D 环境变量优先于 KV。原版 Object.assign(cfg, kvCfg) 会用 KV 里残留的
+  // admin:''（旧版面板在未设密码时保存写入）和 path 覆盖环境变量，导致设置了 ADMIN 仍提示「面板已禁用」
+  if (env.ADMIN || env.admin) cfg.admin = String(env.ADMIN || env.admin);
+  if (env.D || env.PATH) cfg.path = String(env.D || env.PATH);
   // 清理已废弃字段（fragment 分片功能已移除，避免 KV 残留字段混入配置）
   delete cfg.fragment;
   delete cfg.fragmentParam;
@@ -1023,6 +1027,9 @@ async function saveConfig(env, cfg) {
   if (!env.K || typeof env.K.put !== 'function') return false;
   const clone = JSON.parse(JSON.stringify(cfg));
   if (clone.admin) clone.admin = String(clone.admin);
+  // 由环境变量提供的密码与路径不写入 KV（避免明文密码落盘，也避免与环境变量不一致）
+  if (env.ADMIN || env.admin) delete clone.admin;
+  if (env.D || env.PATH) delete clone.path;
   await env.K.put('config', JSON.stringify(clone));
   invalidateConfigCache();   // 内存缓存已移除；KV put 后内部缓存层自动以新值重校验，保存后读取即为新配置
   return true;
