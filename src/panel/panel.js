@@ -246,6 +246,21 @@ function renderQuota(){
   var pa = !!(CFG && CFG.probeAlive);
   $('qProbe').textContent = pa ? '已开启（剔除死节点，体感更快）' : '关闭（不测活，按 V1.x 原序下发）';
   $('qProbe').className = 'v ' + (pa ? 'warn' : 'ok');
+  renderCaps();
+}
+// 当前生效的节点上限：由服务端按已保存配置计算（与生成订阅同一函数），叠加配额自动调节后的收紧值
+var QUOTA_CAP = null;
+function capText(n){
+  if (n == null) return '—';
+  var eff = QUOTA_CAP ? Math.min(n, QUOTA_CAP) : n;
+  var t = eff >= 10000 ? '不限（最多 10000）' : eff + ' 节点';
+  if (QUOTA_CAP && QUOTA_CAP < n) t += '（配额自动调节）';
+  return t;
+}
+function renderCaps(){
+  var c = (CFG && CFG.caps) || {};
+  $('qCapLight').textContent = capText(c.light);
+  $('qCapHeavy').textContent = capText(c.heavy);
 }
 function fmtNum(n){
   if (n == null || isNaN(n)) return '—';
@@ -271,6 +286,8 @@ function quotaErrText(e){
 }
 function renderQuotaData(d){
   updDbQuota(d);
+  QUOTA_CAP = (d && d.quotaCap) || null;
+  renderCaps();
   if (!d || !d.configured){
     $('qQuotaSub').textContent = '未配置';
     showQuotaState('empty');
@@ -333,78 +350,8 @@ function renderPreferred(){
   });
   $('f-preferred').value = lines.join('\n');
 }
-function fillForm(){
-  if (!CFG) return;
-  $('en-vless').checked = CFG.enableVless !== false;
-  $('en-trojan').checked = !!CFG.enableTrojan;
-  $('tp-pass').value = CFG.trojanPassword || '';
-  $('en-xhttp').checked = !!CFG.enableXhttp;
-  $('tls-only').checked = !!CFG.tlsOnly;
-  $('alpn').value = CFG.alpn || '';
-  $('ech-on').checked = !!CFG.ech;
-  $('ech-host').value = CFG.echHost || '';
-  $('ech-dns').value = CFG.echDns || '';
-  var fl = CFG.filter || {};
-  var region = fl.region || 'all';
-  var regionArr = Array.isArray(region) ? region : (region === 'all' ? ['all'] : [region]);
-  $('fl-region-all').checked = regionArr.indexOf('all') >= 0;
-  ['HK', 'TW', 'US', 'SG', 'JP', 'KR', 'DE'].forEach(function(r){ $('fl-region-' + r).checked = regionArr.indexOf(r) >= 0; });
-  var ipType = fl.ipType || ['IPv4', 'IPv6'];
-  $('fl-ip4').checked = ipType.indexOf('IPv4') >= 0;
-  $('fl-ip6').checked = ipType.indexOf('IPv6') >= 0;
-  var isp = fl.isp || ['移动', '联通', '电信'];
-  $('fl-isp-m').checked = isp.indexOf('移动') >= 0;
-  $('fl-isp-c').checked = isp.indexOf('联通') >= 0;
-  $('fl-isp-t').checked = isp.indexOf('电信') >= 0;
-  var src = CFG.src || {};
-  $('fl-native').checked = src.native === true;
-  $('fl-pref-domain').checked = src.prefDomain !== false;
-  $('fl-pref-ip').checked = src.prefIp !== false;
-  $('fl-custom-pref').checked = src.customPref === true;
-  var o = CFG.optimizer || {};
-  $('o-submode').value = o.subMode || '';
-  $('o-subinc').value = (o.subIncludeDefault ? '1' : '0');
-  $('o-rand').value = o.subRandomCount == null ? 16 : o.subRandomCount;
-  $('q-nl-on').checked = !!CFG.nodeLimit;
-  $('q-nl-count').value = CFG.nodeLimitCount || 500;
-  $('q-poll-on').checked = CFG.polling !== false;
-  $('q-probe-on').checked = !!CFG.probeAlive;
-  $('q-auto-on').checked = !!CFG.quotaAuto;
-  $('a-uuid').value = CFG.uuid || '';
-  $('a-path').value = CFG.path || '';
-  $('a-suburl').value = CFG.subUrl || '';
-  $('a-admin').value = '';
-  $('a-admin').placeholder = CFG.adminSet ? '已设置（留空保持不变）' : '未设置';
-  $('a-host').value = CFG.host || '';
-  $('a-cfid').value = CFG.cfAccountId || '';
-  $('a-cftoken').value = '';
-  $('a-cftoken').placeholder = CFG.cfApiTokenSet ? '已设置（留空保持不变）' : '40 位令牌（My Profile → API Tokens 创建）';
-  $('s-proxyIP').value = CFG.proxyIP || '';
-  $('s-outbound').value = CFG.outboundProxy || '';
-  $('s-outmode').value = CFG.outboundMode || '';
-  renderPreferred();
-  bindRegionPills();
-  onSubMode();
-}
-// 节点地区多选互斥：勾选具体地区时取消「全部地区」；全部取消时自动恢复「全部地区」（保证筛选非空）
-function bindRegionPills(){
-  if (window.__regionPillsBound) return;
-  window.__regionPillsBound = true;
-  var codes = ['HK', 'TW', 'US', 'SG', 'JP', 'KR', 'DE'];
-  var all = $('fl-region-all');
-  all.addEventListener('change', function(){
-    if (all.checked) codes.forEach(function(r){ $('fl-region-' + r).checked = false; });
-  });
-  codes.forEach(function(c){
-    $('fl-region-' + c).addEventListener('change', function(){
-      if ($('fl-region-' + c).checked) all.checked = false;
-      var any = codes.some(function(r){ return $('fl-region-' + r).checked; });
-      if (!any) all.checked = true;
-    });
-  });
-}
-function collectForm(){
-  if (!CFG) return null;
+// 「优选节点」输入框同时承载 preferredDomains 与 preferredIPs：合法 IP 行归入 preferredIPs（按 IP:端口 去重），其余归入 preferredDomains
+function collectPreferred(){
   var ipLines = [], domLines = [];
   String($('f-preferred').value).split(/[\n,;]+/).map(function(s){ return s.trim(); }).filter(Boolean).forEach(function(s){
     if (parseIps(s).length) ipLines.push(s); else domLines.push(s);
@@ -418,74 +365,203 @@ function collectForm(){
     seen[k] = 1;
     ips.push(p[0]);
   });
-  return {
-    uuid: $('a-uuid').value.trim(),
-    path: $('a-path').value.trim() || $('a-uuid').value.trim(),
-    subUrl: $('a-suburl').value.trim(),
-    admin: $('a-admin').value,
-    host: $('a-host').value.trim(),
-    alpn: $('alpn').value,
-    ech: $('ech-on').checked,
-    echHost: $('ech-host').value.trim() || 'cloudflare-ech.com',
-    echDns: $('ech-dns').value.trim(),
-    tlsOnly: $('tls-only').checked,
-    nodeLimit: $('q-nl-on').checked,
-    nodeLimitCount: parseInt($('q-nl-count').value) || 500,
-    polling: $('q-poll-on').checked,
-    probeAlive: $('q-probe-on').checked,
-    cfAccountId: $('a-cfid').value.trim(),
-    cfApiToken: $('a-cftoken').value.trim(),
-    quotaAuto: $('q-auto-on').checked,
-    enableVless: $('en-vless').checked,
-    enableTrojan: $('en-trojan').checked,
-    trojanPassword: $('tp-pass').value,
-    enableXhttp: $('en-xhttp').checked,
-    proxyIP: $('s-proxyIP').value.trim(),
-    outboundProxy: $('s-outbound').value.trim(),
-    outboundMode: $('s-outmode').value,
-    preferredDomains: domLines.join('\n'),
-    preferredIPs: ips,
-    optimizer: {
-      fillCount: 0,
-      subMode: $('o-submode').value,
-      subRandomCount: parseInt($('o-rand').value) || 16,
-      subIncludeDefault: $('o-subinc').value === '1'
-    },
-    filter: {
-      region: (function(){
-        if ($('fl-region-all').checked) return ['all'];
-        var a = [];
-        ['HK', 'TW', 'US', 'SG', 'JP', 'KR', 'DE'].forEach(function(r){ if ($('fl-region-' + r).checked) a.push(r); });
-        return a.length ? a : ['all'];
-      })(),
-      ipType: (function(){ var a = []; if ($('fl-ip4').checked) a.push('IPv4'); if ($('fl-ip6').checked) a.push('IPv6'); return a; })(),
-      isp: (function(){ var a = []; if ($('fl-isp-m').checked) a.push('移动'); if ($('fl-isp-c').checked) a.push('联通'); if ($('fl-isp-t').checked) a.push('电信'); return a; })()
-    },
-    src: {
-      native: $('fl-native').checked,
-      prefDomain: $('fl-pref-domain').checked,
-      prefIp: $('fl-pref-ip').checked,
-      customPref: $('fl-custom-pref').checked
-    }
-  };
+  return { domains: domLines.join('\n'), ips: ips };
 }
+
+/* ===== 配置表单：由服务端字段表 SCHEMA 驱动 =====
+ * SCHEMA（字段表）与 sharedCheck（字段校验函数）由服务端下发页面时注入，与服务端保存接口使用同一份定义与校验代码。
+ * 新增配置项：在 worker 的 CONFIG_SCHEMA 加一行，并在本页面放置 id 与该行 el 对应的控件即可，
+ * 回填 / 收集 / 未保存标记 / 字段级错误提示 / 环境变量只读均自动生效。 */
+var SCHEMA = /*@CFNEXT_SCHEMA@*/null || [];
+var sharedCheck = /*@CFNEXT_CHECK@*/null;
+var SCHEMA_BY_KEY = {};
+SCHEMA.forEach(function(d){ SCHEMA_BY_KEY[d.key] = d; });
+function checkValue(def, v){
+  // 共用校验函数不可用（如混淆版改写了函数体）时跳过前端校验，由服务端校验兜底
+  if (typeof sharedCheck !== 'function') return { value: v };
+  try { return sharedCheck(def, v); } catch (e) { return { value: v }; }
+}
+function getPath(o, key){
+  var ks = key.split('.');
+  for (var i = 0; i < ks.length; i++){ if (o == null || typeof o !== 'object') return undefined; o = o[ks[i]]; }
+  return o;
+}
+function setPath(o, key, v){
+  var ks = key.split('.');
+  for (var i = 0; i < ks.length - 1; i++){ if (o[ks[i]] == null || typeof o[ks[i]] !== 'object') o[ks[i]] = {}; o = o[ks[i]]; }
+  o[ks[ks.length - 1]] = v;
+}
+function schemaEls(d){
+  var ids = [];
+  if (d.el) ids.push(d.el);
+  if (d.els) for (var k in d.els) ids.push(d.els[k]);
+  return ids;
+}
+function lockedEnv(key){ return (CFG && CFG.envLocked && CFG.envLocked[key]) || ''; }
+// 字段提示 / 错误信息挂载点：输入框所在 .field 内，开关行 / 胶囊组之后
+function msgHost(el){ return el.closest('.field') || el.closest('.proto-row') || el.closest('.filter-group') || el.closest('.filter-region') || el; }
+function attachMsg(el, cls, text){
+  var host = msgHost(el);
+  var div = document.createElement('div');
+  div.className = cls;
+  div.textContent = text;
+  if (host.classList.contains('field')) host.appendChild(div);
+  else host.parentNode.insertBefore(div, host.nextSibling);
+  return div;
+}
+
+function fillField(d, v){
+  if (d.custom) return;
+  if (d.type === 'list'){
+    var arr = Array.isArray(v) ? v : (v == null || v === '' ? [] : [String(v)]);   // 兼容旧配置的字符串形式（如 region: 'all'）
+    for (var k in d.els){ var e = $(d.els[k]); if (e) e.checked = arr.indexOf(k) >= 0; }
+    return;
+  }
+  var el = $(d.el);
+  if (!el) return;
+  if (d.type === 'bool'){
+    if (el.tagName === 'SELECT') el.value = v ? '1' : '0'; else el.checked = !!v;
+    return;
+  }
+  if (d.type === 'secret'){
+    // 密码 / 令牌只写不回显：留空保存 = 保持不变
+    if (el.getAttribute('data-ph') == null) el.setAttribute('data-ph', el.placeholder || '');
+    el.value = '';
+    el.placeholder = (CFG && CFG[d.key + 'Set']) ? '已设置（留空保持不变）' : el.getAttribute('data-ph');
+    return;
+  }
+  el.value = v == null ? '' : v;
+}
+function readField(d){
+  if (d.type === 'list'){
+    var out = [];
+    for (var k in d.els){ var e = $(d.els[k]); if (e && e.checked) out.push(k); }
+    return out;
+  }
+  var el = $(d.el);
+  if (!el) return undefined;
+  if (d.type === 'bool') return el.tagName === 'SELECT' ? el.value === '1' : el.checked;
+  return el.value;   // int 等类型由 checkValue 统一转换并校验
+}
+// 环境变量锁定的字段：面板只读并提示来源（保存时服务端同样忽略这些字段）
+function applyEnvLock(d){
+  var name = lockedEnv(d.key);
+  schemaEls(d).forEach(function(id){
+    var el = $(id);
+    if (!el) return;
+    el.disabled = !!name;
+    if (el._lockTip){ el._lockTip.parentNode.removeChild(el._lockTip); el._lockTip = null; }
+    if (name){
+      el._lockTip = attachMsg(el, 'hint env-lock', '由环境变量 ' + name + ' 设置，面板中只读；如需修改请到 Worker 环境变量。');
+      if (d.type === 'secret') el.placeholder = '已由环境变量 ' + name + ' 设置';
+    }
+  });
+}
+function fillForm(){
+  if (!CFG) return;
+  clearFieldErrors();
+  SCHEMA.forEach(function(d){ fillField(d, getPath(CFG, d.key)); applyEnvLock(d); });
+  renderPreferred();
+  onSubMode();
+}
+function collectForm(){
+  if (!CFG) return null;
+  var body = {};
+  SCHEMA.forEach(function(d){
+    if (d.custom || lockedEnv(d.key)) return;
+    if (!d.el && !d.els) return;
+    var v = readField(d);
+    if (v !== undefined) setPath(body, d.key, v);
+  });
+  var pref = collectPreferred();
+  body.preferredDomains = pref.domains;
+  body.preferredIPs = pref.ips;
+  return body;
+}
+// 前端预校验（与服务端同一个校验函数）：就地规范化 body，返回字段级错误列表
+function validateForm(body){
+  var errors = [];
+  SCHEMA.forEach(function(d){
+    var v = getPath(body, d.key);
+    if (v === undefined || (d.type === 'secret' && v === '')) return;
+    var r = checkValue(d, v);
+    if (r.error) errors.push({ field: d.key, label: d.label, msg: r.error });
+    else setPath(body, d.key, r.value);
+  });
+  return errors;
+}
+
+/* ===== 字段级错误提示 ===== */
+function fieldEl(key){
+  var d = SCHEMA_BY_KEY[key];
+  if (!d) return null;
+  var id = d.el || (d.els ? d.els[Object.keys(d.els)[0]] : '');
+  return id ? $(id) : null;
+}
+function clearFieldError(el){
+  if (!el) return;
+  el.classList.remove('invalid');
+  if (el._errTip){ el._errTip.parentNode.removeChild(el._errTip); el._errTip = null; }
+}
+function clearFieldErrors(){
+  document.querySelectorAll('.invalid').forEach(clearFieldError);
+}
+function showFieldErrors(errors){
+  clearFieldErrors();
+  var first = null, unplaced = [];
+  errors.forEach(function(e){
+    var el = fieldEl(e.field);
+    if (!el){ unplaced.push((e.label ? e.label + '：' : '') + e.msg); return; }
+    el.classList.add('invalid');
+    if (el._errTip) el._errTip.textContent += '；' + e.msg;
+    else el._errTip = attachMsg(el, 'field-err', e.msg);
+    if (!first) first = el;
+  });
+  if (first){
+    var view = first.closest('.view');
+    if (view) switchView(view.getAttribute('data-view'));
+    try { first.scrollIntoView({ block: 'center', behavior: 'smooth' }); first.focus({ preventScroll: true }); } catch (e) {}
+  }
+  return unplaced;
+}
+
+/* ===== 保存 / 重置 / 备份 ===== */
+function currentPanelPath(){ return decodeURIComponent(APIPATH.replace(/^\/+/, '')); }
 function saveAll(){
   if (!CFG){ toast('配置尚未加载', 'err'); return; }
   var body = collectForm();
+  var errors = validateForm(body);
+  if (errors.length){
+    showFieldErrors(errors);
+    toast('有 ' + errors.length + ' 项配置需要修正', 'err');
+    return;
+  }
   var btn = $('saveBtn');
   btn.disabled = true;
   api('config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
     .then(function(r){
       if (r && r.ok){
+        var oldPath = currentPanelPath();
         CFG = r.data;
+        btn.classList.remove('dirty');
+        // 面板路径变更（改了面板路径，或路径跟随 UUID 且 UUID 已变）：跳转到新入口。
+        // 服务端已为新 UUID / 密码签发登录态，无需重新登录
+        if (CFG.panelPath && CFG.panelPath !== oldPath){
+          $('savedAt').textContent = '已保存，正在跳转到新的面板路径…';
+          toast('已保存：面板路径已变更，正在跳转…', 'ok');
+          setTimeout(function(){ location.replace('/' + encodeURIComponent(CFG.panelPath) + location.search); }, 900);
+          return;
+        }
         fillForm();
         renderAll();
         makeSub(false);
         refreshQuota();
-        btn.classList.remove('dirty');
         $('savedAt').textContent = '已保存：' + new Date().toLocaleTimeString();
-        toast('已保存并生效', 'ok');
-      } else toast((r && r.msg) || '保存失败', 'err');
+        toast(r.msg || '已保存', 'ok');
+      } else {
+        var unplaced = (r && r.errors) ? showFieldErrors(r.errors) : [];
+        toast((unplaced.length ? unplaced.join('；') : (r && r.msg)) || '保存失败', 'err');
+      }
     })
     .catch(function(){ toast('保存失败：无法连接服务器', 'err'); })
     .then(function(){ btn.disabled = false; });
@@ -513,13 +589,15 @@ function genUuid(){
     });
   }
   $('a-uuid').value = u;
+  clearFieldError($('a-uuid'));
   markDirty();
   toast('已生成新 UUID', 'ok');
 }
-// 备份：把当前面板表单值收集成 JSON 下载（与保存配置同一套字段，恢复后可直接保存）
+// 备份：把当前面板表单值收集成 JSON 下载（与保存配置同一套字段，恢复后可直接保存；不含密码与令牌）
 function exportConfig(){
   try {
     var data = collectForm();
+    SCHEMA.forEach(function(d){ if (d.type === 'secret' && getPath(data, d.key) !== undefined) setPath(data, d.key, ''); });
     var blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
     var a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
@@ -531,7 +609,7 @@ function exportConfig(){
     toast('配置已导出为 JSON', 'ok');
   } catch (e) { toast('导出失败：' + e.message, 'err'); }
 }
-// 恢复：读取 JSON 填充表单，标记未保存，由用户点「保存全部」写盘
+// 恢复：只取字段表登记过的配置项填充表单（忽略密码、环境变量锁定项与未知字段），标记未保存，由用户点「保存全部」写盘
 function importConfig(input){
   var file = input.files && input.files[0];
   if (!file) return;
@@ -539,22 +617,57 @@ function importConfig(input){
   reader.onload = function(){
     try {
       var data = JSON.parse(reader.result);
-      CFG = Object.assign({}, CFG, data);
+      if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error('not an object');
+      var next = JSON.parse(JSON.stringify(CFG)), n = 0;
+      SCHEMA.forEach(function(d){
+        var v = getPath(data, d.key);
+        if (v === undefined || d.type === 'secret' || lockedEnv(d.key)) return;
+        setPath(next, d.key, v);
+        n++;
+      });
+      CFG = next;
       fillForm();
       renderAll();
       markDirty();
-      toast('配置已导入，请点「保存全部」生效', 'ok');
+      toast('已导入 ' + n + ' 项配置，请点「保存全部」生效', 'ok');
     } catch (e) { toast('导入失败：JSON 格式不正确', 'err'); }
     input.value = '';
   };
   reader.readAsText(file, 'utf-8');
 }
-document.querySelectorAll('input,select,textarea').forEach(function(el){
-  var id = el.id || '';
-  var prefixes = ['f-', 'o-', 'a-', 's-', 'q-', 'e-', 't-', 'fl-', 'en-'];
-  for (var i = 0; i < prefixes.length; i++){ if (id.indexOf(prefixes[i]) === 0){ el.addEventListener('change', markDirty); break; } }
-});
 
+/* ===== 控件事件：未保存标记 + 清除错误提示 + 多选互斥（均由字段表驱动） ===== */
+function bindFormEvents(){
+  var bound = {};
+  SCHEMA.forEach(function(d){
+    schemaEls(d).forEach(function(id){
+      var el = $(id);
+      if (!el || bound[id]) return;
+      bound[id] = 1;
+      var h = function(){ markDirty(); clearFieldError(fieldEl(d.key)); clearFieldError(el); };
+      el.addEventListener('change', h);
+      el.addEventListener('input', h);
+    });
+    // 多选胶囊中的互斥项（如「全部地区」）：勾选互斥项时取消其它项；其它项全部取消时自动恢复互斥项
+    if (d.type === 'list' && d.exclusive && d.els){
+      var ex = $(d.els[d.exclusive]);
+      var others = Object.keys(d.els).filter(function(k){ return k !== d.exclusive; }).map(function(k){ return $(d.els[k]); });
+      var anyOther = function(){ return others.some(function(o){ return o && o.checked; }); };
+      ex.addEventListener('change', function(){
+        if (ex.checked) others.forEach(function(o){ if (o) o.checked = false; });
+        else if (!anyOther()) ex.checked = true;
+      });
+      others.forEach(function(o){
+        if (!o) return;
+        o.addEventListener('change', function(){
+          if (o.checked) ex.checked = false;
+          if (!anyOther()) ex.checked = true;
+        });
+      });
+    }
+  });
+}
+bindFormEvents();
 /* ===== 订阅 ===== */
 function subUrlOf(fmt){
   // 自定义订阅路径优先：自动保留当前域名（location.origin），只替换路径段；
@@ -624,7 +737,8 @@ function previewSub(){
       var type = r.type || '';
       $('prevType').textContent = type || '—';
       var n = 0;
-      if (/clash|yaml/i.test(type)) n = (body.match(/- name:/g) || []).length;
+      if (typeof r.count === 'number') n = r.count;   // 服务端返回的实际节点数（与客户端订阅同一流程生成）
+      else if (/clash|yaml/i.test(type)) n = (body.match(/- name:/g) || []).length;
       else if (/json/i.test(type)) n = (body.match(/"tag"/g) || []).length;
       else {
         var t = body;
@@ -675,6 +789,7 @@ $('fl-custom-pref').addEventListener('change', function(){
     if ($('o-submode').value === 'custom') $('o-submode').value = '';
   }
   onSubMode();
+  markDirty();
 });
 // 仪表盘「地址来源 → 随机优选」与优选配置「订阅模式 → 随机优选模式（官方接口）」联动：
 // 勾选 → 订阅模式切为 random 并关闭自定义优选；取消 → 订阅模式关闭（若当前为 random）
@@ -686,6 +801,7 @@ $('fl-random-pref').addEventListener('change', function(){
     if ($('o-submode').value === 'random') $('o-submode').value = '';
   }
   onSubMode();
+  markDirty();
 });
 /* ===== 启动 ===== */
 buildNav();

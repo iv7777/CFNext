@@ -6,6 +6,6 @@
   "scripts": {
     "build": "node build.mjs",
     "check": "node build.mjs --check && node --check CFNext.js",
-    "test": "node build.mjs --check && node --test test/"
+    "test": "node build.mjs --check && node --test"
   }
 }
