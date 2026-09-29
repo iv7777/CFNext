@@ -66,7 +66,7 @@ test('GET /api/config 返回字段表默认值（与旧 DEFAULT_CONFIG 一致）
     src: { native: false, prefDomain: true, prefIp: true },
   };
   for (const [k, v] of Object.entries(legacy)) assert.deepEqual(d[k], v, k);
-  assert.match(d.preferredDomains, /bestcf\.pages\.dev\/random-region\/HK\/100\.txt/);
+  assert.equal(d.preferredDomains, '', '默认不再预置 bestcf 第三方中转地址');
   assert.equal(d.uuid, UUID);
   assert.equal(d.path, '', '面板路径跟随 UUID 时返回空');
   assert.equal(d.panelPath, UUID);
@@ -325,4 +325,32 @@ test('默认模式（IPv4+IPv6、节点测活开启）子请求数不超过免�
   assert.ok(seen.length <= 50, `子请求 ${seen.length} 个：\n${seen.join('\n')}`);
   assert.equal(seen.filter(u => u.includes('alidns')).length, 0, 'Cloudflare DoH 正常应答（即使无记录）时不再查询阿里 DNS');
   assert.equal(seen.filter(u => u.startsWith('https://bestcf.pages.dev/')).length, 0, '默认模式不再拉取 bestcf 中转池');
+});
+
+test('HostMonit 优选改为调用数据接口：按运营商命名、只保留 CF 段并去重；运营商筛选保留通用节点', async () => {
+  const env = baseEnv({ K: kv({ config: { filter: { ipType: ['IPv4'], isp: ['移动'] } } }) });
+  const offline = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, opts = {}) => {
+    calls.push([String(url), opts.method || 'GET', opts.body]);
+    if (String(url) === 'https://api.hostmonit.com/get_optimization_ip') {
+      return new Response(JSON.stringify({ code: 200, info: [
+        { ip: '198.41.208.52', line: 'CM' }, { ip: '198.41.209.212', line: 'CM' },
+        { ip: '162.159.128.65', line: 'CU' }, { ip: '198.41.208.52', line: 'CT' },   // 重复 IP：只保留首条（移动）
+        { ip: '104.19.0.9', line: 'CT' }, { ip: '8.8.8.8', line: 'CM' },             // 非 CF 段：丢弃
+      ] }), { headers: { 'content-type': 'application/json' } });
+    }
+    return new Response('Not Found', { status: 404 });
+  };
+  let links;
+  try { links = await subLinks(env); } finally { globalThis.fetch = offline; }
+  const hm = calls.find(c => c[0].includes('hostmonit'));
+  assert.deepEqual([hm[1], JSON.parse(hm[2])], ['POST', { key: 'iDetkOys' }]);
+  const byName = Object.fromEntries(links.map(l => [nameOf(l), hostOf(l)]));
+  assert.equal(byName['移动-01'], '198.41.208.52');
+  assert.equal(byName['移动-02'], '198.41.209.212');
+  assert.ok(!links.some(l => hostOf(l) === '8.8.8.8'), '非 CF 段 IP 被丢弃');
+  // 只勾选「移动」：剔除联通 / 电信节点，保留移动节点与不带运营商标记的通用节点
+  assert.ok(!('联通-01' in byName) && !('电信-01' in byName), '未勾选运营商的节点被剔除');
+  assert.ok('优选IP-S01' in byName, '通用节点保留');
 });

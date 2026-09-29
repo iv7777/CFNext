@@ -561,8 +561,8 @@ const CONFIG_SCHEMA = [
     pattern: '^\\S+$', hint: '出站代理不能包含空格', check: 'proxy' },
   { key: 'outboundMode', type: 'enum', def: '', el: 's-outmode', label: '出站方式', options: ['', 'no', 'only'] },
   // ---- 优选节点（保存后随订阅下发到客户端；面板中与 preferredIPs 共用一个输入框） ----
-  // 自定义订阅模式下使用的地址（域名 / 优选 API，每行一个）
-  { key: 'preferredDomains', type: 'text', def: 'https://bestcf.pages.dev/random-region/HK/100.txt\nhttps://bestcf.pages.dev/random-region/TW/100.txt\nhttps://bestcf.pages.dev/random-region/JP/100.txt\nhttps://bestcf.pages.dev/random-region/SG/100.txt\nhttps://bestcf.pages.dev/random-region/US/100.txt\nhttps://bestcf.pages.dev/random-region/KR/100.txt',
+  // 自定义订阅模式下使用的地址（域名 / 优选 API，每行一个）；默认为空（原默认的 6 条 bestcf 地区池全部为第三方中转 IP，已移除）
+  { key: 'preferredDomains', type: 'text', def: '',
     el: 'f-preferred', custom: true, label: '优选节点', maxLen: 65536 },
   // [{ ip, port, name }]
   { key: 'preferredIPs', type: 'ipList', def: [], el: 'f-preferred', custom: true, label: '优选节点', check: 'ipList' },
@@ -2279,47 +2279,40 @@ function decodeUtf8OrGbk(buf) {
   return new TextDecoder().decode(bytes);
 }
 
-function extractCandidates(text) {
-  const seen = new Set();
-  const out = [];
-  const add = (ip, port, name) => {
-    if (!isValidIp(ip)) return;
-    if (seen.has(ip)) return;   // 按 IP 去重（忽略端口）
-    seen.add(ip);
-    out.push({ ip, port: port || 443, name: name || '' });
-  };
-  parseIPList(text).forEach(x => add(x.ip, x.port, x.name));
-  // IPv4：点分四段（HTML/JSON 文本中散落的合法 IP）
-  const re4 = /\b(?:\d{1,3}\.){3}\d{1,3}(?::\d{1,5})?\b/g;
-  let m;
-  while ((m = re4.exec(text))) {
-    const { host, port } = parseHostPort(m[0], 443);
-    if (host) add(host, port, '');
-  }
-  // IPv6：冒号分隔的连续 token（微测网 IPv6 源为裸地址）
-  const re6 = /[0-9a-fA-F:]+/g;
-  while ((m = re6.exec(text))) {
-    const t = m[0];
-    if (t.includes(':') && t.split(':').length >= 3 && isValidIp(t)) add(t, 443, '');
-  }
-  return out;
-}
-
-// 订阅时自动拉取最新优选 IP：HostMonit 优选源，10 分钟缓存；
-// 失败返回 null，由内置优选池兜底。保证 IP 节点为「当前优选」而非静态过期快照，显著提升可用率。
+// 订阅时自动拉取最新优选 IP：HostMonit 优选 API（按移动 / 联通 / 电信分线路实测的 Cloudflare IP），10 分钟缓存。
+// 修复：原先抓取 stock.hostmonit.com/CloudFlareYes 页面，该页面已改版为前端渲染的单页应用，HTML 中不含任何 IP，
+// 每次都拿到 0 个；现改为调用其数据接口（key 为社区项目通用的公开 key，接口失效时由内置优选池兜底）。
+// 节点名带运营商（如「移动-01」），面板「运营商偏好」筛选据此生效。失败时沿用上次成功结果，都没有则返回 null
+const HOSTMONIT_API = 'https://api.hostmonit.com/get_optimization_ip';
+const HOSTMONIT_KEY = 'iDetkOys';
+const HOSTMONIT_LINE_CN = { CM: '移动', CU: '联通', CT: '电信' };
 const SUBPREF_CACHE = { t: 0, ips: null };
 async function fetchLatestPreferredIPs(maxCount) {
   maxCount = Math.max(1, parseInt(maxCount) || 150);
-  if (Date.now() - SUBPREF_CACHE.t < 10 * 60 * 1000) return SUBPREF_CACHE.ips;
-  const res = await fetchTimeout('https://stock.hostmonit.com/CloudFlareYes', { headers: { 'User-Agent': 'Mozilla/5.0' } }, 6000);
+  if (SUBPREF_CACHE.ips && Date.now() - SUBPREF_CACHE.t < 10 * 60 * 1000) return SUBPREF_CACHE.ips;
+  const res = await fetchTimeout(HOSTMONIT_API, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'User-Agent': 'Mozilla/5.0' },
+    body: JSON.stringify({ key: HOSTMONIT_KEY }),
+  }, 6000);
+  let out = [];
   if (res && res.ok) {
-    const arr = extractCandidates(await res.text()).filter(x => x.ip && isCloudflareIP(x.ip));
-    const seen = new Set(); const out = [];
-    for (const x of arr) { if (seen.has(x.ip)) continue; seen.add(x.ip); out.push(x); if (out.length >= maxCount) break; }
-    SUBPREF_CACHE.t = Date.now(); SUBPREF_CACHE.ips = out;
-    return out;
+    try {
+      const j = await res.json();
+      const seen = new Set(), counters = {};
+      for (const x of (j && Array.isArray(j.info) ? j.info : [])) {
+        const ip = String((x && x.ip) || '').trim();
+        if (!isValidIp(ip) || !isCloudflareIP(ip) || seen.has(ip)) continue;   // 同一 IP 可能同时出现在多条线路，只保留首条
+        seen.add(ip);
+        const line = HOSTMONIT_LINE_CN[String(x.line || '').toUpperCase()] || '优选';
+        counters[line] = (counters[line] || 0) + 1;
+        out.push({ ip, port: 443, name: line + '-' + String(counters[line]).padStart(2, '0') });
+        if (out.length >= maxCount) break;
+      }
+    } catch (e) { out = []; }
   }
-  return null;
+  if (out.length) { SUBPREF_CACHE.t = Date.now(); SUBPREF_CACHE.ips = out; return out; }
+  return SUBPREF_CACHE.ips;   // 本次失败：沿用上次成功结果（可能为 null）
 }
 
 // ---------------------------------------------------------------------------
@@ -2650,7 +2643,7 @@ async function buildNodes(cfg, cap = 800, skipSet = null) {
   const push = (server, port, name, trusted) => {
     if (nodes.length >= cap) return;   // 生成过程限流：避免多协议膨胀超 Worker CPU
     // 入口 IP 硬性要求：非 CF 段 IP 无法转发到 Worker，直接丢弃；
-    // 例外：bestcf 地区优选池的社区中转 IP（trusted 标记）可用作客户端入口（v1.0.5 修复）
+    // 例外：仅「自定义订阅 · 仅自定义节点」（allowNonCF）按用户填写原样放行；trusted 标记目前不会出现（isTrustedRegionPool 恒为 false）
     if (isValidIp(server) && !isCloudflareIP(server) && !allowNonCF && !trusted) return;
     const key = server + ':' + port;   // 按 服务器:端口 去重（单端口机制：同 IP 同端口仅下发一次）
     if (used.has(key)) return;
@@ -2793,6 +2786,13 @@ function parseShareNode(n, i) {
 const REGION_TAGS = { HK: ['HK', '香港'], TW: ['TW', '台湾'], US: ['US', '美国'], SG: ['SG', '新加坡'], JP: ['JP', '日本'], KR: ['KR', '韩国'], DE: ['DE', '德国'] };
 const ISP_TAGS = { 移动: ['移动', 'CM', 'CHINAMOBILE'], 联通: ['联通', 'CU', 'UNICOM'], 电信: ['电信', 'CT', 'CHINATELECOM'] };
 const FILTER_ISPS = ['移动', '联通', '电信'];
+// 节点名中的运营商标记：中文名按子串匹配；CM / CU / CT 等英文缩写需为独立单词，避免误匹配（如 CUSTOM）
+const ISP_MATCHERS = Object.keys(ISP_TAGS).map(k => [k, ISP_TAGS[k].map(t => /^[A-Z]+$/.test(t)
+  ? ((re) => (up) => re.test(up))(new RegExp('(^|[^A-Z])' + t + '([^A-Z]|$)'))
+  : (up) => up.includes(t))]);
+function nodeIsps(up) {
+  return ISP_MATCHERS.filter(([, ms]) => ms.some(f => f(up))).map(([k]) => k);
+}
 const FILTER_IPTYPES = ['IPv4', 'IPv6'];
 
 // 按面板筛选配置过滤节点（region 按名称地区标记、ipType 按地址类型、isp 按名称运营商标记）
@@ -2810,10 +2810,9 @@ function filterNodes(nodes, filter) {
       const h = n.indexOf('#');
       if (h >= 0) name = decodeURIComponent(n.slice(h + 1) || '');
     } catch (e) { name = ''; }
-    return { host, name, up: name.toUpperCase() };
+    const up = name.toUpperCase();
+    return { host, name, up, isps: nodeIsps(up) };
   });
-  // 池内无任何运营商标记时 ISP 筛选不生效（默认数据源节点名仅含地区，按运营商过滤会清空节点池）
-  const poolHasIsp = meta.some(m => m.up && Object.keys(ISP_TAGS).some(k => (ISP_TAGS[k] || [k]).some(t => m.up.includes(t.toUpperCase()))));
   const apply = (rg, t, s) => {
     // rg 兼容字符串（旧配置 'all'/'HK'）与数组（面板多选地区 ['HK','SG']）；数组含 'all' 或空 = 全部地区
     const tg = Array.isArray(rg)
@@ -2834,7 +2833,9 @@ function filterNodes(nodes, filter) {
         if (t[0] === 'IPv4' && isV6) return false;
         if (t[0] === 'IPv6' && !isV6) return false;
       }
-      if (partial && poolHasIsp && !s.some(k => (ISP_TAGS[k] || [k]).some(t2 => m.up.includes(t2.toUpperCase())))) return false;
+      // 运营商筛选与地区筛选一致：只剔除明确标记为未勾选运营商的节点，不带运营商标记的通用节点保留
+      // （修复：原先只要池中有任一带运营商标记的节点，就会把所有通用节点一并剔除）
+      if (partial && m.isps.length && !m.isps.some(k => s.includes(k))) return false;
       return true;
     });
   };
@@ -3912,7 +3913,7 @@ pre.code{background:var(--bg2);border:1px solid var(--border);border-radius:8px;
             </div>
           </div>
         </div>
-        <p class="hint" style="margin-top:12px">筛选按 地区 → IP 类型 → 运营商 逐级放宽，任一维度无节点时自动放宽，保证订阅始终非空。「运营商偏好」按节点名称中的运营商标记过滤（移动=移动/CM/CHINAMOBILE、联通=联通/CU/UNICOM、电信=电信/CT/CHINATELECOM），三个全选或节点池无任何运营商标记时不生效。「节点地区」支持多选，仅剔除节点名称明确标记为其它地区的节点；订阅模式为「关闭」时节点来源均为不带地区的 Cloudflare 任播 IP / 域名（任播 IP 的落地机房取决于你所在的网络），地区筛选不改变节点构成，需要按地区挑选请在「自定义订阅」中填写带地区名的优选 API / 节点。「地址来源」控制下发节点的来源：原生地址（工作器域名）、优选域名（第三方优选域名列表）、优选 IP（内置与实时拉取的优选 IP）——这三项仅在订阅模式为「关闭」时生效；自定义优选 / 随机优选即切换「优选配置」中的订阅模式（二者互斥，勾选后仅按该模式下发）。</p>
+        <p class="hint" style="margin-top:12px">筛选按 地区 → IP 类型 → 运营商 逐级放宽，任一维度无节点时自动放宽，保证订阅始终非空。「运营商偏好」按节点名称中的运营商标记过滤（移动=移动/CM/CHINAMOBILE、联通=联通/CU/UNICOM、电信=电信/CT/CHINATELECOM），只剔除标记为未勾选运营商的节点，不带运营商标记的通用节点保留；默认模式中 HostMonit 实时优选节点带运营商标记（如「移动-01」）。「节点地区」支持多选，仅剔除节点名称明确标记为其它地区的节点；订阅模式为「关闭」时节点来源均为不带地区的 Cloudflare 任播 IP / 域名（任播 IP 的落地机房取决于你所在的网络），地区筛选不改变节点构成，需要按地区挑选请在「自定义订阅」中填写带地区名的优选 API / 节点。「地址来源」控制下发节点的来源：原生地址（工作器域名）、优选域名（第三方优选域名列表）、优选 IP（内置与实时拉取的优选 IP）——这三项仅在订阅模式为「关闭」时生效；自定义优选 / 随机优选即切换「优选配置」中的订阅模式（二者互斥，勾选后仅按该模式下发）。</p>
       </div>
       <div class="card">
         <h3><span class="tick"></span>配额速览 <span class="sub" id="dbSub">未配置监控</span></h3>
@@ -4006,7 +4007,7 @@ pre.code{background:var(--bg2);border:1px solid var(--border);border-radius:8px;
         </div>
         <div class="field" id="sm-custom" style="margin-top:14px;display:none">
           <label>优选节点（域名 / 优选 API / IP，每行一个；IP 格式 IP:端口#名称）</label>
-          <textarea id="f-preferred" rows="6" placeholder="*.cloudflare.182682.xyz&#10;104.25.246.53:443#香港&#10;https://bestcf.pages.dev/random-region/HK/100.txt"></textarea>
+          <textarea id="f-preferred" rows="6" placeholder="*.cloudflare.182682.xyz&#10;104.25.246.53:443#香港&#10;https://example.com/优选IP列表.txt"></textarea>
           <div class="hint">开启「自定义订阅」后生效；域名与优选 API 保存后自动解析为可用 IP 下发。可用本地工具（如 CloudflareSpeedTest）在自己的网络下测速后，把结果填入此列表。</div>
         </div>
         <div class="field" id="sm-random" style="margin-top:14px;display:none">
@@ -4158,9 +4159,8 @@ pre.code{background:var(--bg2);border:1px solid var(--border);border-radius:8px;
           <colgroup><col style="width:40%"><col style="width:60%"></colgroup>
           <thead><tr><th>用途</th><th>接口</th></tr></thead>
           <tbody>
-            <tr><td>HostMonit 优选</td><td class="mono">stock.hostmonit.com/CloudFlareYes</td></tr>
+            <tr><td>HostMonit 优选（分运营商实测）</td><td class="mono">api.hostmonit.com/get_optimization_ip</td></tr>
             <tr><td>优选 IP 列表</td><td class="mono">cf.090227.xyz/ip.164746.xyz</td></tr>
-            <tr><td>bestcf 地区优选池</td><td class="mono">bestcf.pages.dev/random-region/{HK|TW|JP|SG|US|KR}/100.txt</td></tr>
             <tr><td>DoH 解析</td><td class="mono">cloudflare-dns.com / dns.alidns.com / doh.pub</td></tr>
             <tr><td>Cloudflare 用量监控（GraphQL）</td><td class="mono">api.cloudflare.com/client/v4/graphql</td></tr>
             <tr><td>版本更新检测</td><td class="mono">raw.githubusercontent.com/iv7777/CFNext/...</td></tr>

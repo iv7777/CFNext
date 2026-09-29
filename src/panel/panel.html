@@ -125,7 +125,7 @@
             </div>
           </div>
         </div>
-        <p class="hint" style="margin-top:12px">筛选按 地区 → IP 类型 → 运营商 逐级放宽，任一维度无节点时自动放宽，保证订阅始终非空。「运营商偏好」按节点名称中的运营商标记过滤（移动=移动/CM/CHINAMOBILE、联通=联通/CU/UNICOM、电信=电信/CT/CHINATELECOM），三个全选或节点池无任何运营商标记时不生效。「节点地区」支持多选，仅剔除节点名称明确标记为其它地区的节点；订阅模式为「关闭」时节点来源均为不带地区的 Cloudflare 任播 IP / 域名（任播 IP 的落地机房取决于你所在的网络），地区筛选不改变节点构成，需要按地区挑选请在「自定义订阅」中填写带地区名的优选 API / 节点。「地址来源」控制下发节点的来源：原生地址（工作器域名）、优选域名（第三方优选域名列表）、优选 IP（内置与实时拉取的优选 IP）——这三项仅在订阅模式为「关闭」时生效；自定义优选 / 随机优选即切换「优选配置」中的订阅模式（二者互斥，勾选后仅按该模式下发）。</p>
+        <p class="hint" style="margin-top:12px">筛选按 地区 → IP 类型 → 运营商 逐级放宽，任一维度无节点时自动放宽，保证订阅始终非空。「运营商偏好」按节点名称中的运营商标记过滤（移动=移动/CM/CHINAMOBILE、联通=联通/CU/UNICOM、电信=电信/CT/CHINATELECOM），只剔除标记为未勾选运营商的节点，不带运营商标记的通用节点保留；默认模式中 HostMonit 实时优选节点带运营商标记（如「移动-01」）。「节点地区」支持多选，仅剔除节点名称明确标记为其它地区的节点；订阅模式为「关闭」时节点来源均为不带地区的 Cloudflare 任播 IP / 域名（任播 IP 的落地机房取决于你所在的网络），地区筛选不改变节点构成，需要按地区挑选请在「自定义订阅」中填写带地区名的优选 API / 节点。「地址来源」控制下发节点的来源：原生地址（工作器域名）、优选域名（第三方优选域名列表）、优选 IP（内置与实时拉取的优选 IP）——这三项仅在订阅模式为「关闭」时生效；自定义优选 / 随机优选即切换「优选配置」中的订阅模式（二者互斥，勾选后仅按该模式下发）。</p>
       </div>
       <div class="card">
         <h3><span class="tick"></span>配额速览 <span class="sub" id="dbSub">未配置监控</span></h3>
@@ -219,7 +219,7 @@
         </div>
         <div class="field" id="sm-custom" style="margin-top:14px;display:none">
           <label>优选节点（域名 / 优选 API / IP，每行一个；IP 格式 IP:端口#名称）</label>
-          <textarea id="f-preferred" rows="6" placeholder="*.cloudflare.182682.xyz&#10;104.25.246.53:443#香港&#10;https://bestcf.pages.dev/random-region/HK/100.txt"></textarea>
+          <textarea id="f-preferred" rows="6" placeholder="*.cloudflare.182682.xyz&#10;104.25.246.53:443#香港&#10;https://example.com/优选IP列表.txt"></textarea>
           <div class="hint">开启「自定义订阅」后生效；域名与优选 API 保存后自动解析为可用 IP 下发。可用本地工具（如 CloudflareSpeedTest）在自己的网络下测速后，把结果填入此列表。</div>
         </div>
         <div class="field" id="sm-random" style="margin-top:14px;display:none">
@@ -371,9 +371,8 @@
           <colgroup><col style="width:40%"><col style="width:60%"></colgroup>
           <thead><tr><th>用途</th><th>接口</th></tr></thead>
           <tbody>
-            <tr><td>HostMonit 优选</td><td class="mono">stock.hostmonit.com/CloudFlareYes</td></tr>
+            <tr><td>HostMonit 优选（分运营商实测）</td><td class="mono">api.hostmonit.com/get_optimization_ip</td></tr>
             <tr><td>优选 IP 列表</td><td class="mono">cf.090227.xyz/ip.164746.xyz</td></tr>
-            <tr><td>bestcf 地区优选池</td><td class="mono">bestcf.pages.dev/random-region/{HK|TW|JP|SG|US|KR}/100.txt</td></tr>
             <tr><td>DoH 解析</td><td class="mono">cloudflare-dns.com / dns.alidns.com / doh.pub</td></tr>
             <tr><td>Cloudflare 用量监控（GraphQL）</td><td class="mono">api.cloudflare.com/client/v4/graphql</td></tr>
             <tr><td>版本更新检测</td><td class="mono">raw.githubusercontent.com/iv7777/CFNext/...</td></tr>
