@@ -21,7 +21,7 @@
 // ============================================================================
 import { connect } from 'cloudflare:sockets';
 
-const VERSION = '2.0.4';
+const VERSION = '2.0.5';
 
 // 更新检测：点击版本号后拉取仓库代码比对版本号；有新版本时返回最新代码供面板复制
 // 版本基准为仓库 main 分支根目录的 CFNext.js（由 build.mjs 生成的部署文件）
@@ -4114,7 +4114,7 @@ pre.code{background:var(--bg2);border:1px solid var(--border);border-radius:8px;
         <div class="kv"><span class="k">面板版本</span><span class="v" id="aVer">—</span></div>
         <div class="kv"><span class="k">KV 持久化</span><span class="v" id="aKv">—</span></div>
         <div class="kv"><span class="k">轮询窗口</span><span class="v">最近 1000 个 IP</span></div>
-        <div class="kv"><span class="k">构建日期</span><span class="v">2026-09-27</span></div>
+        <div class="kv"><span class="k">构建日期</span><span class="v">2026-09-29</span></div>
       </div>
       <div class="danger-zone">
         <h3 style="margin-bottom:8px;color:var(--err)">危险操作</h3>
