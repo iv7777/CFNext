@@ -589,6 +589,17 @@ const CONFIG_SCHEMA = [
   { key: 'src.native', type: 'bool', def: false, el: 'fl-native', label: '原生地址' },
   { key: 'src.prefDomain', type: 'bool', def: true, el: 'fl-pref-domain', label: '优选域名' },
   { key: 'src.prefIp', type: 'bool', def: true, el: 'fl-pref-ip', label: '优选 IP' },
+  // ---- 「优选 IP」的在线来源（默认模式；均只保留 Cloudflare 段 IP，结果缓存 10 分钟） ----
+  { key: 'ipsrc.hostmonit', type: 'bool', def: true, el: 'ps-hostmonit', label: 'HostMonit 实时优选' },
+  // uouin 分线路优选：借用 api.uouin.com 网站内部接口（非开放 API，对方可能随时更换签名或封禁），默认关闭
+  { key: 'ipsrc.uouin', type: 'bool', def: false, el: 'ps-uouin', label: 'uouin 分线路优选' },
+  // 两个自定义优选 API：填写返回 IP 列表的地址（纯 IP 行 / CSV / HTML 线路表 / base64 订阅 / vless 链接，支持 sub://）
+  { key: 'ipsrc.api1', type: 'bool', def: false, el: 'ps-api1-on', label: '自定义优选 API 1' },
+  { key: 'ipsrc.api1Url', type: 'string', def: '', el: 'ps-api1-url', label: '自定义优选 API 1 地址', maxLen: 1024,
+    pattern: '^(https?|sub)://\\S+$', hint: '须为 http(s):// 或 sub:// 开头的地址' },
+  { key: 'ipsrc.api2', type: 'bool', def: false, el: 'ps-api2-on', label: '自定义优选 API 2' },
+  { key: 'ipsrc.api2Url', type: 'string', def: '', el: 'ps-api2-url', label: '自定义优选 API 2 地址', maxLen: 1024,
+    pattern: '^(https?|sub)://\\S+$', hint: '须为 http(s):// 或 sub:// 开头的地址' },
 ];
 
 // 单个字段值校验与规范化（服务端与面板共用：面板页面下发时通过 toString() 注入同一份代码，
@@ -761,6 +772,12 @@ function crossCheckConfig(cfg) {
   const errors = [];
   if (!cfg.enableVless && !cfg.enableTrojan && !cfg.enableXhttp) {
     errors.push({ field: 'enableVless', label: '协议开关', msg: '至少启用一种协议，否则订阅中没有任何节点' });
+  }
+  for (const n of [1, 2]) {
+    const s = cfg.ipsrc || {};
+    if (s['api' + n] && !s['api' + n + 'Url']) {
+      errors.push({ field: 'ipsrc.api' + n + 'Url', label: '自定义优选 API ' + n + ' 地址', msg: '已开启该来源，请填写 API 地址（或关闭开关）' });
+    }
   }
   return errors;
 }
@@ -2315,6 +2332,43 @@ async function fetchLatestPreferredIPs(maxCount) {
   return SUBPREF_CACHE.ips;   // 本次失败：沿用上次成功结果（可能为 null）
 }
 
+// uouin 分线路优选（api.uouin.com）：电信 / 联通 / 移动 / 多线（BGP）/ IPv6 各约 10 个实测 Cloudflare IP。
+// ⚠ 这不是对方的开放 API，而是其网站前端使用的内部接口：签名方式模仿网站前端
+//   key = md5( md5('DdlTxtN0sUOu') + '70cloudflareapikey' + 毫秒时间戳 )，签名错误时对方会提示「请使用开放API」。
+//   对方随时可能更换签名或封禁，失败时静默返回上次结果，由其它来源兜底；面板中默认关闭。
+//   10 分钟缓存：每个 Worker 实例每小时最多请求约 6 次，避免给对方造成压力。
+// 节点名带线路与来源后缀（如「电信-U01」「多线-U01」「IPv6-U01」），运营商筛选按线路生效
+const UOUIN_API = 'https://api.uouin.com/index.php/index/Cloudflare';
+const UOUIN_GROUPS = [['ctcc', '电信'], ['cucc', '联通'], ['cmcc', '移动'], ['bgp', '多线'], ['ipv6', 'IPv6']];
+const UOUIN_CACHE = { t: 0, ips: null };
+async function fetchUouinIPs(wantV4, wantV6) {
+  let list = UOUIN_CACHE.ips;
+  if (!list || Date.now() - UOUIN_CACHE.t >= 10 * 60 * 1000) {
+    const time = String(Date.now());
+    const key = md5hex(md5hex('DdlTxtN0sUOu') + '70cloudflareapikey' + time);
+    const res = await fetchTimeout(UOUIN_API + '?key=' + key + '&time=' + time, { headers: { 'User-Agent': 'Mozilla/5.0' } }, 6000);
+    const out = [];
+    if (res && res.ok) {
+      try {
+        const data = ((await res.json()) || {}).data || {};
+        const seen = new Set();
+        for (const [grp, line] of UOUIN_GROUPS) {
+          let n = 0;
+          for (const x of ((data[grp] || {}).info || [])) {
+            const ip = String((x && x.ip) || '').trim().replace(/^\[|\]$/g, '');
+            if (!isValidIp(ip) || !isCloudflareIP(ip) || seen.has(ip)) continue;
+            seen.add(ip);
+            out.push({ ip, port: 443, name: line + '-U' + String(++n).padStart(2, '0') });
+          }
+        }
+      } catch (e) { /* 响应不是预期 JSON：视为失败 */ }
+    }
+    if (out.length) { UOUIN_CACHE.t = Date.now(); UOUIN_CACHE.ips = out; list = out; }
+  }
+  // 按 IP 类型筛选取用（缓存中保留全部，v4 / v6 由调用方决定）
+  return (list || []).filter(x => (x.ip.indexOf(':') >= 0 ? wantV6 : wantV4));
+}
+
 // ---------------------------------------------------------------------------
 // 订阅生成
 // ---------------------------------------------------------------------------
@@ -2567,7 +2621,8 @@ async function resolvePreferredDomains(domainsStr, limitPerDomain = 100, maxTota
             }
           }
           if (nm) { counters[nm] = (counters[nm] || 0) + 1; rec.push({ ip, port, name: nm + '-' + String(counters[nm]).padStart(2, '0'), ...(relay ? { relay: true } : {}) }); }
-          else rec.push({ ip, port, name: '', ...(relay ? { relay: true } : {}) });
+          // 提取不到地区的中文名称（如「自有-A」）原样保留（截断 40 字符），不再丢弃成「优选IP-XX」
+          else rec.push({ ip, port, name: rawName.slice(0, 40), ...(relay ? { relay: true } : {}) });
         }
         // 已移除「地区回退生成」：源内无可用 IP 时不再用随机 CF IP 冒充该地区节点
         DNH_CACHE.set(ck, { t: now, ips: rec });
@@ -2790,6 +2845,15 @@ const FILTER_ISPS = ['移动', '联通', '电信'];
 const ISP_MATCHERS = Object.keys(ISP_TAGS).map(k => [k, ISP_TAGS[k].map(t => /^[A-Z]+$/.test(t)
   ? ((re) => (up) => re.test(up))(new RegExp('(^|[^A-Z])' + t + '([^A-Z]|$)'))
   : (up) => up.includes(t))]);
+// 节点名中的地区标记（返回地区码）：中文地区名（REGION_CN 全表）按子串匹配；
+// 面板可选的地区码（HK / TW / US / SG / JP / KR / DE）需为独立单词（如「JP-A-147」），避免误匹配
+const REGION_CODE_RES = Object.keys(REGION_TAGS).map(k => [k, new RegExp('(^|[^A-Z])' + k + '([^A-Z]|$)')]);
+function nodeRegions(name, up) {
+  const out = [];
+  for (const [code, cn] of Object.entries(REGION_CN)) if (name.includes(cn)) out.push(code);
+  for (const [code, re] of REGION_CODE_RES) if (!out.includes(code) && re.test(up)) out.push(code);
+  return out;
+}
 function nodeIsps(up) {
   return ISP_MATCHERS.filter(([, ms]) => ms.some(f => f(up))).map(([k]) => k);
 }
@@ -2811,7 +2875,7 @@ function filterNodes(nodes, filter) {
       if (h >= 0) name = decodeURIComponent(n.slice(h + 1) || '');
     } catch (e) { name = ''; }
     const up = name.toUpperCase();
-    return { host, name, up, isps: nodeIsps(up) };
+    return { host, name, up, isps: nodeIsps(up), regions: nodeRegions(name, up) };
   });
   const apply = (rg, t, s) => {
     // rg 兼容字符串（旧配置 'all'/'HK'）与数组（面板多选地区 ['HK','SG']）；数组含 'all' 或空 = 全部地区
@@ -2823,12 +2887,10 @@ function filterNodes(nodes, filter) {
       const m = meta[i];
       const isV6 = m.host.indexOf(':') >= 0;
       if (!m.name) return false;  // 跳过无法解析的非法节点
-      if (tg && !tg.some(t2 => m.up.includes(t2.toUpperCase()))) {
-        // 无地区标记的通用节点（优选IP-XX / 域名-XX / 原生地址）是 CF 通用入口，任意地区可用，不参与地区过滤；
-        // 地区过滤仅剔除明确标记为其它地区的节点，避免指定地区后节点数量骤减
-        // （含「优选IP-S01」内置保底与「优选IP-V6-01」IPv6 域名解析节点）
-        if (!/^(优选IP|域名)-[A-Z0-9]/.test(m.name) && m.name !== '原生地址') return false;
-      }
+      // 地区过滤仅剔除明确标记为其它地区的节点；不带地区标记的通用节点（优选IP-XX / 域名 / 原生地址 /
+      // 运营商线路节点如「移动-01」「电信-U01」等）是 CF 通用入口，任意地区可用，一律保留
+      // （修复：原先按名称格式判断「通用」，HostMonit / uouin 等按运营商命名的节点在选定地区时被误删）
+      if (tg && m.regions.length && !m.regions.some(r => rg.includes(r))) return false;
       if (t.length === 1) {
         if (t[0] === 'IPv4' && isV6) return false;
         if (t[0] === 'IPv6' && !isV6) return false;
@@ -3447,10 +3509,20 @@ async function generateSubscription(cfg, requestUrl, format, ua, colo) {
       const aliveDomains = await filterAliveDomains(DEFAULT_PREFERRED_DOMAINS);
       if (aliveDomains) rc.preferredDomains = (rc.preferredDomains ? rc.preferredDomains + '\n' : '') + aliveDomains;
     }
-    // HostMonit 实时优选（仅勾选 IPv6 时跳过：该源与内置池均为 v4，筛选后会被剔除，避免无谓子请求）
-    if (useIp && !onlyV6) {
-      const fresh = await fetchLatestPreferredIPs(150).catch(() => null);
-      if (fresh && fresh.length) rc.preferredIPs.push(...fresh);
+    // 「优选 IP」的在线来源（面板「优选配置 → 优选 IP 来源」开关控制，并行拉取，每个来源 1 个子请求、缓存 10 分钟）：
+    // 自定义优选 API 1 / 2（用户自选来源排最前）→ HostMonit → uouin。HostMonit 为纯 IPv4，仅勾选 IPv6 时跳过
+    if (useIp) {
+      const ps = cfg.ipsrc || {};
+      const apiSrc = (n) => (ps['api' + n] && ps['api' + n + 'Url'])
+        ? resolvePreferredDomains(ps['api' + n + 'Url'], 200, 300, false, true, false).catch(() => [])
+        : Promise.resolve([]);
+      const results = await Promise.all([
+        apiSrc(1),
+        apiSrc(2),
+        (ps.hostmonit !== false && !onlyV6) ? fetchLatestPreferredIPs(150).catch(() => null) : null,
+        ps.uouin === true ? fetchUouinIPs(!onlyV6, wantV6).catch(() => []) : null,
+      ]);
+      for (const list of results) if (list && list.length) rc.preferredIPs.push(...list);
     }
     // IPv6 节点来源：筛选含 IPv6 时只查询优选域名的 AAAA 记录（v4 已由域名节点覆盖，不重复查 A）。
     // 子请求预算：Workers 免费版每次请求最多 50 个子请求——IPv4+IPv6 混合时只解析前 V6_DOMAIN_LIMIT 个域名；
@@ -4015,6 +4087,17 @@ pre.code{background:var(--bg2);border:1px solid var(--border);border-radius:8px;
           <input type="number" id="o-rand" min="1" max="99" value="16">
           <div class="hint">从 Cloudflare 地址段随机生成指定数量的优选节点直接下发，不经域名解析；另附 20 个内置保底节点。「节点数量控制」只作为上限，不会把数量补足到上限。</div>
         </div>
+      </div>
+      <div class="card">
+        <h3><span class="tick"></span>优选 IP 来源（默认模式）</h3>
+        <div class="proto-row"><label class="switch"><input type="checkbox" id="ps-hostmonit"><span class="sl"></span></label><span>HostMonit 实时优选（按移动 / 联通 / 电信分线路实测，节点名如「移动-01」）</span></div>
+        <div class="proto-row"><label class="switch"><input type="checkbox" id="ps-uouin"><span class="sl"></span></label><span>uouin 分线路优选（电信 / 联通 / 移动 / 多线 / IPv6，节点名如「电信-U01」）</span></div>
+        <p class="hint" style="margin:4px 0 10px">uouin 使用的是对方网站的内部接口（非开放 API），对方可能随时更换签名或封禁，届时该来源静默失效、由其它来源兜底；默认关闭，请自行评估后开启。</p>
+        <div class="proto-row"><label class="switch"><input type="checkbox" id="ps-api1-on"><span class="sl"></span></label><span>自定义优选 API 1</span></div>
+        <div class="field"><input type="text" id="ps-api1-url" placeholder="https://example.com/ips.txt（纯 IP 行 / CSV / HTML 线路表 / base64 订阅 / sub://）" autocomplete="off"></div>
+        <div class="proto-row"><label class="switch"><input type="checkbox" id="ps-api2-on"><span class="sl"></span></label><span>自定义优选 API 2</span></div>
+        <div class="field"><input type="text" id="ps-api2-url" placeholder="https://example.com/ips.csv" autocomplete="off"></div>
+        <p class="hint">仅在订阅模式为「关闭」且「地址来源 → 优选 IP」开启时生效。所有来源只保留 Cloudflare 段 IP，结果缓存 10 分钟，每个开启的来源每次拉取占用 1 个子请求。排列顺序：内置保底 → 自定义 API 1 / 2 → HostMonit → uouin → 内置优选池。</p>
       </div>
     </section>
 

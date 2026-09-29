@@ -354,3 +354,73 @@ test('HostMonit 优选改为调用数据接口：按运营商命名、只保留 
   assert.ok(!('联通-01' in byName) && !('电信-01' in byName), '未勾选运营商的节点被剔除');
   assert.ok('优选IP-S01' in byName, '通用节点保留');
 });
+
+// ---------------- 优选 IP 来源开关：HostMonit / uouin / 自定义 API ----------------
+import { createHash } from 'node:crypto';
+const md5 = (s) => createHash('md5').update(s).digest('hex');
+async function withFetch(handler, fn) {
+  const offline = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, opts = {}) => { calls.push(String(url)); return handler(String(url), opts); };
+  try { return await fn(calls); } finally { globalThis.fetch = offline; }
+}
+const notFound = () => new Response('Not Found', { status: 404 });
+
+test('uouin 来源：签名与文档一致，按线路命名、只保留 CF 段，默认关闭', async () => {
+  const uouinData = { data: {
+    ctcc: { info: [{ ip: '172.64.147.19' }, { ip: '8.8.8.8' }] },
+    cucc: { info: [{ ip: '104.20.20.241' }] },
+    cmcc: { info: [{ ip: '104.17.212.240' }] },
+    bgp: { info: [{ ip: '172.64.151.168' }] },
+    ipv6: { info: [{ ip: '[2a06:98c1:310a:fb::5f0]' }] },
+  } };
+  const handler = (url) => url.startsWith('https://api.uouin.com/') ? new Response(JSON.stringify(uouinData)) : notFound();
+  // 默认关闭：不请求 uouin
+  await withFetch(handler, async (calls) => {
+    await subLinks(baseEnv({ K: kv({ config: { filter: { ipType: ['IPv4'] } } }) }));
+    assert.equal(calls.filter(u => u.includes('uouin')).length, 0);
+  });
+  // 开启
+  await withFetch(handler, async (calls) => {
+    const links = await subLinks(baseEnv({ K: kv({ config: { ipsrc: { uouin: true } } }) }));
+    const u = new URL(calls.find(x => x.includes('uouin')));
+    assert.equal(u.searchParams.get('key'), md5(md5('DdlTxtN0sUOu') + '70cloudflareapikey' + u.searchParams.get('time')));
+    assert.match(u.searchParams.get('time'), /^\d{13}$/);
+    const byName = Object.fromEntries(links.map(l => [nameOf(l), hostOf(l)]));
+    assert.equal(byName['电信-U01'], '172.64.147.19');
+    assert.equal(byName['联通-U01'], '104.20.20.241');
+    assert.equal(byName['移动-U01'], '104.17.212.240');
+    assert.equal(byName['多线-U01'], '172.64.151.168');
+    assert.equal(byName['IPv6-U01'], '[2a06:98c1:310a:fb::5f0]');
+    assert.ok(!links.some(l => hostOf(l) === '8.8.8.8'));
+  });
+});
+
+test('自定义优选 API 1/2：开关控制、只保留 CF 段；开启但未填地址时保存报错', async () => {
+  const handler = (url) => url === 'https://mine.example.com/ips.txt'
+    ? new Response('104.16.5.5:443#自有-A\n104.16.5.6\n8.8.8.8:443#外部')
+    : notFound();
+  await withFetch(handler, async (calls) => {
+    const off = await subLinks(baseEnv({ K: kv({ config: { filter: { ipType: ['IPv4'] }, ipsrc: { api1Url: 'https://mine.example.com/ips.txt' } } }) }));
+    assert.ok(!off.some(l => hostOf(l) === '104.16.5.5'), '开关关闭时不使用');
+    assert.equal(calls.filter(u => u.includes('mine.example.com')).length, 0);
+    const on = await subLinks(baseEnv({ K: kv({ config: { filter: { ipType: ['IPv4'] }, ipsrc: { api2: true, api2Url: 'https://mine.example.com/ips.txt' } } }) }));
+    const byHost = Object.fromEntries(on.map(l => [hostOf(l), nameOf(l)]));
+    assert.equal(byHost['104.16.5.5'], '自有-A');
+    assert.ok('104.16.5.6' in byHost);
+    assert.ok(!('8.8.8.8' in byHost), '非 CF 段被丢弃');
+  });
+  const env = baseEnv();
+  const cookie = await login(env);
+  const res = await call(env, `/${UUID}/api/config`, { method: 'POST', cookie, body: { ipsrc: { api1: true, api1Url: '' } } });
+  assert.equal(res.status, 400);
+  assert.ok((await res.json()).errors.some(e => e.field === 'ipsrc.api1Url'));
+});
+
+test('HostMonit 开关关闭时不下发其节点；选定地区时保留运营商线路节点', async () => {
+  // 上一个 HostMonit 测试已写入 10 分钟缓存（含 198.41.208.52「移动-01」）
+  const on = await subLinks(baseEnv({ K: kv({ config: { filter: { ipType: ['IPv4'], region: ['HK'] } } }) }));
+  assert.ok(on.some(l => nameOf(l) === '移动-01'), '选定地区时运营商线路节点（无地区标记）保留');
+  const off = await subLinks(baseEnv({ K: kv({ config: { filter: { ipType: ['IPv4'] }, ipsrc: { hostmonit: false } } }) }));
+  assert.ok(!off.some(l => /^(移动|联通|电信)-\d+$/.test(nameOf(l))), '关闭后不含 HostMonit 节点');
+});
