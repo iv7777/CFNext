@@ -336,7 +336,7 @@ test('HostMonit 优选改为调用数据接口：按运营商命名、只保留 
     if (String(url) === 'https://api.hostmonit.com/get_optimization_ip') {
       return new Response(JSON.stringify({ code: 200, info: [
         { ip: '198.41.208.52', line: 'CM' }, { ip: '198.41.209.212', line: 'CM' },
-        { ip: '162.159.128.65', line: 'CU' }, { ip: '198.41.208.52', line: 'CT' },   // 重复 IP：只保留首条（移动）
+        { ip: '162.159.128.65', line: 'CU' }, { ip: '198.41.208.52', line: 'CT' },   // 重复 IP：一个节点，名称含两条线路
         { ip: '104.19.0.9', line: 'CT' }, { ip: '8.8.8.8', line: 'CM' },             // 非 CF 段：丢弃
       ] }), { headers: { 'content-type': 'application/json' } });
     }
@@ -347,8 +347,9 @@ test('HostMonit 优选改为调用数据接口：按运营商命名、只保留 
   const hm = calls.find(c => c[0].includes('hostmonit'));
   assert.deepEqual([hm[1], JSON.parse(hm[2])], ['POST', { key: 'iDetkOys' }]);
   const byName = Object.fromEntries(links.map(l => [nameOf(l), hostOf(l)]));
-  assert.equal(byName['移动-01'], '198.41.208.52');
-  assert.equal(byName['移动-02'], '198.41.209.212');
+  assert.equal(byName['移动/电信-01'], '198.41.208.52');
+  assert.equal(byName['移动-01'], '198.41.209.212');
+  assert.equal(links.filter(l => hostOf(l) === '198.41.208.52').length, 1, '同一 IP 只下发一次');
   assert.ok(!links.some(l => hostOf(l) === '8.8.8.8'), '非 CF 段 IP 被丢弃');
   // 只勾选「移动」：剔除联通 / 电信节点，保留移动节点与不带运营商标记的通用节点
   assert.ok(!('联通-01' in byName) && !('电信-01' in byName), '未勾选运营商的节点被剔除');
@@ -422,7 +423,7 @@ test('HostMonit 开关关闭时不下发其节点；选定地区时保留运营�
   const on = await subLinks(baseEnv({ K: kv({ config: { filter: { ipType: ['IPv4'], region: ['HK'] } } }) }));
   assert.ok(on.some(l => nameOf(l) === '移动-01'), '选定地区时运营商线路节点（无地区标记）保留');
   const off = await subLinks(baseEnv({ K: kv({ config: { filter: { ipType: ['IPv4'] }, ipsrc: { hostmonit: false } } }) }));
-  assert.ok(!off.some(l => /^(移动|联通|电信)-\d+$/.test(nameOf(l))), '关闭后不含 HostMonit 节点');
+  assert.ok(!off.some(l => /^(移动|联通|电信)(\/(移动|联通|电信))*-\d+$/.test(nameOf(l))), '关闭后不含 HostMonit 节点');
 });
 
 test('优选来源测试接口：强制重新拉取，返回解析结果、丢弃项与原始响应；需登录', async () => {
@@ -463,4 +464,34 @@ test('优选来源测试接口：强制重新拉取，返回解析结果、丢�
   assert.equal((await post({ source: 'api1' })).status, 400, '缺少地址');
   assert.equal((await post({ source: 'nope' })).status, 400, '未知来源');
   assert.equal((await call(env, `/${UUID}/api/ipsrc-test`, { method: 'POST', body: { source: 'hostmonit' } })).status, 403, '未登录');
+});
+
+test('分线路来源：某条线路的 IP 全部与其它线路重复时，该线路仍保留在节点名中（HostMonit 联通 / uouin cucc）', async () => {
+  const env = baseEnv();
+  const cookie = await login(env);
+  const post = (body) => call(env, `/${UUID}/api/ipsrc-test`, { method: 'POST', cookie, body });
+  const handler = (url) => {
+    if (url.includes('hostmonit')) return new Response(JSON.stringify({ code: 200, info: [
+      { ip: '104.16.1.1', line: 'CM' }, { ip: '104.16.1.2', line: 'CT' },
+      { ip: '104.16.1.1', line: 'CU' }, { ip: '104.16.1.2', line: 'CU' },   // 联通的 IP 全部与移动 / 电信重复
+    ] }));
+    if (url.includes('uouin')) return new Response(JSON.stringify({ data: {
+      ctcc: { info: [{ ip: '104.16.2.1' }] }, cucc: { info: [{ ip: '104.16.2.1' }] }, cmcc: { info: [] }, bgp: { info: [{ ip: '104.16.2.1' }] }, ipv6: { info: [] },
+    } }));
+    return notFound();
+  };
+  await withFetch(handler, async () => {
+    const hm = (await (await post({ source: 'hostmonit' })).json()).data.items.map(x => x.name);
+    assert.deepEqual(hm, ['移动/联通-01', '电信/联通-01']);
+    const uo = (await (await post({ source: 'uouin' })).json()).data.items.map(x => x.name);
+    assert.deepEqual(uo, ['电信/联通/多线-U01']);
+  });
+  // 运营商筛选只勾选「联通」时，合并名称中含联通的节点保留、只标记其它运营商的节点剔除
+  //（用未缓存的自定义 API 来源验证；HostMonit / uouin 在前面的测试中已写入 10 分钟缓存）
+  const list = (url) => url === 'https://mine.example.com/lines.txt'
+    ? new Response('104.16.3.3:443#电信/联通-01\n104.16.3.4:443#移动-01\n') : notFound();
+  const env2 = baseEnv({ K: kv({ config: { filter: { ipType: ['IPv4'], isp: ['联通'] }, ipsrc: { hostmonit: false, api1: true, api1Url: 'https://mine.example.com/lines.txt' } } }) });
+  const names = await withFetch(list, async () => (await subLinks(env2)).map(nameOf));
+  assert.ok(names.includes('电信/联通-01'), '含联通的合并节点保留');
+  assert.ok(!names.includes('移动-01'), '只标记移动的节点被剔除');
 });

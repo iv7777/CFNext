@@ -2304,6 +2304,25 @@ const HOSTMONIT_API = 'https://api.hostmonit.com/get_optimization_ip';
 const HOSTMONIT_KEY = 'iDetkOys';
 const HOSTMONIT_LINE_CN = { CM: '移动', CU: '联通', CT: '电信' };
 const SUBPREF_CACHE = { t: 0, ips: null };
+// 分线路优选结果合并：同一 IP 常被多条线路同时选中（实测 HostMonit 有时 5 个联通 IP 全部与移动 / 电信重复）。
+// 订阅中同一 IP 只能出现一次，因此每个 IP 生成一个节点，名称包含它出现的全部线路（如「移动/联通-01」），
+// 运营商筛选勾选其中任一线路即保留——修复：原先只保留首条线路的名称，重复 IP 的其它线路（如联通）整组消失。
+// 输入 [{ ip, line }]（按接口顺序），输出 [{ ip, label, seq }]，seq 为同一名称下的两位序号
+function mergeIpLines(entries) {
+  const byIp = new Map();
+  for (const e of entries) {
+    if (!isValidIp(e.ip)) continue;
+    const g = byIp.get(e.ip);
+    if (!g) byIp.set(e.ip, { ip: e.ip, lines: [e.line] });
+    else if (!g.lines.includes(e.line)) g.lines.push(e.line);
+  }
+  const counters = {};
+  return [...byIp.values()].map(g => {
+    const label = g.lines.join('/');
+    counters[label] = (counters[label] || 0) + 1;
+    return { ip: g.ip, label, seq: String(counters[label]).padStart(2, '0') };
+  });
+}
 // 读取响应正文（失败返回空串）
 async function readText(res) { try { return await res.text(); } catch (e) { return ''; } }
 // 单次拉取 HostMonit 并解析（不读写缓存；面板「测试」按钮与订阅生成共用）。
@@ -2321,15 +2340,13 @@ async function hostmonitFetch(maxCount) {
   if (!res.ok) { r.error = 'HTTP ' + res.status; return r; }
   let j;
   try { j = JSON.parse(r.raw); } catch (e) { r.error = '响应不是 JSON'; return r; }
-  const seen = new Set(), counters = {};
-  for (const x of (j && Array.isArray(j.info) ? j.info : [])) {
-    const ip = String((x && x.ip) || '').trim();
-    if (!isValidIp(ip) || seen.has(ip)) continue;   // 同一 IP 可能同时出现在多条线路，只保留首条
-    seen.add(ip);
-    if (!isCloudflareIP(ip)) { r.dropped.push(ip); continue; }
-    const line = HOSTMONIT_LINE_CN[String(x.line || '').toUpperCase()] || '优选';
-    counters[line] = (counters[line] || 0) + 1;
-    r.items.push({ ip, port: 443, name: line + '-' + String(counters[line]).padStart(2, '0') });
+  const entries = (j && Array.isArray(j.info) ? j.info : []).map(x => ({
+    ip: String((x && x.ip) || '').trim(),
+    line: HOSTMONIT_LINE_CN[String((x && x.line) || '').toUpperCase()] || '优选',
+  }));
+  for (const g of mergeIpLines(entries)) {
+    if (!isCloudflareIP(g.ip)) { r.dropped.push(g.ip); continue; }
+    r.items.push({ ip: g.ip, port: 443, name: g.label + '-' + g.seq });
     if (r.items.length >= maxCount) break;
   }
   if (!r.items.length) r.error = '响应中没有 Cloudflare 段 IP';
@@ -2366,16 +2383,13 @@ async function uouinFetch() {
   try { j = JSON.parse(r.raw); } catch (e) { r.error = '响应不是 JSON'; return r; }
   const data = (j && j.data) || {};
   if (!j || !j.data) r.error = (j && j.msg) ? '接口返回：' + j.msg : '响应中没有 data 字段';
-  const seen = new Set();
+  const entries = [];
   for (const [grp, line] of UOUIN_GROUPS) {
-    let n = 0;
-    for (const x of ((data[grp] || {}).info || [])) {
-      const ip = String((x && x.ip) || '').trim().replace(/^\[|\]$/g, '');
-      if (!isValidIp(ip) || seen.has(ip)) continue;
-      seen.add(ip);
-      if (!isCloudflareIP(ip)) { r.dropped.push(ip); continue; }
-      r.items.push({ ip, port: 443, name: line + '-U' + String(++n).padStart(2, '0') });
-    }
+    for (const x of ((data[grp] || {}).info || [])) entries.push({ ip: String((x && x.ip) || '').trim().replace(/^\[|\]$/g, ''), line });
+  }
+  for (const g of mergeIpLines(entries)) {
+    if (!isCloudflareIP(g.ip)) { r.dropped.push(g.ip); continue; }
+    r.items.push({ ip: g.ip, port: 443, name: g.label + '-U' + g.seq });
   }
   if (!r.items.length && !r.error) r.error = '响应中没有 Cloudflare 段 IP';
   return r;
