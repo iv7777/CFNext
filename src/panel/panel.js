@@ -750,6 +750,65 @@ function previewSub(){
     .catch(function(){ $('prevType').textContent = '预览失败：无法连接服务器'; $('prevBody').textContent = ''; });
 }
 
+/* ===== 优选 IP 来源测试 ===== */
+var IPSRC_LABELS = { hostmonit: 'HostMonit 实时优选', uouin: 'uouin 分线路优选', api1: '自定义优选 API 1', api2: '自定义优选 API 2' };
+// 构造元素（内容一律走 textContent：原始响应来自外部，不能当 HTML 渲染）
+function mkEl(tag, cls, text){
+  var e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text != null) e.textContent = text;
+  return e;
+}
+function testIpSource(src){
+  var btn = $('ps-test-' + src), out = $('ps-test-out');
+  var body = { source: src };
+  if (src === 'api1' || src === 'api2') {
+    body.url = $('ps-' + src + '-url').value.trim();
+    if (!body.url) { toast('请先填写 ' + IPSRC_LABELS[src] + ' 的地址', 'err'); $('ps-' + src + '-url').focus(); return; }
+  }
+  btn.disabled = true;
+  out.style.display = 'block';
+  out.textContent = '';
+  out.appendChild(mkEl('div', 'ipt-dim', '正在拉取 ' + IPSRC_LABELS[src] + ' …'));
+  api('ipsrc-test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    .then(function(r){ renderIpTest(src, r); })
+    .catch(function(){ renderIpTest(src, { ok: false, msg: '无法连接服务器' }); })
+    .then(function(){ btn.disabled = false; });
+}
+function renderIpTest(src, r){
+  var out = $('ps-test-out');
+  out.textContent = '';
+  var head = mkEl('div', 'ipt-head');
+  head.appendChild(mkEl('b', '', IPSRC_LABELS[src] || src));
+  if (!r || !r.ok) {
+    head.appendChild(mkEl('span', 'ipt-err', '测试失败：' + ((r && r.msg) || '未知错误')));
+    out.appendChild(head);
+    return;
+  }
+  var d = r.data;
+  head.appendChild(mkEl('span', d.count ? 'ipt-ok' : 'ipt-err', d.count ? '✓ 可用 ' + d.count + ' 个 Cloudflare IP' : '✗ ' + (d.error || '没有可用 IP')));
+  head.appendChild(mkEl('span', 'ipt-dim', 'HTTP ' + (d.status || '—') + ' · ' + d.ms + ' ms'));
+  if (d.count && d.error) head.appendChild(mkEl('span', 'ipt-err', d.error));
+  out.appendChild(head);
+  if (d.items && d.items.length) {
+    var lines = d.items.map(function(x){
+      var host = String(x.ip).indexOf(':') >= 0 ? '[' + x.ip + ']' : x.ip;
+      return (x.name || '(自动编号 优选IP-NN)') + '    ' + host + ':' + (x.port || 443);
+    });
+    if (d.count > d.items.length) lines.push('… 另有 ' + (d.count - d.items.length) + ' 个');
+    out.appendChild(mkEl('div', 'ipt-dim', '订阅中将使用的节点（名称 · 地址）：'));
+    out.appendChild(mkEl('pre', 'code', lines.join('\n')));
+  }
+  if (d.droppedCount) {
+    out.appendChild(mkEl('div', 'ipt-dim', '已丢弃 ' + d.droppedCount + ' 个非 Cloudflare 段地址：' + d.dropped.join(', ') + (d.droppedCount > d.dropped.length ? ' …' : '')));
+  }
+  var det = mkEl('details');
+  det.appendChild(mkEl('summary', '', '原始响应（' + (d.rawLength > d.raw.length ? '前 ' + d.raw.length + ' / 共 ' + d.rawLength : '共 ' + d.rawLength) + ' 字符）'));
+  det.appendChild(mkEl('pre', 'code', d.raw || '(空)'));
+  if (!d.count) det.open = true;   // 没有可用 IP 时默认展开原始响应，便于排查
+  out.appendChild(det);
+}
+
 /* ===== 优选配置 ===== */
 function onSubMode(){
   var m = $('o-submode').value;

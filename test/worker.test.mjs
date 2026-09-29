@@ -424,3 +424,43 @@ test('HostMonit 开关关闭时不下发其节点；选定地区时保留运营�
   const off = await subLinks(baseEnv({ K: kv({ config: { filter: { ipType: ['IPv4'] }, ipsrc: { hostmonit: false } } }) }));
   assert.ok(!off.some(l => /^(移动|联通|电信)-\d+$/.test(nameOf(l))), '关闭后不含 HostMonit 节点');
 });
+
+test('优选来源测试接口：强制重新拉取，返回解析结果、丢弃项与原始响应；需登录', async () => {
+  const env = baseEnv();
+  const cookie = await login(env);
+  const post = (body) => call(env, `/${UUID}/api/ipsrc-test`, { method: 'POST', cookie, body });
+  const handler = (url) => {
+    if (url === 'https://api.hostmonit.com/get_optimization_ip') {
+      return new Response(JSON.stringify({ code: 200, info: [{ ip: '198.41.208.99', line: 'CU' }, { ip: '9.9.9.9', line: 'CM' }] }));
+    }
+    if (url.startsWith('https://api.uouin.com/')) return new Response(JSON.stringify({ code: -1, msg: '密钥错误，如需对接请使用开放API！' }));
+    if (url === 'https://mine.example.com/list.txt') return new Response('104.16.7.7:443#自有-B\n1.1.1.1\n');
+    if (url === 'https://mine.example.com/404') return new Response('nope', { status: 404 });
+    return notFound();
+  };
+  await withFetch(handler, async (calls) => {
+    // HostMonit：即使缓存里已有结果也会重新请求
+    let d = (await (await post({ source: 'hostmonit' })).json()).data;
+    assert.equal(calls.filter(u => u.includes('hostmonit')).length, 1, '测试不读缓存');
+    assert.deepEqual(d.items, [{ ip: '198.41.208.99', port: 443, name: '联通-01' }]);
+    assert.deepEqual(d.dropped, ['9.9.9.9']);
+    assert.equal(d.status, 200);
+    assert.match(d.raw, /198\.41\.208\.99/);
+    // uouin：接口报错时带回对方的错误信息
+    d = (await (await post({ source: 'uouin' })).json()).data;
+    assert.equal(d.count, 0);
+    assert.match(d.error, /密钥错误/);
+    // 自定义 API：用请求中的地址（无需先保存）
+    d = (await (await post({ source: 'api1', url: 'https://mine.example.com/list.txt' })).json()).data;
+    assert.deepEqual(d.items.map(x => [x.ip, x.name]), [['104.16.7.7', '自有-B']]);
+    assert.deepEqual(d.dropped, ['1.1.1.1']);
+    assert.match(d.raw, /自有-B/);
+    d = (await (await post({ source: 'api2', url: 'https://mine.example.com/404' })).json()).data;
+    assert.equal(d.status, 404);
+    assert.equal(d.error, 'HTTP 404');
+  });
+  assert.equal((await post({ source: 'api1', url: 'ftp://x' })).status, 400, '非法地址');
+  assert.equal((await post({ source: 'api1' })).status, 400, '缺少地址');
+  assert.equal((await post({ source: 'nope' })).status, 400, '未知来源');
+  assert.equal((await call(env, `/${UUID}/api/ipsrc-test`, { method: 'POST', body: { source: 'hostmonit' } })).status, 403, '未登录');
+});

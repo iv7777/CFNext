@@ -2304,31 +2304,42 @@ const HOSTMONIT_API = 'https://api.hostmonit.com/get_optimization_ip';
 const HOSTMONIT_KEY = 'iDetkOys';
 const HOSTMONIT_LINE_CN = { CM: '移动', CU: '联通', CT: '电信' };
 const SUBPREF_CACHE = { t: 0, ips: null };
-async function fetchLatestPreferredIPs(maxCount) {
-  maxCount = Math.max(1, parseInt(maxCount) || 150);
-  if (SUBPREF_CACHE.ips && Date.now() - SUBPREF_CACHE.t < 10 * 60 * 1000) return SUBPREF_CACHE.ips;
+// 读取响应正文（失败返回空串）
+async function readText(res) { try { return await res.text(); } catch (e) { return ''; } }
+// 单次拉取 HostMonit 并解析（不读写缓存；面板「测试」按钮与订阅生成共用）。
+// 返回 { status, raw, items: 保留的 CF 段节点, dropped: 丢弃的非 CF 段 IP, error }
+async function hostmonitFetch(maxCount) {
+  const r = { status: 0, raw: '', items: [], dropped: [], error: '' };
   const res = await fetchTimeout(HOSTMONIT_API, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'User-Agent': 'Mozilla/5.0' },
     body: JSON.stringify({ key: HOSTMONIT_KEY }),
   }, 6000);
-  let out = [];
-  if (res && res.ok) {
-    try {
-      const j = await res.json();
-      const seen = new Set(), counters = {};
-      for (const x of (j && Array.isArray(j.info) ? j.info : [])) {
-        const ip = String((x && x.ip) || '').trim();
-        if (!isValidIp(ip) || !isCloudflareIP(ip) || seen.has(ip)) continue;   // 同一 IP 可能同时出现在多条线路，只保留首条
-        seen.add(ip);
-        const line = HOSTMONIT_LINE_CN[String(x.line || '').toUpperCase()] || '优选';
-        counters[line] = (counters[line] || 0) + 1;
-        out.push({ ip, port: 443, name: line + '-' + String(counters[line]).padStart(2, '0') });
-        if (out.length >= maxCount) break;
-      }
-    } catch (e) { out = []; }
+  if (!res) { r.error = '请求失败或超时'; return r; }
+  r.status = res.status;
+  r.raw = await readText(res);
+  if (!res.ok) { r.error = 'HTTP ' + res.status; return r; }
+  let j;
+  try { j = JSON.parse(r.raw); } catch (e) { r.error = '响应不是 JSON'; return r; }
+  const seen = new Set(), counters = {};
+  for (const x of (j && Array.isArray(j.info) ? j.info : [])) {
+    const ip = String((x && x.ip) || '').trim();
+    if (!isValidIp(ip) || seen.has(ip)) continue;   // 同一 IP 可能同时出现在多条线路，只保留首条
+    seen.add(ip);
+    if (!isCloudflareIP(ip)) { r.dropped.push(ip); continue; }
+    const line = HOSTMONIT_LINE_CN[String(x.line || '').toUpperCase()] || '优选';
+    counters[line] = (counters[line] || 0) + 1;
+    r.items.push({ ip, port: 443, name: line + '-' + String(counters[line]).padStart(2, '0') });
+    if (r.items.length >= maxCount) break;
   }
-  if (out.length) { SUBPREF_CACHE.t = Date.now(); SUBPREF_CACHE.ips = out; return out; }
+  if (!r.items.length) r.error = '响应中没有 Cloudflare 段 IP';
+  return r;
+}
+async function fetchLatestPreferredIPs(maxCount) {
+  maxCount = Math.max(1, parseInt(maxCount) || 150);
+  if (SUBPREF_CACHE.ips && Date.now() - SUBPREF_CACHE.t < 10 * 60 * 1000) return SUBPREF_CACHE.ips;
+  const r = await hostmonitFetch(maxCount);
+  if (r.items.length) { SUBPREF_CACHE.t = Date.now(); SUBPREF_CACHE.ips = r.items; return r.items; }
   return SUBPREF_CACHE.ips;   // 本次失败：沿用上次成功结果（可能为 null）
 }
 
@@ -2341,32 +2352,59 @@ async function fetchLatestPreferredIPs(maxCount) {
 const UOUIN_API = 'https://api.uouin.com/index.php/index/Cloudflare';
 const UOUIN_GROUPS = [['ctcc', '电信'], ['cucc', '联通'], ['cmcc', '移动'], ['bgp', '多线'], ['ipv6', 'IPv6']];
 const UOUIN_CACHE = { t: 0, ips: null };
+// 单次拉取 uouin 并解析（不读写缓存；面板「测试」按钮与订阅生成共用），返回格式同 hostmonitFetch
+async function uouinFetch() {
+  const r = { status: 0, raw: '', items: [], dropped: [], error: '' };
+  const time = String(Date.now());
+  const key = md5hex(md5hex('DdlTxtN0sUOu') + '70cloudflareapikey' + time);
+  const res = await fetchTimeout(UOUIN_API + '?key=' + key + '&time=' + time, { headers: { 'User-Agent': 'Mozilla/5.0' } }, 6000);
+  if (!res) { r.error = '请求失败或超时'; return r; }
+  r.status = res.status;
+  r.raw = await readText(res);
+  if (!res.ok) { r.error = 'HTTP ' + res.status; return r; }
+  let j;
+  try { j = JSON.parse(r.raw); } catch (e) { r.error = '响应不是 JSON'; return r; }
+  const data = (j && j.data) || {};
+  if (!j || !j.data) r.error = (j && j.msg) ? '接口返回：' + j.msg : '响应中没有 data 字段';
+  const seen = new Set();
+  for (const [grp, line] of UOUIN_GROUPS) {
+    let n = 0;
+    for (const x of ((data[grp] || {}).info || [])) {
+      const ip = String((x && x.ip) || '').trim().replace(/^\[|\]$/g, '');
+      if (!isValidIp(ip) || seen.has(ip)) continue;
+      seen.add(ip);
+      if (!isCloudflareIP(ip)) { r.dropped.push(ip); continue; }
+      r.items.push({ ip, port: 443, name: line + '-U' + String(++n).padStart(2, '0') });
+    }
+  }
+  if (!r.items.length && !r.error) r.error = '响应中没有 Cloudflare 段 IP';
+  return r;
+}
 async function fetchUouinIPs(wantV4, wantV6) {
   let list = UOUIN_CACHE.ips;
   if (!list || Date.now() - UOUIN_CACHE.t >= 10 * 60 * 1000) {
-    const time = String(Date.now());
-    const key = md5hex(md5hex('DdlTxtN0sUOu') + '70cloudflareapikey' + time);
-    const res = await fetchTimeout(UOUIN_API + '?key=' + key + '&time=' + time, { headers: { 'User-Agent': 'Mozilla/5.0' } }, 6000);
-    const out = [];
-    if (res && res.ok) {
-      try {
-        const data = ((await res.json()) || {}).data || {};
-        const seen = new Set();
-        for (const [grp, line] of UOUIN_GROUPS) {
-          let n = 0;
-          for (const x of ((data[grp] || {}).info || [])) {
-            const ip = String((x && x.ip) || '').trim().replace(/^\[|\]$/g, '');
-            if (!isValidIp(ip) || !isCloudflareIP(ip) || seen.has(ip)) continue;
-            seen.add(ip);
-            out.push({ ip, port: 443, name: line + '-U' + String(++n).padStart(2, '0') });
-          }
-        }
-      } catch (e) { /* 响应不是预期 JSON：视为失败 */ }
-    }
-    if (out.length) { UOUIN_CACHE.t = Date.now(); UOUIN_CACHE.ips = out; list = out; }
+    const r = await uouinFetch();
+    if (r.items.length) { UOUIN_CACHE.t = Date.now(); UOUIN_CACHE.ips = r.items; list = r.items; }
   }
   // 按 IP 类型筛选取用（缓存中保留全部，v4 / v6 由调用方决定）
   return (list || []).filter(x => (x.ip.indexOf(':') >= 0 ? wantV6 : wantV4));
+}
+
+// 单次拉取自定义优选 API 并解析（不读写缓存；面板「测试」按钮用），返回格式同 hostmonitFetch。
+// 与订阅生成使用同一解析器（resolvePreferredDomains），先不过滤取得全部条目，再按 CF 段拆分为保留 / 丢弃
+async function customApiFetch(url) {
+  const r = { status: 0, raw: '', items: [], dropped: [], error: '' };
+  let seenRaw = false;
+  const all = await resolvePreferredDomains(url, 200, 300, false, false, false, {
+    fresh: true,
+    onRaw: (u, status, text) => { seenRaw = true; r.status = status; r.raw = text; },
+  }).catch(() => []);
+  if (!seenRaw) r.error = '地址无效';
+  else if (!r.status) r.error = '请求失败或超时';
+  else if (r.status < 200 || r.status >= 300) r.error = 'HTTP ' + r.status;
+  for (const x of all) (isValidIp(x.ip) && isCloudflareIP(x.ip) ? r.items : r.dropped).push(isValidIp(x.ip) && isCloudflareIP(x.ip) ? x : x.ip);
+  if (!r.items.length && !r.error) r.error = r.dropped.length ? '解析到的地址都不是 Cloudflare 段 IP' : '未能从响应中解析出 IP';
+  return r;
 }
 
 // ---------------------------------------------------------------------------
@@ -2448,7 +2486,8 @@ function fetchTimeout(url, opts, ms) {
 // 数据源能确定地区（路径含地区码）但无可解析 IP 时，用 CF 段随机生成该地区节点；
 // filterCF：仅自定义模式（关闭追加）传 false，输入框内容原样下发（用户自担可用性）；追加/默认模式保持 CF 段过滤保证可达
 // v6：默认 IPv4 模式跳过 AAAA 查询（省一半 DNS 子请求）；仅筛选含 IPv6 时传 true
-async function resolvePreferredDomains(domainsStr, limitPerDomain = 100, maxTotal = 300, allowRegionFallback = false, filterCF = true, v6 = false) {
+// opts.fresh：不读缓存、失败不回退旧缓存（面板「测试」按钮用）；opts.onRaw(url, status, text)：回传优选 API 的原始响应
+async function resolvePreferredDomains(domainsStr, limitPerDomain = 100, maxTotal = 300, allowRegionFallback = false, filterCF = true, v6 = false, opts = {}) {
   const list = String(domainsStr || '').split(/[\n,;]+/).map(s => s.trim().replace(/^\*\./, '')).filter(Boolean);
   const now = Date.now();
   // DoH 降级链：CF 官方 1.1.1.1 优先（Worker 与 1.1.1.1 同机房，内网时延 <5ms），仅当请求本身失败（网络错误 / 非 200）
@@ -2482,12 +2521,15 @@ async function resolvePreferredDomains(domainsStr, limitPerDomain = 100, maxTota
       }
       const ck = 'url:' + d + (allowRegionFallback ? '|rf' : '') + (filterCF ? '' : '|raw');
       const cHit = DNH_CACHE.get(ck);
-      if (cHit && now - cHit.t < 10 * 60 * 1000) return cHit.ips.slice(0, limitPerDomain);
+      if (!opts.fresh && cHit && now - cHit.t < 10 * 60 * 1000) return cHit.ips.slice(0, limitPerDomain);
       try {
         const res = await fetchTimeout(d, {}, 6000);
-        if (!res || !res.ok) throw new Error('unreachable');
+        if (!res) { if (opts.onRaw) opts.onRaw(d, 0, ''); throw new Error('unreachable'); }
         // edgetunnel 对齐：数组缓冲 + UTF-8/GBK 编码检测（国内优选 API 常返回 GB2312，直接 text() 会乱码）
-        const txt = decodeUtf8OrGbk(await res.arrayBuffer());
+        let txt = '';
+        try { txt = decodeUtf8OrGbk(await res.arrayBuffer()); } catch (e) { /* 正文读取失败 */ }
+        if (opts.onRaw) opts.onRaw(d, res.status, txt);
+        if (!res.ok) throw new Error('unreachable');
         // 兼容多种数据源格式：base64 订阅 / CSV 优选表 / HTML 线路表 / vless 订阅行 / 纯 IP 行
         let content = txt;
         // base64 内容检测（子订阅常见输出）：整段可 base64 且长度对齐则解码后再解析；
@@ -2630,7 +2672,7 @@ async function resolvePreferredDomains(domainsStr, limitPerDomain = 100, maxTota
       } catch (e) {
         // SWR 平滑容灾：当次拉取网络异常/超时，沿用上一轮有效缓存兜底，确保外部数据源抖动时订阅永不枯竭
         const stale = DNH_CACHE.get(ck);
-        if (stale && stale.ips && stale.ips.length) return stale.ips.slice(0, limitPerDomain);
+        if (!opts.fresh && stale && stale.ips && stale.ips.length) return stale.ips.slice(0, limitPerDomain);
         return [];   // 无历史缓存才返回空
       }
     }
@@ -3779,6 +3821,14 @@ input.invalid,select.invalid,textarea.invalid{border-color:var(--err)!important;
 .switch input.invalid+.sl,.spill input.invalid+span{outline:2px solid var(--err);outline-offset:2px}
 .field-err{font-size:12px;color:var(--err);margin-top:6px;line-height:1.5}
 .env-lock{color:var(--warn)}
+.ipt-out{margin-top:12px;border:1px solid var(--border);border-radius:10px;padding:12px 14px;background:var(--card2)}
+.ipt-out .ipt-head{display:flex;flex-wrap:wrap;gap:6px 14px;align-items:center;font-size:13px;margin-bottom:8px}
+.ipt-out .ipt-head b{font-size:13.5px}
+.ipt-out .ipt-ok{color:var(--ok)}.ipt-out .ipt-err{color:var(--err)}
+.ipt-out .ipt-dim{color:var(--dim);font-size:12px}
+.ipt-out pre.code{margin-top:6px;max-height:240px}
+.ipt-out details{margin-top:8px}
+.ipt-out summary{cursor:pointer;font-size:12.5px;color:var(--dim)}
 input:disabled,select:disabled,textarea:disabled{opacity:.6;cursor:not-allowed}
 .inrow{display:flex;gap:8px;align-items:flex-start}
 .inrow>div{flex:1}
@@ -4090,14 +4140,15 @@ pre.code{background:var(--bg2);border:1px solid var(--border);border-radius:8px;
       </div>
       <div class="card">
         <h3><span class="tick"></span>优选 IP 来源（默认模式）</h3>
-        <div class="proto-row"><label class="switch"><input type="checkbox" id="ps-hostmonit"><span class="sl"></span></label><span>HostMonit 实时优选（按移动 / 联通 / 电信分线路实测，节点名如「移动-01」）</span></div>
-        <div class="proto-row"><label class="switch"><input type="checkbox" id="ps-uouin"><span class="sl"></span></label><span>uouin 分线路优选（电信 / 联通 / 移动 / 多线 / IPv6，节点名如「电信-U01」）</span></div>
+        <div class="proto-row"><label class="switch"><input type="checkbox" id="ps-hostmonit"><span class="sl"></span></label><span>HostMonit 实时优选（按移动 / 联通 / 电信分线路实测，节点名如「移动-01」）</span><span style="flex:1"></span><button type="button" class="btn sm" id="ps-test-hostmonit" onclick="testIpSource('hostmonit')">测试</button></div>
+        <div class="proto-row"><label class="switch"><input type="checkbox" id="ps-uouin"><span class="sl"></span></label><span>uouin 分线路优选（电信 / 联通 / 移动 / 多线 / IPv6，节点名如「电信-U01」）</span><span style="flex:1"></span><button type="button" class="btn sm" id="ps-test-uouin" onclick="testIpSource('uouin')">测试</button></div>
         <p class="hint" style="margin:4px 0 10px">uouin 使用的是对方网站的内部接口（非开放 API），对方可能随时更换签名或封禁，届时该来源静默失效、由其它来源兜底；默认关闭，请自行评估后开启。</p>
-        <div class="proto-row"><label class="switch"><input type="checkbox" id="ps-api1-on"><span class="sl"></span></label><span>自定义优选 API 1</span></div>
+        <div class="proto-row"><label class="switch"><input type="checkbox" id="ps-api1-on"><span class="sl"></span></label><span>自定义优选 API 1</span><span style="flex:1"></span><button type="button" class="btn sm" id="ps-test-api1" onclick="testIpSource('api1')">测试</button></div>
         <div class="field"><input type="text" id="ps-api1-url" placeholder="https://example.com/ips.txt（纯 IP 行 / CSV / HTML 线路表 / base64 订阅 / sub://）" autocomplete="off"></div>
-        <div class="proto-row"><label class="switch"><input type="checkbox" id="ps-api2-on"><span class="sl"></span></label><span>自定义优选 API 2</span></div>
+        <div class="proto-row"><label class="switch"><input type="checkbox" id="ps-api2-on"><span class="sl"></span></label><span>自定义优选 API 2</span><span style="flex:1"></span><button type="button" class="btn sm" id="ps-test-api2" onclick="testIpSource('api2')">测试</button></div>
         <div class="field"><input type="text" id="ps-api2-url" placeholder="https://example.com/ips.csv" autocomplete="off"></div>
-        <p class="hint">仅在订阅模式为「关闭」且「地址来源 → 优选 IP」开启时生效。所有来源只保留 Cloudflare 段 IP，结果缓存 10 分钟，每个开启的来源每次拉取占用 1 个子请求。排列顺序：内置保底 → 自定义 API 1 / 2 → HostMonit → uouin → 内置优选池。</p>
+        <p class="hint">仅在订阅模式为「关闭」且「地址来源 → 优选 IP」开启时生效。所有来源只保留 Cloudflare 段 IP，结果缓存 10 分钟，每个开启的来源每次拉取占用 1 个子请求。排列顺序：内置保底 → 自定义 API 1 / 2 → HostMonit → uouin → 内置优选池。「测试」会立即重新拉取该来源（不影响订阅缓存，开关关闭时也可测试；自定义 API 使用输入框当前地址，无需先保存）。</p>
+        <div id="ps-test-out" class="ipt-out" style="display:none"></div>
       </div>
     </section>
 
@@ -5017,6 +5068,65 @@ function previewSub(){
     .catch(function(){ $('prevType').textContent = '预览失败：无法连接服务器'; $('prevBody').textContent = ''; });
 }
 
+/* ===== 优选 IP 来源测试 ===== */
+var IPSRC_LABELS = { hostmonit: 'HostMonit 实时优选', uouin: 'uouin 分线路优选', api1: '自定义优选 API 1', api2: '自定义优选 API 2' };
+// 构造元素（内容一律走 textContent：原始响应来自外部，不能当 HTML 渲染）
+function mkEl(tag, cls, text){
+  var e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text != null) e.textContent = text;
+  return e;
+}
+function testIpSource(src){
+  var btn = $('ps-test-' + src), out = $('ps-test-out');
+  var body = { source: src };
+  if (src === 'api1' || src === 'api2') {
+    body.url = $('ps-' + src + '-url').value.trim();
+    if (!body.url) { toast('请先填写 ' + IPSRC_LABELS[src] + ' 的地址', 'err'); $('ps-' + src + '-url').focus(); return; }
+  }
+  btn.disabled = true;
+  out.style.display = 'block';
+  out.textContent = '';
+  out.appendChild(mkEl('div', 'ipt-dim', '正在拉取 ' + IPSRC_LABELS[src] + ' …'));
+  api('ipsrc-test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    .then(function(r){ renderIpTest(src, r); })
+    .catch(function(){ renderIpTest(src, { ok: false, msg: '无法连接服务器' }); })
+    .then(function(){ btn.disabled = false; });
+}
+function renderIpTest(src, r){
+  var out = $('ps-test-out');
+  out.textContent = '';
+  var head = mkEl('div', 'ipt-head');
+  head.appendChild(mkEl('b', '', IPSRC_LABELS[src] || src));
+  if (!r || !r.ok) {
+    head.appendChild(mkEl('span', 'ipt-err', '测试失败：' + ((r && r.msg) || '未知错误')));
+    out.appendChild(head);
+    return;
+  }
+  var d = r.data;
+  head.appendChild(mkEl('span', d.count ? 'ipt-ok' : 'ipt-err', d.count ? '✓ 可用 ' + d.count + ' 个 Cloudflare IP' : '✗ ' + (d.error || '没有可用 IP')));
+  head.appendChild(mkEl('span', 'ipt-dim', 'HTTP ' + (d.status || '—') + ' · ' + d.ms + ' ms'));
+  if (d.count && d.error) head.appendChild(mkEl('span', 'ipt-err', d.error));
+  out.appendChild(head);
+  if (d.items && d.items.length) {
+    var lines = d.items.map(function(x){
+      var host = String(x.ip).indexOf(':') >= 0 ? '[' + x.ip + ']' : x.ip;
+      return (x.name || '(自动编号 优选IP-NN)') + '    ' + host + ':' + (x.port || 443);
+    });
+    if (d.count > d.items.length) lines.push('… 另有 ' + (d.count - d.items.length) + ' 个');
+    out.appendChild(mkEl('div', 'ipt-dim', '订阅中将使用的节点（名称 · 地址）：'));
+    out.appendChild(mkEl('pre', 'code', lines.join('\n')));
+  }
+  if (d.droppedCount) {
+    out.appendChild(mkEl('div', 'ipt-dim', '已丢弃 ' + d.droppedCount + ' 个非 Cloudflare 段地址：' + d.dropped.join(', ') + (d.droppedCount > d.dropped.length ? ' …' : '')));
+  }
+  var det = mkEl('details');
+  det.appendChild(mkEl('summary', '', '原始响应（' + (d.rawLength > d.raw.length ? '前 ' + d.raw.length + ' / 共 ' + d.rawLength : '共 ' + d.rawLength) + ' 字符）'));
+  det.appendChild(mkEl('pre', 'code', d.raw || '(空)'));
+  if (!d.count) det.open = true;   // 没有可用 IP 时默认展开原始响应，便于排查
+  out.appendChild(det);
+}
+
 /* ===== 优选配置 ===== */
 function onSubMode(){
   var m = $('o-submode').value;
@@ -5466,6 +5576,31 @@ async function handleRequest(request, env) {
         if (r.hasUpdate && r.code) d.code = r.code;
         return json({ ok: true, data: d });
       } catch (e) { return json({ ok: false, msg: '检测失败: ' + (e.message || e) }, 500); }
+    }
+
+    // 优选 IP 来源测试（面板「测试」按钮）：强制重新拉取指定来源（不读写缓存），返回解析结果与原始响应片段。
+    // 自定义 API 使用请求中的地址（面板输入框当前值，可在保存前测试）
+    if (apiName === 'ipsrc-test') {
+      if (request.method !== 'POST') return json({ ok: false, msg: '仅支持 POST' }, 405);
+      let body = {};
+      try { body = await request.json(); } catch (e) { /* 空请求体 */ }
+      const source = String((body && body.source) || '');
+      const t0 = Date.now();
+      let r;
+      if (source === 'hostmonit') r = await hostmonitFetch(150);
+      else if (source === 'uouin') r = await uouinFetch();
+      else if (source === 'api1' || source === 'api2') {
+        const chk = checkFieldValue(SCHEMA_BY_KEY.get('ipsrc.' + source + 'Url'), body.url);
+        if (chk.error || !chk.value) return json({ ok: false, msg: chk.error || '请先填写 API 地址' }, 400);
+        r = await customApiFetch(chk.value);
+      } else return json({ ok: false, msg: '未知来源：' + source }, 400);
+      const RAW_MAX = 4000;
+      return json({ ok: true, data: {
+        source, ms: Date.now() - t0, status: r.status, error: r.error || '',
+        count: r.items.length, items: r.items.slice(0, 300),
+        droppedCount: r.dropped.length, dropped: r.dropped.slice(0, 50),
+        raw: r.raw.slice(0, RAW_MAX), rawLength: r.raw.length,
+      } });
     }
 
     if (apiName === 'quota') {

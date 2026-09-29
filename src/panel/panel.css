@@ -117,6 +117,14 @@ input.invalid,select.invalid,textarea.invalid{border-color:var(--err)!important;
 .switch input.invalid+.sl,.spill input.invalid+span{outline:2px solid var(--err);outline-offset:2px}
 .field-err{font-size:12px;color:var(--err);margin-top:6px;line-height:1.5}
 .env-lock{color:var(--warn)}
+.ipt-out{margin-top:12px;border:1px solid var(--border);border-radius:10px;padding:12px 14px;background:var(--card2)}
+.ipt-out .ipt-head{display:flex;flex-wrap:wrap;gap:6px 14px;align-items:center;font-size:13px;margin-bottom:8px}
+.ipt-out .ipt-head b{font-size:13.5px}
+.ipt-out .ipt-ok{color:var(--ok)}.ipt-out .ipt-err{color:var(--err)}
+.ipt-out .ipt-dim{color:var(--dim);font-size:12px}
+.ipt-out pre.code{margin-top:6px;max-height:240px}
+.ipt-out details{margin-top:8px}
+.ipt-out summary{cursor:pointer;font-size:12.5px;color:var(--dim)}
 input:disabled,select:disabled,textarea:disabled{opacity:.6;cursor:not-allowed}
 .inrow{display:flex;gap:8px;align-items:flex-start}
 .inrow>div{flex:1}
