@@ -462,20 +462,11 @@ const REGION_CN = {
   EG: '埃及', AE: '阿联酋', IL: '以色列', NZ: '新西兰', KZ: '哈萨克斯坦', SA: '沙特'
 };
 
-// 默认 6 条地区优选源（bestcf 在线优选池，社区维护的可达中转 IP，可用率高）
-const DEFAULT_REGION_POOLS = [
-  'https://bestcf.pages.dev/random-region/HK/100.txt',
-  'https://bestcf.pages.dev/random-region/TW/100.txt',
-  'https://bestcf.pages.dev/random-region/JP/100.txt',
-  'https://bestcf.pages.dev/random-region/SG/100.txt',
-  'https://bestcf.pages.dev/random-region/US/100.txt',
-  'https://bestcf.pages.dev/random-region/KR/100.txt'
-].join('\n');
-// 识别 bestcf 地区优选池 URL：这类来源的 IP 为社区中转节点（非 CF 段），
-// 允许绕过「仅 CF 段」过滤直接下发；其余来源仍保持 CF 段硬性要求
-const TRUSTED_REGION_POOL_RE = /random-region\/[A-Z]{2,}\/\d+\.txt/i;
+// IPv4+IPv6 混合时只对前 N 个优选域名查询 AAAA（控制子请求数，见 generateSubscription 默认模式）
+const V6_DOMAIN_LIMIT = 12;
+// 优选 API / 地区池中的非 CF 段 IP（如 bestcf 地区池，全部为第三方中转服务器）一律按 CF 段过滤丢弃：
+// 第三方中转可获知部署域名与连接元数据，安全起见不再信任（仅「自定义订阅 · 仅自定义节点」模式原样下发，用户自担）
 function isTrustedRegionPool(url) {
-  // 安全修复：不再信任非 CF 段的社区中转 IP（第三方服务器可作为中间人），统一按 CF 段过滤
   return false;
 }
 
@@ -538,9 +529,9 @@ const CONFIG_SCHEMA = [
     pattern: '^https://\\S+$', hint: '须为 https:// 开头的 DoH 地址' },
   // TLS 控制：关闭下发全部节点，开启仅下发 TLS 端口节点（自定义域名部署时强制开启）
   { key: 'tlsOnly', type: 'bool', def: false, el: 'tls-only', label: '仅 TLS 端口' },
-  // 节点数量控制：默认开启，按 nodeLimitCount 精确限制节点总数
+  // 节点数量控制：默认开启，按 nodeLimitCount 限制下发节点总数（上限，不补足）
   { key: 'nodeLimit', type: 'bool', def: true, el: 'q-nl-on', label: '节点数量控制' },
-  { key: 'nodeLimitCount', type: 'int', def: 500, el: 'q-nl-count', label: '精确节点上限', min: 1, max: 1000 },
+  { key: 'nodeLimitCount', type: 'int', def: 500, el: 'q-nl-count', label: '节点上限', min: 1, max: 1000 },
   // 轮询机制：开启后每次更新订阅轮询下发新节点（KV issued 去重 + 数量限制），关闭后忽略轮询与限制、下发全部节点
   { key: 'polling', type: 'bool', def: false, el: 'q-poll-on', label: '轮询换新' },
   // ★ 节点测活（TCP 探测）总开关：默认关闭（推荐，对齐 V1.0.6）——订阅不做任何 TCP 握手/HTTP 探测与剔除，
@@ -792,14 +783,6 @@ const BUILTIN_STABLE_IPS = [
   '104.21.2.1', '104.24.12.10', '104.25.0.1', '104.26.1.1', '162.159.128.1'
 ];
 
-// bestcf 区域优选池（实时测速过的优质 CF IP，可用性远高于随机 CIDR 生成）
-const BESTCF_REGION_URLS = [
-  { label: '香港', region: 'HK', url: 'https://bestcf.pages.dev/random-region/HK/100.txt', count: 12 },
-  { label: '日本', region: 'JP', url: 'https://bestcf.pages.dev/random-region/JP/100.txt', count: 12 },
-  { label: '美国', region: 'US', url: 'https://bestcf.pages.dev/random-region/US/100.txt', count: 12 },
-  { label: '新加坡', region: 'SG', url: 'https://bestcf.pages.dev/random-region/SG/100.txt', count: 12 },
-  { label: '台湾', region: 'TW', url: 'https://bestcf.pages.dev/random-region/TW/100.txt', count: 12 }
-];
 
 
 const BUILTIN_PREFERRED_IPS = [
@@ -2420,20 +2403,23 @@ function fetchTimeout(url, opts, ms) {
 async function resolvePreferredDomains(domainsStr, limitPerDomain = 100, maxTotal = 300, allowRegionFallback = false, filterCF = true, v6 = false) {
   const list = String(domainsStr || '').split(/[\n,;]+/).map(s => s.trim().replace(/^\*\./, '')).filter(Boolean);
   const now = Date.now();
-  // DoH 降级链：CF 官方 1.1.1.1 优先（Worker 与 1.1.1.1 同机房，内网时延 <5ms 且只计 1 次子请求），失败后优雅降级阿里 DNS
+  // DoH 降级链：CF 官方 1.1.1.1 优先（Worker 与 1.1.1.1 同机房，内网时延 <5ms），仅当请求本身失败（网络错误 / 非 200）
+  // 才降级阿里 DNS——修复：原先两个 DoH 并发查询，每次解析固定消耗 2 个子请求（免费版每次请求上限 50），
+  // 且「无该类型记录」也被当作失败；现在正常情况下每次解析只计 1 个子请求
   const dohs = ['https://cloudflare-dns.com/dns-query', 'https://dns.alidns.com/resolve'];
-  // 并发两个 DoH，取最快成功结果
   const qry = async (d, type, filter) => {
-    const jobs = dohs.map(async (url) => {
+    for (const url of dohs) {
       const res = await fetchTimeout(url + '?name=' + encodeURIComponent(d) + '&type=' + type, { headers: { accept: 'application/dns-json' } }, 4000);
-      if (!res || !res.ok) throw new Error('doh unavailable');
-      const j = await res.json();
-      const arr = (j.Answer || []).filter(a => a.type === filter && (type === 'A' ? /^\d+\.\d+\.\d+\.\d+$/.test(a.data) : /^[0-9a-fA-F:]+$/.test(a.data))).map(a => a.data);
-      if (!arr.length) throw new Error('no answer');
-      return arr;
-    });
-    try { return await Promise.any(jobs); } catch (e) { return []; }
+      if (!res || !res.ok) continue;
+      try {
+        const j = await res.json();
+        return (j.Answer || []).filter(a => a.type === filter && (type === 'A' ? /^\d+\.\d+\.\d+\.\d+$/.test(a.data) : /^[0-9a-fA-F:]+$/.test(a.data))).map(a => a.data);
+      } catch (e) { /* 响应不是 JSON：尝试下一个 DoH */ }
+    }
+    return [];
   };
+  // 记录类型：v6=false 只查 A；v6=true 查 A + AAAA；v6='only' 只查 AAAA
+  const family = v6 === 'only' ? 'v6' : (v6 ? 'v4v6' : 'v4');
   // 每个条目返回一个有序 IP 数组
   const perItem = await Promise.all(list.map(async (d) => {
     if (d.includes('://')) {
@@ -2467,9 +2453,9 @@ async function resolvePreferredDomains(domainsStr, limitPerDomain = 100, maxTota
         const seen = new Set();
         const counters = {};
         const rec = [];
-        // bestcf 地区优选池：社区维护的可达中转 IP（非 CF 段），标记后允许绕过 CF 段过滤直接下发（v1.0.5 修复）
+        // 中转 IP 放行标记：isTrustedRegionPool 恒为 false，所有来源都按 CF 段过滤（保留以兼容 relay 字段）
         const relay = isTrustedRegionPool(d);
-        // 追加/默认模式强制 CF 段；bestcf 地区优选池（社区中转）放行；仅自定义模式（filterCF=false）原样下发
+        // 追加/默认模式强制 CF 段；仅自定义模式（filterCF=false）原样下发
         const pass = (ip) => !filterCF || isCloudflareIP(ip) || relay;
         // CSV 优选表解析（对齐 edgetunnel 请求优选API）：
         // ① wetest 风格：IP地址,端口,数据中心[,TLS]（TLS 列非 true 跳过，避免明文端口无法转发）
@@ -2614,23 +2600,22 @@ async function resolvePreferredDomains(domainsStr, limitPerDomain = 100, maxTota
       if (isIp) return [{ ip: host, port, name: '' }];
       // 无名称的域名：落入下方 DoH 解析分支（与原先一致）
     }
-    const hit = DNH_CACHE.get(d);
+    // 缓存键包含记录类型（修复：原先 A 与 A+AAAA 共用同一键，IPv6 查询可能命中只含 IPv4 的缓存）
+    const dk = d + '|' + family;
+    const hit = DNH_CACHE.get(dk);
     if (hit && now - hit.t < 10 * 60 * 1000) return hit.ips.slice(0, limitPerDomain).map((ip, i) => ({ ip, port: 443, name: d + '-' + (i + 1) }));
-    // 按需解析 IPv6：默认仅查 A（IPv4），筛选含 IPv6 时才追加 AAAA 查询，节省 50% DNS 子请求
-    const aRec = await qry(d, 'A', 1);
+    // 按需解析：默认仅查 A（IPv4），筛选含 IPv6 时才查 AAAA，节省 DNS 子请求
+    const aRec = family === 'v6' ? [] : await qry(d, 'A', 1);
+    const aaaaRec = family === 'v4' ? [] : await qry(d, 'AAAA', 28);
     // 严格自定义模式（filterCF=false）：域名解析结果原样下发，不做 CF 段过滤（用户自担可用性）
-    let ips = filterCF ? aRec.filter(isCloudflareIP) : aRec;
-    if (v6) {
-      const aaaaRec = await qry(d, 'AAAA', 28);
-      ips = [...new Set(aRec.concat(aaaaRec))].filter(ip => filterCF ? isCloudflareIP(ip) : true);
-    }
+    let ips = [...new Set(aRec.concat(aaaaRec))].filter(ip => filterCF ? isCloudflareIP(ip) : true);
     ips = ips.slice(0, limitPerDomain);
     if (!ips.length) {
       // SWR：当次解析失败（死链/超时）但有历史缓存（无论是否过期）→ 沿用旧数据兜底
       if (hit && hit.ips && hit.ips.length) return hit.ips.slice(0, limitPerDomain).map((ip, i) => ({ ip, port: 443, name: d + '-' + (i + 1) }));
       return [];
     }
-    DNH_CACHE.set(d, { t: now, ips });
+    DNH_CACHE.set(dk, { t: now, ips });
     return ips.map((ip, i) => ({ ip, port: 443, name: d + '-' + (i + 1) }));
   }));
   // 按输入顺序均衡截断：轮流取每条目的节点，保证各地区/域名都有且总量受控
@@ -2661,8 +2646,6 @@ async function buildNodes(cfg, cap = 800, skipSet = null) {
   // 其它模式（默认/追加/随机）入口必须是 CF 段——非 CF IP 无法转发到 Worker（历史 v2rayNG 全 -1 根因）
   const allowNonCF = (mode === 'custom' && !(cfg.optimizer && cfg.optimizer.subIncludeDefault));
   // 节点形态统一按 1.0.6 机制（方案 B）：所有模式端口原样单端口下发（固定 443、不随机 TLS 端口、不追加明文端口变体）
-  // 测活剔除范围（方案 A）：默认模式开启测活剔除死节点；自定义订阅 / 随机优选模式不测活
-  const probeSkip = (mode === 'custom' || mode === 'random');
   const push = (server, port, name, trusted) => {
     if (nodes.length >= cap) return;   // 生成过程限流：避免多协议膨胀超 Worker CPU
     // 入口 IP 硬性要求：非 CF 段 IP 无法转发到 Worker，直接丢弃；
@@ -2685,12 +2668,9 @@ async function buildNodes(cfg, cap = 800, skipSet = null) {
     push(server, Number(port) || 443, name, trusted);
   };
   if (mode === 'random') {
-    let n = Math.min(Math.max(parseInt(cfg.optimizer.subRandomCount) || 16, 1), Math.min(99, cap));
-    // 节点数量控制：开启后以设定数量为准（全局生效，与轮询开/关无关；提升随机优选生成量，使下发达到设定总数）
-    if (cfg.nodeLimit) {
-      const lim = parseInt(cfg.nodeLimitCount) || 0;
-      if (lim > 0) n = Math.min(Math.max(n, lim), cap);
-    }
+    // 生成数量以面板「随机优选数量」为准；节点数量控制等上限（cap）只做封顶——
+    // 修复：原先开启节点数量控制时会把数量抬到上限（默认 500），面板填写的数量不起作用
+    const n = Math.min(Math.max(parseInt(cfg.optimizer.subRandomCount) || 16, 1), Math.min(99, cap));
     // 数量 = 下发节点总数（含启用的所有协议），而非 IP 数：每个 IP 生成一条后计数，达 n 即止
     const protoCount = (cfg.enableVless ? 1 : 0) + (cfg.enableTrojan ? 1 : 0) + (cfg.enableXhttp ? 1 : 0) || 1;
     let made = 0;
@@ -2749,36 +2729,7 @@ async function buildNodes(cfg, cap = 800, skipSet = null) {
     parseIPList(BUILTIN_PREFERRED_IPS.join('\n')).forEach(x => multiPort(x.ip, x.port || 443, x.name || '0'));
     BUILTIN_OFFICIAL_DOMAINS.forEach((d, i) => multiPort(d, 443, '域名-' + String(i + 1).padStart(2, '0')));
   }
-  // CF CIDR 随机补足：节点数不足 fillCount（封顶 cap）时随机生成补齐（大量下发，客户端自动择优；对齐 1.0.6/2.0 第一版）
-  // 补足候选做小范围 TCP 测活（可达排前，不足由未测活补齐），保证节点数量充足
-  const fillCount = 0;   // 已移除随机补足（忽略旧 KV 中的 fillCount）
-  const need = Math.min(fillCount, cap) - used.size;   // 按唯一 IP 数补足，而非节点数（多协议节点会膨胀 nodes.length）
-  if (need > 0) {
-    // 优先用实测高存活率大站任播轮换补足（随机 CIDR 生成的任播 IP 大量不可达、客户端测速 -1）；
-    // 轮换仍带已下发去重，超出 STABLE 数量后回退随机 CIDR（保证海量下发数量）；
-    // 候选再做 TCP 测活（1.5s 超时，网络等待不计 CPU），可达排前，不足由未测活补齐
-    const freshStable = skipSet ? BUILTIN_STABLE_IPS.filter(ip => !skipSet.has(ip)) : BUILTIN_STABLE_IPS.slice();
-    const fillPool = randomIPsFromCidrs(RAND_CIDRS, need * 3);
-    const freshRand = skipSet ? fillPool.filter(ip => !skipSet.has(ip)) : fillPool;
-    let fillIPs = [...freshStable, ...freshRand];
-    if (fillIPs.length < need) fillIPs = [...BUILTIN_STABLE_IPS, ...fillPool];
-    if (fillIPs.length > 0) {
-      const probeCount = Math.min(fillIPs.length, Math.max(need, 20), 60);
-      const probeShot = fillIPs.slice(0, probeCount);
-      // 自定义订阅 / 随机优选模式不进行测活（节点原样下发）；默认模式保持测活剔除死节点
-      // 并发受限（≤4）：排队不再计入超时，避免假死
-      const probeOk = probeSkip ? probeShot.map(() => true) : await probeAll(probeShot, (ip) => testProxyAlive(ip, 443, 1500));
-      const alive = probeShot.filter((ip, i) => probeOk[i]);
-      const rest = fillIPs.slice(probeCount);
-      fillIPs = [...alive, ...rest].slice(0, need);
-    }
-    let fi = 0;
-    for (const ip of fillIPs) {
-      if (nodes.length >= cap) break;   // 补足同样受 cap 限流（与 push 一致）
-      fi++;
-      multiPort(ip, 443, '优选IP-' + String(fi).padStart(3, '0'));
-    }
-  }
+  // 已移除 CF CIDR 随机补足（随机任播 IP 大量不可达，客户端测速 -1）：节点数量由实际来源决定，旧 KV 中的 fillCount 被忽略
   return nodes;
 }
 
@@ -2875,7 +2826,8 @@ function filterNodes(nodes, filter) {
       if (tg && !tg.some(t2 => m.up.includes(t2.toUpperCase()))) {
         // 无地区标记的通用节点（优选IP-XX / 域名-XX / 原生地址）是 CF 通用入口，任意地区可用，不参与地区过滤；
         // 地区过滤仅剔除明确标记为其它地区的节点，避免指定地区后节点数量骤减
-        if (!/^(优选IP|域名)-\d+/.test(m.name) && m.name !== '原生地址') return false;
+        // （含「优选IP-S01」内置保底与「优选IP-V6-01」IPv6 域名解析节点）
+        if (!/^(优选IP|域名)-[A-Z0-9]/.test(m.name) && m.name !== '原生地址') return false;
       }
       if (t.length === 1) {
         if (t[0] === 'IPv4' && isV6) return false;
@@ -3350,29 +3302,6 @@ async function filterAliveDomains(domainText) {
   return DOMAIN_ALIVE_CACHE.list;
 }
 
-// bestcf 区域优选池拉取（内存缓存 10 分钟；并发拉 5 区域，解析 "IP:端口" 行）
-const bestcfCache = { list: null, at: 0 };
-async function fetchBestcfPool() {
-  if (bestcfCache.list && Date.now() - bestcfCache.at < 10 * 60 * 1000) return bestcfCache.list;
-  const out = [];
-  const jobs = BESTCF_REGION_URLS.map(async (rp) => {
-    try {
-      const res = await fetchTimeout(rp.url, { headers: { 'User-Agent': 'Mozilla/5.0' } }, 8000);
-      if (!res.ok) return;
-      const text = await res.text();
-      const got = [];
-      for (const line of text.split(/[\r\n]+/)) {
-        const m = line.trim().match(/^(\d{1,3}(?:\.\d{1,3}){3})(?::(\d+))?$/);
-        if (m && isCloudflareIP(m[1]) && got.length < rp.count) got.push({ ip: m[1], port: m[2] ? parseInt(m[2], 10) : 443, name: rp.label + '-' + String(got.length + 1).padStart(2, '0') });
-      }
-      got.forEach(g => out.push(g));
-    } catch (e) {}
-  });
-  await Promise.all(jobs);
-  bestcfCache.list = out;
-  bestcfCache.at = Date.now();
-  return out;
-}
 
 // 内置保底节点：CF 官方任播段 IP（实测 443 全部可达），固定 443 追加下发，
 // 无论任何订阅模式都保证订阅内存在稳定可用节点（参考 TunnelBoard 内置优选思路）
@@ -3438,7 +3367,7 @@ function computeNodeCap(cfg, isHeavy) {
   if (mode === 'custom' && !(cfg.optimizer && cfg.optimizer.subIncludeDefault)) cap = isHeavy ? Math.max(cap, 800) : Math.max(cap, 2000);
   // 轮询机制关闭：不限制 Clash 300 / V2rayN 800 上限，一次性下发全部节点（数量由数据源与 fillCount 决定）
   if (cfg.polling === false) cap = 10000;
-  // 节点数量控制（默认开启，全局生效，与轮询状态无关）：按设定数量精确下发（上限 1000 防滥用），轮询关闭时同样受限
+  // 节点数量控制（默认开启，全局生效，与轮询状态无关）：最多下发设定数量（上限 1000 防滥用），轮询关闭时同样受限
   if (cfg.nodeLimit) {
     const n = parseInt(cfg.nodeLimitCount) || 0;
     if (n > 0) cap = Math.min(n, 1000);
@@ -3467,11 +3396,10 @@ async function generateSubscription(cfg, requestUrl, format, ua, colo) {
   //   random          → 由 buildNodes 直接随机生成，此处不解析
   let resolved = [];
   // 筛选含 IPv6 时查询 AAAA 记录并生成 IPv6 节点（默认双选 IPv4+IPv6 同样生效）；
-  // 仅勾选 IPv6（单选）时随机生成/补足全部走 IPv6 专用段（参考 CFNext v1.0.5 可达性原则）
+  // 仅勾选 IPv6（单选）时全部走 IPv6 来源（参考 CFNext v1.0.5 可达性原则）
   const ipT = (cfg.filter && cfg.filter.ipType) || [];
   const wantV6 = ipT.includes('IPv6');
   const onlyV6 = ipT.length === 1 && ipT[0] === 'IPv6';
-  const RAND_CIDRS = onlyV6 ? OFFICIAL_V6_CIDRS : (wantV6 ? [...REACHABLE_CIDRS, ...OFFICIAL_V6_CIDRS] : REACHABLE_CIDRS);
   // 内置 Cloudflare 优选 IP（实测可达的 Anycast 兜底池，始终随订阅下发；无明确地区，名称统一“优选IP-XX”）
   const builtinIPs = parseIPList(BUILTIN_PREFERRED_IPS.join('\n')).map(x => ({ ip: x.ip, port: x.port || 443, name: x.name || ('优选IP-' + String(BUILTIN_PREFERRED_IPS.indexOf(x) + 1).padStart(2, '0')) }));
   if (mode === 'custom') {
@@ -3493,58 +3421,47 @@ async function generateSubscription(cfg, requestUrl, format, ua, colo) {
       rc.optimizer.fillCount = 0;   // 已移除随机补足：追加模式只合并真实来源节点
     }
   } else if (mode === '') {
-    // 关闭（使用面板默认）：
+    // 关闭（使用面板默认）：节点池由「地址来源」三项组装——
     // 1) 原生地址（src.native）：工作器域名直接作为节点 server 下发（默认关闭）；
-    // 2) 第三方优选域名直接作为节点 server 下发（客户端连接时动态 DNS 解析，拿到当前最优 CF 边缘 IP，可用性远高于静态 IP 快照）；
-    // 3) 订阅时自动拉取最新优选 IP（HostMonit 仓库，10 分钟缓存）作为 IP 节点，失败回退内置池；
-    // 4) CF CIDR 随机补足保证海量下发。
-    // 地区筛选开启时仍按地区源解析成 IP（地区节点需确定地区标记；域名节点无地区标记不参与地区过滤）。
+    // 2) 优选域名（src.prefDomain）：第三方优选域名直接作为节点 server 下发（客户端连接时动态 DNS 解析，拿到当前最优 CF 边缘 IP）；
+    // 3) 优选 IP（src.prefIp）：HostMonit 实时优选 + 内置保底 / 内置优选池。
+    // 这些来源都是 Cloudflare 任播 IP / 域名，不带地区标记（任播 IP 的落地机房取决于客户端所在网络），
+    // 因此面板「节点地区」筛选在默认模式下不改变节点构成；带地区名的来源（如 bestcf 地区池）只在自定义订阅中使用。
+    // 注：bestcf 地区池全部为第三方中转 IP（非 CF 段），出于安全考虑不在默认模式中使用
     const src = cfg.src || {};
     const useNative = src.native === true;            // 启用原生地址（工作器域名）
     const useDomain = src.prefDomain !== false;       // 启用优选域名（默认开）
     const useIp = src.prefIp !== false;               // 启用优选 IP（内置池 + 实时拉取，默认开）
-    // 原生地址（工作器域名，IPv4 入口）：仅勾选 IPv6 时跳过，避免 v4 域名混入
-    if (useNative && !onlyV6) {
-      rc.preferredDomains = (rc.preferredDomains ? rc.preferredDomains + '\n' : '') + rc.host + '#原生地址';
-    }
-    // 默认模式不使用「优选配置」中保存的自定义优选列表（该列表只在「自定义订阅」模式下下发；
+    // 默认模式不使用「优选配置」中保存的自定义优选列表（域名行与 IP 行都只在「自定义订阅」模式下下发；
     // 面板「地址来源 → 自定义优选」胶囊即切换到该模式），此处清空后仅由上述地址来源组装节点池
+    rc.preferredDomains = '';
     rc.preferredIPs = [];
-    const fl2 = cfg.filter || {};
-    const regionSel = fl2.region;
-    // 兼容字符串（旧配置）与数组（面板多选）：空 / 'all' / ['all'] 视为全部地区
-    const regionAll = Array.isArray(regionSel) ? (regionSel.length === 0 || regionSel.includes('all')) : (!regionSel || regionSel === 'all');
-    if (regionAll) {
-      resolved = [];
-      // 仅勾选 IPv6 时跳过 v4 优选域名（域名节点为 IPv4 入口，混入会占满 cap 并被 filterNodes 剔除，导致数量控制下发不足）
-      if (useDomain && !onlyV6) {
-        // 域名可用性预检：DoH 解析 + TCP 测活，死域名（NXDOMAIN/死 IP）不下发——客户端测速 -1 主因；
-        // 活域名仍按域名形式下发，保留客户端动态 DNS 解析拿当前最优 CF 边缘的优势
-        const aliveDomains = await filterAliveDomains(DEFAULT_PREFERRED_DOMAINS);
-        if (aliveDomains) rc.preferredDomains = (rc.preferredDomains ? rc.preferredDomains + '\n' : '') + aliveDomains;
-      }
-      // 仅勾选 IPv6 时跳过 IPv4 来源（fresh/地区池/内置池均为 v4，筛选后会被剔除，避免无谓解析与 CPU 开销）
-      if (useIp && !onlyV6) {
-        const fresh = await fetchLatestPreferredIPs(150);
-        if (fresh && fresh.length) rc.preferredIPs = [...(rc.preferredIPs || []), ...fresh];
-        // v1.0.5 修复：并入 bestcf 地区优选池（社区维护的可达中转 IP，可用率高，trusted 标记放行）作为默认优选 IP 来源之一
-        try {
-          const regionPool = await resolvePreferredDomains(DEFAULT_REGION_POOLS, 100, 600, true, true, false);
-          if (regionPool && regionPool.length) rc.preferredIPs = [...(rc.preferredIPs || []), ...regionPool];
-        } catch (e) { /* bestcf 池拉取失败不影响其它来源 */ }
-      }
-      // IPv6 节点来源：筛选含 IPv6 时解析默认域名池 AAAA 记录生成 v6 IP 节点（仅追加，不影响 v4 链路）；
-      // 仅勾选 IPv6 时并入官方域名 AAAA（增加真实可达 v6 数量），并关闭 CIDR 随机补足——
-      // 随机生成的任播段 v6 地址并非 CF 实际部署 IP，实测全部 -1，宁可少而真实
-      if (wantV6 && useDomain) {
-        try {
-          const v6src = DEFAULT_PREFERRED_DOMAINS + (onlyV6 ? '\n' + BUILTIN_OFFICIAL_DOMAINS.join('\n') : '');
-          const v6dom = await resolvePreferredDomains(v6src, 40, onlyV6 ? 800 : 240, false, true, true);
-          if (v6dom && v6dom.length) rc.preferredIPs = [...(rc.preferredIPs || []), ...v6dom];
-        } catch (e) { /* AAAA 解析失败不影响其它来源 */ }
-      }
-    } else if (useDomain) {
-      resolved = await resolvePreferredDomains(DEFAULT_PREFERRED_DOMAINS, 100, 300, false, true, wantV6);
+    // 原生地址（工作器域名，IPv4 入口）：仅勾选 IPv6 时跳过，避免 v4 域名混入
+    if (useNative && !onlyV6) rc.preferredDomains = rc.host + '#原生地址';
+    // 仅勾选 IPv6 时跳过 v4 优选域名（域名节点为 IPv4 入口，混入会占满 cap 并被 filterNodes 剔除，导致数量控制下发不足）
+    if (useDomain && !onlyV6) {
+      // 域名可用性预检（仅节点测活开启时）：DoH 解析 + TCP 测活，死域名不下发；
+      // 活域名仍按域名形式下发，保留客户端动态 DNS 解析拿当前最优 CF 边缘的优势
+      const aliveDomains = await filterAliveDomains(DEFAULT_PREFERRED_DOMAINS);
+      if (aliveDomains) rc.preferredDomains = (rc.preferredDomains ? rc.preferredDomains + '\n' : '') + aliveDomains;
+    }
+    // HostMonit 实时优选（仅勾选 IPv6 时跳过：该源与内置池均为 v4，筛选后会被剔除，避免无谓子请求）
+    if (useIp && !onlyV6) {
+      const fresh = await fetchLatestPreferredIPs(150).catch(() => null);
+      if (fresh && fresh.length) rc.preferredIPs.push(...fresh);
+    }
+    // IPv6 节点来源：筛选含 IPv6 时只查询优选域名的 AAAA 记录（v4 已由域名节点覆盖，不重复查 A）。
+    // 子请求预算：Workers 免费版每次请求最多 50 个子请求——IPv4+IPv6 混合时只解析前 V6_DOMAIN_LIMIT 个域名；
+    // 仅勾选 IPv6 时 v4 来源全部跳过，预算充足，解析全部域名并并入官方域名 AAAA
+    if (wantV6 && useDomain) {
+      try {
+        const v6src = onlyV6
+          ? DEFAULT_PREFERRED_DOMAINS + '\n' + BUILTIN_OFFICIAL_DOMAINS.join('\n')
+          : DEFAULT_PREFERRED_DOMAINS.split('\n').slice(0, V6_DOMAIN_LIMIT).join('\n');
+        const v6dom = await resolvePreferredDomains(v6src, 40, onlyV6 ? 800 : 240, false, true, 'only');
+        // 解析结果名为「域名-序号」，统一改为不带地区的通用名「优选IP-V6-NN」（地区筛选时作为通用节点保留）
+        if (v6dom && v6dom.length) rc.preferredIPs.push(...v6dom.map((x, i) => Object.assign({}, x, { name: '优选IP-V6-' + String(i + 1).padStart(2, '0') })));
+      } catch (e) { /* AAAA 解析失败不影响其它来源 */ }
     }
     // 内置实测池（IPv4）：单选 IPv6 时全量转 IPv4-embedded IPv6（2606:4700::<hex>，与对应 IPv4 路由到同一 CF 边缘，下发即用）；
     // 混合（IPv4+IPv6 同选）时全局下发——内置池全量保持 IPv4 且全量转 embedded IPv6，两侧都不削减
@@ -3571,34 +3488,31 @@ async function generateSubscription(cfg, requestUrl, format, ua, colo) {
     // 仅勾选 IPv6（单选）时清掉各来源混入的 IPv4（域名 AAAA 解析的 v4 与用户自定义列表中的 v4 一并剔除，
     // 避免 filterNodes 过滤空集后放宽回退全 v4；参考 CFNext v1.0.5 同款处理）
     if (onlyV6 && rc.preferredIPs) rc.preferredIPs = rc.preferredIPs.filter(x => String(x.ip).indexOf(':') >= 0);
-    if (!rc.optimizer) rc.optimizer = {};
-    // 单选 IPv6 时内置实测池已全量转 embedded IPv6（真实可达），无需 CIDR 随机补足（随机 v6 不可达会拖低可用率）；
-    // 纯 IPv4 / 混合保留少量随机补足供海量下发
-    rc.optimizer.fillCount = 0;   // 默认模式不再用随机 CIDR 补足
     // 连通率提升（纯排序，不删节点）：实测存活率最高的 20 条大站任播 IP（BUILTIN_STABLE_IPS）排到优选池最前——
-    // 客户端默认选第一个可用节点，头部放最稳 IP = 用户优先踩到高存活率节点；其它来源顺序与数量不变（appendStableNodes 自带 used 去重不会重复）
-    if (rc.preferredIPs && rc.preferredIPs.length) {
+    // 客户端默认选第一个可用节点，头部放最稳 IP；其它来源顺序与数量不变
+    if (rc.preferredIPs.length) {
       const stableNodes = BUILTIN_STABLE_IPS.map((ip, i) => ({ ip, port: 443, name: '优选IP-S' + String(i + 1).padStart(2, '0') }));
-      const stableSet = new Set(stableNodes.map(n => n.ip));
+      const stableSet = new Set(BUILTIN_STABLE_IPS);
       rc.preferredIPs = [...stableNodes, ...rc.preferredIPs.filter(x => !stableSet.has(x.ip))];
     }
   }
-  // 去重下发：读取上次已下发 IP（KV issued），所有模式均生效（随机补足 / 随机优选 / 自定义解析）
-  const skipSet = (cfg._skipIssued && cfg._skipIssued.size) ? cfg._skipIssued : null;
   if (resolved.length) {
-    // 新 IP 优先排前（供客户端优先连接），已下发过的 IP 紧随其后作为数量补齐——
-    // 采用 [...unissued, ...previouslyIssued] 策略，节点总量恒定，不再因去重塌陷
-    let fresh = resolved;
-    if (skipSet) {
-      const unissued = resolved.filter(x => !skipSet.has(x.ip));
-      const previouslyIssued = resolved.filter(x => skipSet.has(x.ip));
-      fresh = [...unissued, ...previouslyIssued];
-    }
     // 统一名称：域名池/数据源自动解析且无法确定地区的节点（"域名.xx-NN" 格式）改为“优选IP-XX”，避免长域名占据节点名；
     // 能确定地区的（如优选 API 源 /HK/ → “香港-XX”）、用户自定义名称（如 JP-A-147）与面板手动填写的名称保留不变
     const nameBase = (rc.preferredIPs || []).length;
-    fresh = fresh.map((x, i) => (/^[A-Za-z0-9.-]+\.[A-Za-z]{2,}-\d+$/.test(x.name || '')) ? Object.assign({}, x, { name: '优选IP-' + String(nameBase + i + 1).padStart(2, '0') }) : x);
-    rc.preferredIPs = [...(rc.preferredIPs || []), ...fresh];
+    const named = resolved.map((x, i) => (/^[A-Za-z0-9.-]+\.[A-Za-z]{2,}-\d+$/.test(x.name || '')) ? Object.assign({}, x, { name: '优选IP-' + String(nameBase + i + 1).padStart(2, '0') }) : x);
+    rc.preferredIPs = [...(rc.preferredIPs || []), ...named];
+  }
+  // 轮询换新：读取上次已下发 IP（KV issued），把未下发过的 IP 排前、已下发过的排后——节点总量恒定，
+  // 每次更新订阅按上限截断后拿到的是新一批 IP。对所有模式的 IP 列表生效（修复：原先只作用于解析结果，
+  // 默认模式「全部地区」时解析结果为空，轮询形同虚设）。内置保底 IP 固定在前，不参与轮换
+  const skipSet = (cfg._skipIssued && cfg._skipIssued.size) ? cfg._skipIssued : null;
+  // 顺序为「最久未下发优先」：从未下发过的在前（保持原顺序），已下发过的按上次下发时间由旧到新排列，
+  // 多次更新后依次轮遍整个 IP 池（_skipIssued 为 Map：IP → 在轮询窗口中的位置，0 = 最近一次下发）
+  if (skipSet && rc.preferredIPs && rc.preferredIPs.length) {
+    const pinned = new Set(BUILTIN_STABLE_IPS);
+    const age = (x) => (pinned.has(x.ip) || !skipSet.has(x.ip)) ? Infinity : Number(skipSet.get(x.ip)) || 0;
+    rc.preferredIPs = rc.preferredIPs.map((x, i) => [age(x), i, x]).sort((a, b) => (b[0] - a[0]) || (a[1] - b[1])).map(e => e[2]);
   }
   // 仅勾选 IPv6 时：resolved（地区筛选解析）在首次过滤之后才并入，此处二次过滤保证纯 v6（数量控制下不被 v4 挤占）
   if (onlyV6 && rc.preferredIPs) rc.preferredIPs = rc.preferredIPs.filter(x => String(x.ip).indexOf(':') >= 0);
@@ -3609,12 +3523,8 @@ async function generateSubscription(cfg, requestUrl, format, ua, colo) {
   const cap = computeNodeCap(cfg, isHeavy);
   // 随机优选节点无地区标记，随机模式下忽略地区筛选（ipType/isp 仍生效）
   const fl = (mode === 'random') ? Object.assign({}, cfg.filter, { region: 'all' }) : cfg.filter;
-  // 连通率优化：仅默认模式（mode===''）对最终优选 IP 池（内置静态池 + HostMonit 实时池 + bestcf 中转池）做 TCP 测活（10 分钟缓存），
-  // 剔除不可达 IP（静态快照与中转池中大量 IP 已失效，客户端测速 -1 主因）；
-  // 自定义模式（严格/追加）节点由用户自定（自建落地端口往往非 443，TCP 测活会误删），整体跳过测活剔除；
-  // 默认模式剔除数量由 fillCount 自动补足（补足路径同样已测活），下发总量保持不变
-  // 二次测活移除（对齐 1.0.6）：默认模式不再对优选 IP 池做 TCP 测活剔除——Worker 边缘连通性 ≠ 客户端连通性，
-  // 测活误杀导致可用节点少、订阅生成慢；全量下发由客户端自行择优（fillCount 补足块内的小范围测活仍保留）
+  // 不对优选 IP 池做 TCP 测活剔除（对齐 1.0.6）：Worker 边缘连通性 ≠ 客户端连通性，且 Workers 无法连接 CF 段 IP，
+  // 测活只会误杀或拖慢订阅；全量按顺序下发由客户端自行择优（节点测活开启时仅做优选域名 DoH 预检）
   let nodes = filterNodes(await buildNodes(rc, cap, skipSet), fl);
   // 兜底入口节点：自定义订阅严格模式（仅下发框内节点）不追加，其余模式追加原生地址与地区反代入口；
   // 仅勾选 IPv6 时跳过（原生地址/反代均为 IPv4 域名，混入会破坏「只下发 IPv6」语义）
@@ -3625,31 +3535,8 @@ async function generateSubscription(cfg, requestUrl, format, ua, colo) {
   // 内置保底节点：严格自定义模式（仅自定义节点）且已有自定义节点时跳过——用户自担可用性，不混入「内置·保底-X」；
   // 严格模式解析结果为空时仍追加保底，保证订阅永不为空（客户端不会收到「无效订阅」）
   if (!onlyV6 && !(strictCustom && nodes.length > 0)) appendStableNodes(nodes, rc, cap);
-  // 下发控制开启时按 cap 补足（全局生效，与轮询状态无关）：优先用 bestcf 区域优选池（实时测速过的优质 IP）补齐，
-  // 不足再用 ProxyIP 域名兜底（TCP 测活通过才下发），最后才回退 CF CIDR 随机生成——
-  // 避免下发大量「延迟 -1」的随机 IP 死节点（参考 TunnelBoard：订阅场景不生成随机 IP）
-  // 节点数量控制补足：严格自定义模式（仅自定义节点）跳过——不追加 bestcf 池 / ProxyIP 反代 / CIDR 随机 IP 等任何内置节点；
-  // 内置节点仅在「追加内置优选池与默认地区源」开启时作为追加下发
-  if (cfg.nodeLimit && mode && !strictCustom && nodes.length < cap) {
-    const need = cap - nodes.length;
-    // 该补足块仅服务「自定义订阅（追加内置）/ 随机优选」两种模式：
-    // 仅用 bestcf 区域优选池（已过滤为 CF 段）补齐；不再回退 CF CIDR 随机补足
-    const seen = new Set();
-    for (const n of nodes) { try { seen.add(parseNodeServer(n).host); } catch (e) {} }
-    const pushFill = (ip, port, name) => {
-      if (nodes.length >= cap) return;
-      if (seen.has(ip)) return;
-      seen.add(ip);
-      nodes.push(vlessNode(rc, ip, port || 443, name));
-    };
-    try {
-      const pool = await fetchBestcfPool();
-      const fresh = skipSet ? pool.filter(p => !skipSet.has(p.ip)) : pool;
-      const ordered = fresh.length >= need ? fresh : pool;
-      for (const p of ordered) { pushFill(p.ip, p.port, p.name || ('优选IP-' + String(p.port))); if (nodes.length >= cap) break; }
-    } catch (e) {}
-    // 已移除 CF CIDR 随机补足：bestcf 池（仅 CF 段）不足时不再生成随机 IP
-  }
+  // 「节点数量控制」只做上限，不再补足：原补足来源 bestcf 地区池全部为非 CF 段中转 IP，过滤后恒为空
+  // （每次请求白白消耗 5 个子请求）；随机优选模式也不再被补足到上限，按面板「随机优选数量」下发
   // 严格封顶：多协议膨胀可能越过 cap 一个 IP（3 条），统一截断到上限；节点数量控制开启时同样按设定值精确截断
   if (nodes.length > cap) nodes.length = cap;
   // 收集本次下发的所有 IP 型节点地址（排除域名），记录到 KV issued 供下次去重
@@ -3785,6 +3672,8 @@ function formatConfigErrors(errors) {
   return errors.map(e => (e.label ? e.label + '：' : '') + e.msg).join('；');
 }
 
+// 轮询换新窗口：记住最近下发过的 IP 数（KV 键 issued）
+const ISSUED_WINDOW = 1000;
 // 生成订阅：/sub 与面板预览共用同一流程（轮询去重 + 配额自动调节），保证预览与客户端实际拿到的一致；
 // commit=false（预览）时不写入 KV 轮询窗口，预览不会消耗换新轮次
 async function serveSubscription(request, env, cfg, fmt, commit) {
@@ -3794,7 +3683,8 @@ async function serveSubscription(request, env, cfg, fmt, commit) {
   if (cfg.polling !== false && env.K && typeof env.K.get === 'function') {
     try {
       const iv = await env.K.get('issued');
-      if (iv) { const j = JSON.parse(iv); if (Array.isArray(j.ips) && j.ips.length) skip = new Set(j.ips); }
+      // Map：IP → 在窗口中的位置（0 = 最近一次下发，越大越久），供「最久未下发优先」排序；随机模式只用 has()
+      if (iv) { const j = JSON.parse(iv); if (Array.isArray(j.ips) && j.ips.length) skip = new Map(j.ips.map((ip, i) => [ip, i])); }
     } catch (e) { /* 忽略 */ }
   }
   const subCfg = Object.assign({}, cfg);
@@ -3808,12 +3698,11 @@ async function serveSubscription(request, env, cfg, fmt, commit) {
   }
   const sub = await generateSubscription(subCfg, request.url, fmt, UA, request.cf && request.cf.colo);
   if (commit && cfg.polling !== false && env.K && typeof env.K.put === 'function' && sub.issued && sub.issued.length) {
-    // 滑动窗口历史队列：合并历史与本次已下发 IP，去重后保留最近 200 条（新 IP 优先保留），
-    // 既实现客户端定期换新 IP，又避免集合无限增长或清空引起数量塌陷
-    const prevIps = skip ? Array.from(skip) : [];
-    const win = [...new Set([...sub.issued, ...prevIps])].slice(0, 200);
-    // KV 免费写配额仅 1,000 次/日：仅当窗口内容实际变化（出现新 IP）时才写入，
-    // 客户端高频刷新但未换新 IP 时跳过写入，大幅降低 KV 写消耗与 CPU
+    // 滑动窗口历史队列（按下发时间由新到旧）：本次下发的 IP 排前，历史 IP 随后，去重后保留最近 ISSUED_WINDOW 条。
+    // 窗口大于单次下发量，才能记住多轮下发、按「最久未下发优先」轮遍整个 IP 池（原 200 条窗口只记得上一轮，两批 IP 来回切换）
+    const prevIps = skip ? Array.from(skip.keys()) : [];
+    const win = [...new Set([...sub.issued, ...prevIps])].slice(0, ISSUED_WINDOW);
+    // KV 免费写配额仅 1,000 次/日：仅当窗口内容实际变化时才写入（轮询开启时每次换新都会写入一次）
     const changed = win.length !== prevIps.length || win.some((ip, i) => ip !== prevIps[i]);
     if (changed) {
       const payload = JSON.stringify({ t: Date.now(), ips: win });

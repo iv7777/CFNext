@@ -44,7 +44,7 @@
         <h3><span class="tick"></span>快速开始</h3>
         <ol class="steps">
           <li><b>部署即用</b>：绑定域名后客户端订阅即可获得海量节点（内置 300 条优选 IP 与地区域名源），默认已配好大陆直连分流（大陆应用、微软、苹果直连，国外服务走代理）。</li>
-          <li><b>调优节点</b>：在「优选配置」在线测速，把最优 IP 加入优选列表（自定义订阅模式内置常用订阅源，可自行增删，可追加内置优选池与默认节点）。</li>
+          <li><b>调优节点</b>：用本地工具（如 CloudflareSpeedTest）在自己的网络下测速，把最优 IP 或优选 API 填入「优选配置」的优选节点列表，并切换到「自定义订阅」模式（可追加内置优选池与默认节点）。</li>
           <li><b>保障额度</b>：在「配额安全」开启用量监控与自动调节，防止免费额度超支（需在面板设置中配置 Cloudflare 账户 ID 与 API 令牌）。</li>
         </ol>
       </div>
@@ -125,7 +125,7 @@
             </div>
           </div>
         </div>
-        <p class="hint" style="margin-top:12px">筛选按 地区 → IP 类型 → 运营商 逐级放宽，任一维度无节点时自动放宽，保证订阅始终非空。「运营商偏好」按节点名称中的运营商标记过滤（移动=移动/CM/CHINAMOBILE、联通=联通/CU/UNICOM、电信=电信/CT/CHINATELECOM），三个全选或节点池无任何运营商标记时不生效。「节点地区」支持多选，仅剔除明确标记为其它地区的节点。「地址来源」控制下发节点的来源：原生地址（工作器域名）、优选域名（第三方优选域名列表）、优选 IP（内置与实时拉取的优选 IP）——这三项仅在订阅模式为「关闭」时生效；自定义优选 / 随机优选即切换「优选配置」中的订阅模式（二者互斥，勾选后仅按该模式下发）。</p>
+        <p class="hint" style="margin-top:12px">筛选按 地区 → IP 类型 → 运营商 逐级放宽，任一维度无节点时自动放宽，保证订阅始终非空。「运营商偏好」按节点名称中的运营商标记过滤（移动=移动/CM/CHINAMOBILE、联通=联通/CU/UNICOM、电信=电信/CT/CHINATELECOM），三个全选或节点池无任何运营商标记时不生效。「节点地区」支持多选，仅剔除节点名称明确标记为其它地区的节点；订阅模式为「关闭」时节点来源均为不带地区的 Cloudflare 任播 IP / 域名（任播 IP 的落地机房取决于你所在的网络），地区筛选不改变节点构成，需要按地区挑选请在「自定义订阅」中填写带地区名的优选 API / 节点。「地址来源」控制下发节点的来源：原生地址（工作器域名）、优选域名（第三方优选域名列表）、优选 IP（内置与实时拉取的优选 IP）——这三项仅在订阅模式为「关闭」时生效；自定义优选 / 随机优选即切换「优选配置」中的订阅模式（二者互斥，勾选后仅按该模式下发）。</p>
       </div>
       <div class="card">
         <h3><span class="tick"></span>配额速览 <span class="sub" id="dbSub">未配置监控</span></h3>
@@ -225,7 +225,7 @@
         <div class="field" id="sm-random" style="margin-top:14px;display:none">
           <label>随机优选数量（1-99）</label>
           <input type="number" id="o-rand" min="1" max="99" value="16">
-          <div class="hint">从 Cloudflare 地址段随机生成指定数量的优选节点直接下发，不经域名解析。</div>
+          <div class="hint">从 Cloudflare 地址段随机生成指定数量的优选节点直接下发，不经域名解析；另附 20 个内置保底节点。「节点数量控制」只作为上限，不会把数量补足到上限。</div>
         </div>
       </div>
     </section>
@@ -263,20 +263,20 @@
       <div class="grid2">
         <div class="card">
           <h3><span class="tick"></span>下发控制</h3>
-          <div class="proto-row"><label class="switch"><input type="checkbox" id="q-nl-on"><span class="sl"></span></label><span>精确节点数量控制</span></div>
-          <div class="field" style="margin-top:10px"><label>精确节点上限（1-1000）</label><input type="number" id="q-nl-count" min="1" max="1000" value="500"></div>
-          <p class="hint">默认开启：所有格式订阅精确下发到设定数量（默认 500，范围 1-1000），替代原轮询模式的 300/800 分档上限；勾选三种协议时节点总数仍为设定值（不再按协议 3 倍膨胀）。</p>
+          <div class="proto-row"><label class="switch"><input type="checkbox" id="q-nl-on"><span class="sl"></span></label><span>节点数量控制</span></div>
+          <div class="field" style="margin-top:10px"><label>节点上限（1-1000）</label><input type="number" id="q-nl-count" min="1" max="1000" value="500"></div>
+          <p class="hint">默认开启：所有格式订阅最多下发设定数量的节点（默认 500，范围 1-1000），替代原轮询模式的 300/800 分档上限；来源不足时按实际数量下发，不会用随机 IP 补足；勾选三种协议时节点总数仍不超过设定值。</p>
         </div>
         <div class="card">
           <h3><span class="tick"></span>轮询换新</h3>
           <div class="proto-row"><label class="switch"><input type="checkbox" id="q-poll-on"><span class="sl"></span></label><span>启用轮询（默认关闭）</span></div>
-          <p class="hint" style="margin-top:12px">默认关闭：一次性下发全部节点，不受 300/800 上限限制；开启后按格式上限轮换下发新 IP（200 条去重窗口，避免重复下发）；端口固定 443（1.0.6 机制），换新通过 IP 轮换实现。</p>
+          <p class="hint" style="margin-top:12px">默认关闭：一次性下发全部节点，不受 300/800 上限限制；开启后每次更新订阅按「最久未下发优先」排序 IP（记住最近下发的 1000 个 IP），多次更新依次轮遍整个优选池；仅当优选池大于节点上限时才会看到换新；端口固定 443（1.0.6 机制），换新通过 IP 轮换实现。</p>
         </div>
       </div>
       <div class="card">
         <h3><span class="tick"></span>当前下发策略</h3>
         <div class="grid3">
-          <div class="field" style="margin:0"><div class="kv"><span class="k">节点数量控制</span><span class="v" id="qNl">—</span></div><div class="kv"><span class="k">精确节点上限</span><span class="v" id="qNlCount">—</span></div></div>
+          <div class="field" style="margin:0"><div class="kv"><span class="k">节点数量控制</span><span class="v" id="qNl">—</span></div><div class="kv"><span class="k">节点上限</span><span class="v" id="qNlCount">—</span></div></div>
           <div class="field" style="margin:0"><div class="kv"><span class="k">节点测活</span><span class="v" id="qProbe">—</span></div><div class="kv"><span class="k">轮询换新机制</span><span class="v" id="qPoll">—</span></div></div>
           <div class="field" style="margin:0"><div class="kv"><span class="k">行式格式上限</span><span class="v" id="qCapLight">—</span></div><div class="kv"><span class="k">结构化格式上限</span><span class="v" id="qCapHeavy">—</span></div></div>
         </div>
@@ -326,7 +326,7 @@
         <h3><span class="tick"></span>运行信息</h3>
         <div class="kv"><span class="k">面板版本</span><span class="v" id="aVer">—</span></div>
         <div class="kv"><span class="k">KV 持久化</span><span class="v" id="aKv">—</span></div>
-        <div class="kv"><span class="k">轮询窗口</span><span class="v">最近 200 条</span></div>
+        <div class="kv"><span class="k">轮询窗口</span><span class="v">最近 1000 个 IP</span></div>
         <div class="kv"><span class="k">构建日期</span><span class="v">2026-09-27</span></div>
       </div>
       <div class="danger-zone">

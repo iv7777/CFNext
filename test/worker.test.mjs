@@ -258,3 +258,71 @@ test('检测更新：以仓库 CFNext.js 为基准，有更新时直接返回其
     globalThis.fetch = offline;
   }
 });
+
+// ---------------- 优选 IP 来源与下发 ----------------
+const STABLE = new Set(['104.16.128.11', '172.67.72.4', '104.17.201.77', '104.16.66.7', '104.16.88.7',
+  '104.16.98.7', '104.17.2.7', '104.17.44.9', '104.18.34.34', '104.18.7.34', '104.19.191.31', '104.19.1.1',
+  '104.20.15.15', '104.20.1.1', '104.21.23.1', '104.21.2.1', '104.24.12.10', '104.25.0.1', '104.26.1.1', '162.159.128.1']);
+const subLinks = async (env) => (await (await call(env, `/${UUID}/sub`, { ua: 'v2rayN/7.0' })).text()).split('\n').filter(l => /^(vless|trojan):\/\//.test(l));
+const hostOf = (l) => l.match(/@(\[[^\]]+\]|[^:?]+)/)[1];
+const nameOf = (l) => decodeURIComponent(l.slice(l.indexOf('#') + 1));
+
+test('默认模式轮询换新：每次更新按「最久未下发优先」换一批 IP，保底 IP 固定在前', async () => {
+  const env = baseEnv({ K: kv({ config: { polling: true, nodeLimitCount: 60, filter: { ipType: ['IPv4'] } } }) });
+  const batches = [];
+  for (let i = 0; i < 3; i++) {
+    const links = await subLinks(env);
+    assert.equal(links.length, 60);
+    const ips = links.map(hostOf).filter(h => /^\d+\.\d+\.\d+\.\d+$/.test(h));
+    assert.ok([...STABLE].every(ip => ips.includes(ip)), '保底 IP 每次都下发');
+    batches.push(new Set(ips.filter(ip => !STABLE.has(ip))));
+  }
+  assert.ok(batches[0].size > 0);
+  for (const [a, b] of [[0, 1], [1, 2], [0, 2]]) {
+    assert.equal([...batches[a]].filter(ip => batches[b].has(ip)).length, 0, `第 ${a + 1} 与第 ${b + 1} 批不重复`);
+  }
+});
+
+test('默认模式不下发「优选配置」中的自定义域名与 IP', async () => {
+  const env = baseEnv({ K: kv({ config: {
+    preferredDomains: 'my.custom.example\nhttps://api.example.com/ips.txt',
+    preferredIPs: [{ ip: '104.16.0.9', port: 443, name: 'MINE' }],
+    filter: { ipType: ['IPv4'] },
+  } }) });
+  const links = await subLinks(env);
+  assert.ok(links.length > 0);
+  assert.ok(!links.some(l => hostOf(l) === 'my.custom.example' || nameOf(l) === 'MINE'));
+});
+
+test('随机优选数量不被节点数量控制抬高', async () => {
+  const env = baseEnv({ K: kv({ config: { optimizer: { subMode: 'random', subRandomCount: 16 }, nodeLimit: true, nodeLimitCount: 500, filter: { ipType: ['IPv4'] } } }) });
+  const links = await subLinks(env);
+  assert.equal(links.filter(l => /^优选IP-\d+$/.test(nameOf(l))).length, 16);
+  assert.equal(links.length, 16 + 20, '随机 16 + 内置保底 20');
+});
+
+test('选择具体地区时仍保留不带地区的通用节点（含内置保底「优选IP-S」）', async () => {
+  const env = baseEnv({ K: kv({ config: { filter: { region: ['HK'], ipType: ['IPv4'] } } }) });
+  const names = (await subLinks(env)).map(nameOf);
+  assert.ok(names.includes('优选IP-S01'));
+});
+
+test('默认模式（IPv4+IPv6、节点测活开启）子请求数不超过免费版 50 个上限，DoH 不重复查询', async () => {
+  const env = baseEnv({ K: kv({ config: { probeAlive: true } }) });
+  const offline = globalThis.fetch;
+  const seen = [];
+  globalThis.fetch = async (url) => {
+    seen.push(String(url));
+    if (String(url).startsWith('https://cloudflare-dns.com/')) return new Response(JSON.stringify({ Status: 0, Answer: [] }), { headers: { 'content-type': 'application/dns-json' } });
+    return new Response('Not Found', { status: 404 });
+  };
+  try {
+    const links = await subLinks(env);
+    assert.ok(links.length > 0);
+  } finally {
+    globalThis.fetch = offline;
+  }
+  assert.ok(seen.length <= 50, `子请求 ${seen.length} 个：\n${seen.join('\n')}`);
+  assert.equal(seen.filter(u => u.includes('alidns')).length, 0, 'Cloudflare DoH 正常应答（即使无记录）时不再查询阿里 DNS');
+  assert.equal(seen.filter(u => u.startsWith('https://bestcf.pages.dev/')).length, 0, '默认模式不再拉取 bestcf 中转池');
+});
