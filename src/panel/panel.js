@@ -227,6 +227,7 @@ function protoText(){
 }
 function renderAll(){
   $('stProto').textContent = protoText();
+  rerenderIpTest();
 }
 function parseIps(t){
   var out = [];
@@ -675,7 +676,14 @@ function testIpSource(src){
     .catch(function(){ renderIpTest(src, { ok: false, msg: '无法连接服务器' }); })
     .then(function(){ btn.disabled = false; });
 }
+// 测试结果按「仅 TLS 端口」当前状态（含未保存的修改）展示实际会下发的节点，规则与服务端 buildNodes 一致：
+// 开启（或开启 ECH）时跳过明文端口；关闭时 443 节点另追加「名称·80」的 80 明文节点
+var HTTP_PORTS = [80, 8080, 8880, 2052, 2082, 2086, 2095];
+var LAST_IPTEST = null;
+function tlsOnlyNow(){ return $('tls-only').checked || $('ech-on').checked; }
+function rerenderIpTest(){ if (LAST_IPTEST) renderIpTest(LAST_IPTEST.src, LAST_IPTEST.r); }
 function renderIpTest(src, r){
+  LAST_IPTEST = { src: src, r: r };
   var out = $('ps-test-out');
   out.textContent = '';
   var head = mkEl('div', 'ipt-head');
@@ -691,12 +699,18 @@ function renderIpTest(src, r){
   if (d.count && d.error) head.appendChild(mkEl('span', 'ipt-err', d.error));
   out.appendChild(head);
   if (d.items && d.items.length) {
-    var lines = d.items.map(function(x){
+    var tlsOnly = tlsOnlyNow(), lines = [], nodes = 0, skipped = 0;
+    d.items.forEach(function(x){
       var host = String(x.ip).indexOf(':') >= 0 ? '[' + x.ip + ']' : x.ip;
-      return (x.name || '(自动编号 优选IP-NN)') + '    ' + host + ':' + (x.port || 443);
+      var name = x.name || '优选IP-NN', port = Number(x.port) || 443;
+      if (tlsOnly && HTTP_PORTS.indexOf(port) >= 0) { lines.push(name + '    ' + host + ':' + port + '    （仅 TLS 端口：将跳过）'); skipped++; return; }
+      lines.push(name + '    ' + host + ':' + port); nodes++;
+      if (!tlsOnly && port === 443) { lines.push(name + '·80    ' + host + ':80    （明文）'); nodes++; }
     });
-    if (d.count > d.items.length) lines.push('… 另有 ' + (d.count - d.items.length) + ' 个');
-    out.appendChild(mkEl('div', 'ipt-dim', '订阅中将使用的节点（名称 · 地址）：'));
+    if (d.count > d.items.length) lines.push('… 另有 ' + (d.count - d.items.length) + ' 个 IP');
+    out.appendChild(mkEl('div', 'ipt-dim', '订阅中将使用的节点（名称 · 地址，每个启用的协议各一条）：' + nodes + ' 个'
+      + (skipped ? '，跳过 ' + skipped + ' 个明文端口' : '')
+      + '。按「仅 TLS 端口」当前' + (tlsOnly ? '开启' : '关闭') + '状态' + ($('ech-on').checked ? '（ECH 已开启，强制仅 TLS）' : '') + '展示，切换后即时更新'));
     out.appendChild(mkEl('pre', 'code', lines.join('\n')));
   }
   if (d.droppedCount) {
@@ -759,6 +773,9 @@ $('fl-random-pref').addEventListener('change', function(){
   onSubMode();
   markDirty();
 });
+// 切换「仅 TLS 端口」/ ECH 时，已显示的测试结果随之更新
+$('tls-only').addEventListener('change', rerenderIpTest);
+$('ech-on').addEventListener('change', rerenderIpTest);
 /* ===== 启动 ===== */
 buildNav();
 var initView = 'dashboard';
