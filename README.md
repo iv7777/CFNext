@@ -6,6 +6,22 @@
 
 ---
 
+# 更新日志 _V2.0.12
+
+### ✨ 更新内容
+
+1. **节点连接提速（出站并发竞速）**：直连与内置地区反代同时发起，取先握手成功的一路，败者连接立即释放。直连有 300ms 优先窗口（可直连的站点不绕第三方反代），目标为 Cloudflare IP 时直接用反代；目标站在 Cloudflare 上时不再白等约 6 秒。出站模式（默认 / 不走代理 / 仅代理）的优先级不变
+2. **非 TLS 流量只走直连**：反代只能按 SNI 转发 TLS 流量，Telegram MTProto、明文 HTTP 等非 TLS 首包不再送进反代（避免连上后无响应、反复重连）
+3. **WS 0-RTT 早数据（ed=2048）**：TLS WebSocket 节点（VLESS / Trojan 链接、Clash）带 `?ed=2048`，Sing-box 用 `max_early_data`；服务端在握手阶段取出首包并抢先建连，省约 1 个往返；早数据须通过 UUID / Trojan 密码校验，否则按普通连接处理
+4. **VLESS 响应头提前下发**：头部解析成功即回 2 字节响应头，首包等待上限 80ms，避免部分客户端互相等待
+5. **ALPN 随面板设置下发**：h2 / http/1.1 逗号分隔，VLESS / Trojan / XHTTP 链接、Clash、Sing-box 均实际下发；留空时 ws 用 http/1.1、XHTTP 用 h2
+6. **Clash geosite 补全**：新增 `geox-url`（MetaCubeX 规则库，jsDelivr 镜像）及 `GEOSITE,CN`、`GEOSITE,category-ads-all` 规则
+7. **修复 Sing-box 配置无法启动**：改为 sing-box 1.12+ 格式（二进制 .srs 规则集、新版 DNS 与路由动作），旧配置在 sing-box 1.14 中直接报错；官方内核不支持 XHTTP，Sing-box 订阅中不再包含 XHTTP 节点。GUI.for.SingBox 请用「导入 sing-box 配置」插件导入
+8. **节点名称去重**：同时开启多种协议时，Trojan 节点名加「.T」、XHTTP 加「.X」（VLESS 不变）；不同地址同名时依次加「·2」「·3」，所有格式节点名唯一
+9. **修复明文端口节点无法连接**：80 / 8080 等明文端口的 WebSocket 连接不再被重定向到 HTTPS
+
+---
+
 # 更新日志 _V2.0.11
 
 ### ✨ 更新内容
@@ -252,7 +268,7 @@
 | 项 | 内容 |
 |---|---|
 | 项目名称 | **CFNext 订阅管理器** |
-| 当前版本 | v2.0.11 |
+| 当前版本 | v2.0.12 |
 | 运行环境 | Cloudflare Workers / Pages |
 | 部署形态 | 单文件 Worker/Pages（`CFNext.js`，由 `src/` 构建生成，见「九、开发与构建」） |
 | 数据存储 | Cloudflare KV（绑定变量 **K**）；未绑定时面板无法保存，仅环境变量生效 |
