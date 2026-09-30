@@ -251,6 +251,7 @@
 ### 1.1 节点下发逻辑
 
 - **默认模式（订阅关闭）**：下发「优选域名节点 + 在线优选 IP（自定义 API / HostMonit / uouin）」，全部为 Cloudflare 段地址，不生成随机 IP，也不再内置静态 IP 池
+- **端口**：默认只下发 TLS 端口节点（「节点配置 → 仅 TLS 端口」）；关闭后每个 443 节点另追加一个 80 明文节点（名称带「·80」），来源自带的 8080 / 2052 等明文端口原样下发；自定义域名使用明文节点需在 Cloudflare 关闭「始终使用 HTTPS」；开启 ECH 时始终只下发 TLS 端口节点
 - **节点上限**：单次订阅最多下发 500 个节点（按免费计划 10ms CPU 限制设定），来源不足时按实际数量下发，不补足；每次更新下发同一批节点
 
 ---
@@ -339,7 +340,7 @@
 | `subUrl` | 自定义订阅路径别名：`/<别名>/sub` 同样输出订阅（别名下不开放面板与管理接口） |
 | `enableVless` / `enableTrojan` / `enableXhttp` | 协议开关（默认 VLESS 开、其余关） |
 | `trojanPassword` | Trojan 密码 |
-| `alpn` / `tlsOnly` | ALPN 协商 / 仅 TLS 端口节点 |
+| `alpn` / `tlsOnly` | ALPN 协商 / 仅 TLS 端口节点（默认开启；关闭后 443 节点追加 80 明文节点，来源自带的明文端口原样下发） |
 | `ech` / `echHost` / `echDns` | ECH 开关 / 自定义 ECH 域名 / ECH DoH |
 | `probeAlive` | 节点测活开关（默认关闭） |
 | `optimizer.subMode` | 订阅模式：`''` 关闭 / `custom` 自定义订阅（支持汇聚）/ `random` 随机优选 |

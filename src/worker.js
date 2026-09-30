@@ -496,6 +496,8 @@ const PATH_SEG_PATTERN = '^[A-Za-z0-9._~-]+$';
 const HOSTNAME_PATTERN = '^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*$';
 const RESERVED_PATHS = ['login', 'version'];
 
+// KV 配置结构版本：2 起「仅 TLS 端口」默认开启（见 buildConfig 迁移）
+const CONFIG_REV = 2;
 const CONFIG_SCHEMA = [
   // ---- 面板设置 ----
   { key: 'uuid', type: 'string', def: '', el: 'a-uuid', label: 'UUID', required: true, lower: true,
@@ -526,7 +528,7 @@ const CONFIG_SCHEMA = [
   { key: 'echDns', type: 'string', def: '', el: 'ech-dns', label: 'ECH DNS', maxLen: 512,
     pattern: '^https://\\S+$', hint: '须为 https:// 开头的 DoH 地址' },
   // TLS 控制：关闭下发全部节点，开启仅下发 TLS 端口节点（自定义域名部署时强制开启）
-  { key: 'tlsOnly', type: 'bool', def: false, el: 'tls-only', label: '仅 TLS 端口' },
+  { key: 'tlsOnly', type: 'bool', def: true, el: 'tls-only', label: '仅 TLS 端口' },
   // ★ 节点测活（TCP 探测）总开关：默认关闭（推荐，对齐 V1.0.6）——订阅不做任何 TCP 握手/HTTP 探测与剔除，
   //   按数据源原始顺序全量下发、客户端自行择优（秒回，v2rayNG/AsteriskNG 刷新正常）；面板开启或 PROBE_ALIVE=1 强制开启。
   //   节点形态：所有模式统一按 1.0.6 机制——端口原样单端口下发（固定 443、不随机 TLS 端口、不追加明文端口变体）。
@@ -1100,6 +1102,9 @@ function buildConfig(env, kvCfg) {
       const v = getPath(kvCfg, d.key);
       if (v !== undefined) setPath(cfg, d.key, cloneJSON(v));
     }
+    // 旧版（cfgRev < 2）保存时「仅 TLS 端口」默认关闭且无法区分是否为用户选择：沿用新默认值（开启），
+    // 用户在面板中关闭并保存后才生效
+    if (!(kvCfg.cfgRev >= CONFIG_REV)) cfg.tlsOnly = schemaDefaults().tlsOnly;
   }
   // 环境变量锁定字段（ADMIN / D）优先于 KV：面板中这些项只读
   const locked = envLockedFields(env);
@@ -1127,6 +1132,7 @@ function buildConfig(env, kvCfg) {
 async function saveConfig(env, cfg) {
   if (!env.K || typeof env.K.put !== 'function') return null;
   const stored = pickSchema(cfg);
+  stored.cfgRev = CONFIG_REV;
   for (const key of Object.keys(envLockedFields(env))) {
     const ks = key.split('.');
     const parent = ks.length > 1 ? getPath(stored, ks.slice(0, -1).join('.')) : stored;
@@ -2567,16 +2573,17 @@ async function buildNodes(cfg, cap = NODE_CAP) {
     used.add(key);
     const isTls = !HTTP_PORTS.has(Number(port));
     if (cfg.tlsOnly && !isTls) return;   // TLS 控制：仅下发 TLS 端口节点，明文端口跳过
-    // 节点端口统一按 1.0.6 机制（方案 B）：端口原样下发（默认/自定义/随机优选均固定源端口，通常是 443），
-    // 不做 TLS 端口随机（443 全域可达性最佳），也不追加明文端口变体
+    // 节点端口按源端口原样下发（默认/自定义/随机优选通常是 443），不做 TLS 端口随机（443 全域可达性最佳）
     const finalPort = Number(port);
     if (cfg.enableVless) nodes.push(vlessNode(cfg, server, finalPort, name));
     if (cfg.enableTrojan) nodes.push(trojanNode(cfg, server, isTls ? finalPort : Number(port), name));  // Trojan 明文/TLS 端口均下发
     if (cfg.enableXhttp && isTls) nodes.push(vlessNode(cfg, server, finalPort, name, { type: 'xhttp' }));  // XHTTP 仅 TLS 端口
   };
-  // 单端口下发（1.0.6 机制，方案 B）：每个地址按源端口（通常 443）单条下发，不追加明文端口变体
+  // 按源端口（通常 443）下发；关闭「仅 TLS 端口」时，443 节点另追加一个 80 明文端口节点（名称加「·80」）
   const multiPort = (server, port, name, trusted) => {
-    push(server, Number(port) || 443, name, trusted);
+    port = Number(port) || 443;
+    push(server, port, name, trusted);
+    if (!cfg.tlsOnly && port === 443) push(server, 80, name + '·80', trusted);
   };
   if (mode === 'random') {
     // 生成数量以面板「随机优选数量」为准；节点上限（cap）只做封顶
@@ -3252,11 +3259,10 @@ async function generateSubscription(cfg, requestUrl, format, ua, colo) {
   // 筛选含 IPv6 时刷新官方 v6 网段（ips-v6，6 小时缓存节流；失败沿用内置/上次成功段）
   const _ipT0 = (cfg.filter && cfg.filter.ipType) || [];
   if (_ipT0.includes('IPv6')) await refreshOfficialV6CIDRs();
-  // 自定义域名部署（非 *.workers.dev）：Cloudflare 边缘实测明文 HTTP 端口（80/8080/8880/2052/2082/2086/2095）全部拒绝，
-  // 自动禁用明文端口节点（等效 tlsOnly）；节点端口统一固定为源端口（通常 443）单端口下发（1.0.6 机制）。
-  const hostOnly443 = !/\.workers\.dev$/i.test(new URL(requestUrl).hostname);
+  // 明文端口节点只由「仅 TLS 端口」控制（默认开启）；ECH 只对 TLS 生效，开启时同样只下发 TLS 端口节点。
+  // 自定义域名的明文端口需在 Cloudflare 关闭「始终使用 HTTPS」，否则被 301 重定向、WebSocket 握手失败
   const rc = Object.assign({}, cfg, { host: cfg.host || new URL(requestUrl).hostname });
-  if (hostOnly443) { rc.tlsOnly = true; }
+  if (rc.ech) rc.tlsOnly = true;
   const mode = (cfg.optimizer && cfg.optimizer.subMode) || '';
   // 订阅模式决定节点来源：
   //   ''（关闭，默认）→ 仅用内置默认优选池限量下发（不解析自定义订阅的优选节点）

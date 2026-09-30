@@ -58,7 +58,7 @@ test('GET /api/config 返回字段表默认值（与旧 DEFAULT_CONFIG 一致）
   // 旧 DEFAULT_CONFIG 的取值（filter.region 由 'all' 改为等价的 ['all']，src 为面板保存的地址来源默认值）
   const legacy = {
     host: '', enableVless: true, enableTrojan: false, trojanPassword: '', enableXhttp: false,
-    alpn: '', ech: false, echHost: 'cloudflare-ech.com', echDns: '', tlsOnly: false,
+    alpn: '', ech: false, echHost: 'cloudflare-ech.com', echDns: '', tlsOnly: true,
     probeAlive: false, proxyIP: '', outboundProxy: '', outboundMode: '', preferredIPs: [],
     optimizer: { fillCount: 0, subMode: '', subRandomCount: 16, subIncludeDefault: false },
     filter: { region: ['all'], ipType: ['IPv4', 'IPv6'], isp: ['移动', '联通', '电信'] },
@@ -506,4 +506,32 @@ test('不再内置静态 IP 池；所有来源都没有产出时用官方域名�
   // 严格自定义模式且列表为空 → 同样兜底
   const c = await subLinks(baseEnv({ K: kv({ config: { optimizer: { subMode: 'custom' }, preferredDomains: '' } }) }));
   assert.ok(c.some(l => hostOf(l) === 'cloudflare.com'));
+});
+
+test('仅 TLS 端口：默认开启；关闭后 443 节点追加 80 明文节点，自定义域名同样生效；ECH 强制仅 TLS；旧版 KV 迁移为开启', async () => {
+  const url = 'https://ports.example.com/list.txt';
+  const handler = (u) => u === url ? new Response('104.16.1.1\n104.16.1.2:8080#p8080\n104.16.1.3:8443#p8443') : notFound();
+  const cfg = (extra) => ({ filter: { ipType: ['IPv4'] }, src: { prefDomain: false },
+    ipsrc: { hostmonit: false, uouin: false, api1: true, api1Url: url }, ...extra });
+  const portsOf = async (config) => withFetch(   // node.example.com：自定义域名
+  handler, async () => {
+    const env = baseEnv({ K: kv({ config }) });
+    const t = await (await call(env, `/${UUID}/sub`, { ua: 'v2rayN/7.0' })).text();
+    return t.split('\n').filter(l => /^vless:\/\//.test(l)).map(l => l.match(/:(\d+)\?/)[1] + ' ' + nameOf(l)).sort();
+  });
+  // 默认（开启）：只有 TLS 端口
+  assert.deepEqual(await portsOf(cfg({ cfgRev: 2 })), ['443 优选IP-01', '8443 p8443']);
+  // 关闭：自定义域名也下发明文端口（443 → 追加 ·80，来源自带的 8080 原样保留），明文节点 security=none
+  const off = await portsOf(cfg({ cfgRev: 2, tlsOnly: false }));
+  assert.deepEqual(off, ['443 优选IP-01', '80 优选IP-01·80', '8080 p8080', '8443 p8443']);
+  // ECH 开启时强制仅 TLS
+  assert.deepEqual(await portsOf(cfg({ cfgRev: 2, tlsOnly: false, ech: true })), ['443 优选IP-01', '8443 p8443']);
+  // 旧版 KV（无 cfgRev）保存的 tlsOnly:false 视为未选择，按新默认开启；保存后写入 cfgRev
+  assert.deepEqual(await portsOf(cfg({ tlsOnly: false })), ['443 优选IP-01', '8443 p8443']);
+  const env = baseEnv({ K: kv({ config: { tlsOnly: false } }) });
+  const cookie = await login(env);
+  assert.equal((await (await call(env, `/${UUID}/api/config`, { cookie })).json()).data.tlsOnly, true);
+  await call(env, `/${UUID}/api/config`, { method: 'POST', cookie, body: { tlsOnly: false } });
+  assert.equal(stored(env).cfgRev, 2);
+  assert.equal((await (await call(env, `/${UUID}/api/config`, { cookie })).json()).data.tlsOnly, false, '新版保存的关闭状态保留');
 });
