@@ -8,7 +8,8 @@ import { register } from 'node:module';
 const hooks = `
 export async function resolve(spec, ctx, next) {
   if (spec === 'cloudflare:sockets') {
-    return { url: 'data:text/javascript,export function connect(){ throw new Error("sockets unavailable in tests"); }', shortCircuit: true };
+    // 默认不可用；出站测试通过 globalThis.__connect 注入可控的假连接
+    return { url: 'data:text/javascript,export function connect(a){ if (globalThis.__connect) return globalThis.__connect(a); throw new Error("sockets unavailable in tests"); }', shortCircuit: true };
   }
   return next(spec, ctx);
 }`;
@@ -534,4 +535,171 @@ test('仅 TLS 端口：默认开启；关闭后 443 节点追加 80 明文节点
   await call(env, `/${UUID}/api/config`, { method: 'POST', cookie, body: { tlsOnly: false } });
   assert.equal(stored(env).cfgRev, 2);
   assert.equal((await (await call(env, `/${UUID}/api/config`, { cookie })).json()).data.tlsOnly, false, '新版保存的关闭状态保留');
+});
+
+// ---------------- 代理：出站竞速 / WS 0-RTT 早数据 / VLESS 响应头 ----------------
+// Workers 运行时对象的最小替身：WebSocketPair、101 响应、可控时延的 TCP 连接
+class FakeWS {
+  constructor() { this.sent = []; this.closed = null; this.l = {}; this.binaryType = ''; }
+  accept() {}
+  send(d) { this.sent.push(new Uint8Array(d)); }
+  close(code, reason) { this.closed = { code, reason }; }
+  addEventListener(t, f) { (this.l[t] = this.l[t] || []).push(f); }
+  emit(t, ev) { return Promise.all((this.l[t] || []).map(f => f(ev))); }
+}
+let lastServer = null;
+globalThis.WebSocketPair = function () { const client = new FakeWS(), server = new FakeWS(); lastServer = server; return { 0: client, 1: server }; };
+const NodeResponse = globalThis.Response;
+globalThis.Response = class extends NodeResponse {
+  constructor(body, init) {
+    if (init && init.status === 101) { super(null, { status: 200 }); Object.defineProperty(this, 'status', { value: 101 }); this.webSocket = init.webSocket; }
+    else super(body, init);
+  }
+};
+// 假网络：net[hostname] = { delay: 毫秒 | 'hang' | 'fail' }；记录每次连接与写入内容
+function fakeNet(net) {
+  const log = [];
+  globalThis.__connect = ({ hostname, port }) => {
+    const b = net[hostname] || { delay: 'fail' };
+    const sock = { hostname, port, written: [], closedByUs: false };
+    log.push(sock);
+    sock.opened = b.delay === 'hang' ? new Promise(() => {})
+      : b.delay === 'fail' ? Promise.reject(new Error('refused'))
+      : new Promise(r => setTimeout(r, b.delay));
+    sock.opened.catch(() => {});
+    sock.writable = new WritableStream({ write(c) { sock.written.push(new Uint8Array(c)); } });
+    sock.readable = new ReadableStream({ start(c) { sock.push = (d) => c.enqueue(d); } });
+    sock.close = () => { sock.closedByUs = true; };
+    return sock;
+  };
+  return log;
+}
+const until = async (cond, ms = 3000) => { const t0 = Date.now(); while (!cond()) { if (Date.now() - t0 > ms) throw new Error('timeout'); await new Promise(r => setTimeout(r, 5)); } };
+const uuidBytes = UUID.replace(/-/g, '').match(/../g).map(h => parseInt(h, 16));
+// VLESS TCP 请求头（目标为域名）+ 首包
+const vlessReq = (host, port, payload = []) => new Uint8Array([0, ...uuidBytes, 0, 1, port >> 8, port & 255, 2, host.length, ...Buffer.from(host), ...payload]);
+const TLS_HELLO = [0x16, 0x03, 0x01, 0x00, 0x05, 1, 2, 3, 4, 5];
+// 内置地区反代的 DoH 解析：US → 203.0.113.10，HK → 203.0.113.20（无 colo 时本地区为 US、次地区为 HK）
+const relayDoh = (url) => {
+  const name = new URL(url).searchParams.get('name') || '';
+  const type = new URL(url).searchParams.get('type');
+  const ip = name.includes('.us.') ? '203.0.113.10' : name.includes('.hk.') ? '203.0.113.20' : null;
+  return new Response(JSON.stringify({ Status: 0, Answer: type === 'A' && ip ? [{ type: 1, data: ip }] : [] }));
+};
+async function openWs(env, headers = {}) {
+  const res = await worker.fetch(new Request(`https://node.example.com/${UUID}`, { headers: { Upgrade: 'websocket', ...headers } }), env, {});
+  assert.equal(res.status, 101);
+  return lastServer;
+}
+
+test('出站竞速：目标走 Cloudflare（直连挂起）时内置反代并发接管，约 0.3s 可用，不再白等 6s', async () => {
+  const log = fakeNet({ 'cf-site.example': { delay: 'hang' }, '203.0.113.10': { delay: 20 }, '203.0.113.20': { delay: 40 } });
+  await withFetch(relayDoh, async () => {
+    const ws = await openWs(baseEnv());
+    const t0 = Date.now();
+    await ws.emit('message', { data: vlessReq('cf-site.example', 443, TLS_HELLO).buffer });
+    await until(() => log.some(s => s.written.length));
+    const ms = Date.now() - t0;
+    const used = log.find(s => s.written.length);
+    assert.equal(used.hostname, '203.0.113.10', '本地区反代胜出');
+    assert.deepEqual([...used.written[0]], TLS_HELLO, '反代收到去掉 VLESS 头的原始 TLS 数据');
+    assert.ok(ms < 1500, `建连耗时 ${ms}ms`);
+    assert.ok(log.find(s => s.hostname === '203.0.113.20').closedByUs, '败者连接被释放');
+  });
+});
+
+test('出站竞速：直连在优先窗口内成功时使用直连，已建立的反代连接被关闭', async () => {
+  const log = fakeNet({ 'direct.example': { delay: 120 }, '203.0.113.10': { delay: 10 }, '203.0.113.20': { delay: 10 } });
+  await withFetch(relayDoh, async () => {
+    const ws = await openWs(baseEnv());
+    await ws.emit('message', { data: vlessReq('direct.example', 443, TLS_HELLO).buffer });
+    await until(() => log.some(s => s.written.length));
+    assert.equal(log.find(s => s.written.length).hostname, 'direct.example');
+    await until(() => log.filter(s => s.hostname.startsWith('203.')).every(s => s.closedByUs));
+  });
+});
+
+test('非 TLS 首包（如 Telegram MTProto）只走直连，不送进 SNI 型反代', async () => {
+  const log = fakeNet({ 'tg.example': { delay: 30 }, '203.0.113.10': { delay: 5 }, '203.0.113.20': { delay: 5 } });
+  await withFetch(relayDoh, async () => {
+    const ws = await openWs(baseEnv());
+    await ws.emit('message', { data: vlessReq('tg.example', 443, [0xef, 0xef, 0xef, 0xef]).buffer });
+    await until(() => log.some(s => s.written.length));
+    assert.deepEqual(log.map(s => s.hostname), ['tg.example']);
+  });
+});
+
+test('VLESS 响应头在头部解析后立即下发；头部与首包分帧到达时等待首包判定（不超过 80ms）', async () => {
+  const log = fakeNet({ 'split.example': { delay: 10 } });
+  await withFetch(relayDoh, async () => {
+    const ws = await openWs(baseEnv());
+    await ws.emit('message', { data: vlessReq('split.example', 443).buffer });   // 只有头部
+    assert.deepEqual(ws.sent.map(x => [...x]), [[0, 0]], '收到头部即回响应头，早于建连');
+    assert.equal(log.length, 0, '首包未到：暂不建连');
+    await ws.emit('message', { data: new Uint8Array(TLS_HELLO).buffer });
+    await until(() => log.some(s => s.written.length));
+    assert.deepEqual([...log.find(s => s.written.length).written[0]], TLS_HELLO);
+    assert.equal(ws.sent.length, 1, '响应头只发一次');
+  });
+});
+
+test('WS 0-RTT：Sec-WebSocket-Protocol 中的早数据在握手阶段即建连；非法 / UUID 不符的早数据被忽略', async () => {
+  const log = fakeNet({ 'early.example': { delay: 10 } });
+  const b64url = (u8) => Buffer.from(u8).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  await withFetch(relayDoh, async () => {
+    const ws = await openWs(baseEnv(), { 'Sec-WebSocket-Protocol': b64url(vlessReq('early.example', 443, TLS_HELLO)) });
+    await until(() => log.some(s => s.written.length));
+    assert.deepEqual([...log[0].written[0]], TLS_HELLO, '未收到任何 WS 数据帧即已转发首包');
+    assert.deepEqual(ws.sent.map(x => [...x]), [[0, 0]]);
+    await ws.emit('message', { data: new Uint8Array([9, 9]).buffer });   // 后续数据帧直接写出站
+    await until(() => log[0].written.length === 2);
+    // 普通子协议名 / 其它 UUID 的早数据：不建连，等待数据帧
+    const other = vlessReq('early.example', 443, TLS_HELLO); other[1] ^= 0xff;
+    for (const proto of ['binary', b64url(other)]) {
+      const n = log.length;
+      const w2 = await openWs(baseEnv(), { 'Sec-WebSocket-Protocol': proto });
+      await new Promise(r => setTimeout(r, 30));
+      assert.equal(log.length, n, proto);
+      assert.equal(w2.closed, null);
+    }
+  });
+});
+
+test('明文端口 WebSocket（http://）不再被重定向到 https；普通 http 请求仍重定向', async () => {
+  fakeNet({});
+  const ws = await worker.fetch(new Request(`http://node.example.com/${UUID}`, { headers: { Upgrade: 'websocket' } }), baseEnv(), {});
+  assert.equal(ws.status, 101);
+  const page = await worker.fetch(new Request(`http://node.example.com/${UUID}`), baseEnv(), {});
+  assert.equal(page.status, 301);
+});
+
+test('订阅：TLS ws 节点带 ed=2048、ALPN 随面板下发；多协议时 Trojan / XHTTP 名称加 .T / .X，节点名全局唯一', async () => {
+  // 自定义订阅中两条地址同名（名称按填写原样使用）
+  const env = baseEnv({ K: kv({ config: { enableTrojan: true, enableXhttp: true, alpn: 'h2, http/1.1', cfgRev: 2,
+    optimizer: { subMode: 'custom' }, preferredDomains: '104.16.9.1:443#同名\n104.16.9.2:443#同名', filter: { ipType: ['IPv4'] } } }) });
+  const get = (fmt) => withFetch(notFound, async () => (await call(env, `/${UUID}/sub/${fmt}`, { ua: 'x' })).text());
+  const links = (await get('plain')).split('\n').filter(Boolean);
+  assert.deepEqual(links.map(nameOf), ['同名', '同名.T', '同名.X', '同名·2', '同名.T·2', '同名.X·2']);
+  const [v, t, x] = links;
+  assert.match(v, /path=%2F[0-9a-f-]+%3Fed%3D2048&/, 'VLESS ws 带 ed=2048');
+  assert.match(t, /path=%2F[0-9a-f-]+%3Fed%3D2048/, 'Trojan ws 带 ed=2048');
+  assert.ok(!/ed%3D2048/.test(x), 'XHTTP 不带 ed');
+  for (const l of [v, t, x]) assert.match(l, /&alpn=h2,http\/1\.1(&|#)/, 'ALPN 原样逗号分隔');
+  // Clash：ws-opts.path 带 ed=2048，alpn 取面板设置，GEOSITE 数据源与规则
+  const clash = await get('clash');
+  assert.match(clash, /path: "\/[0-9a-f-]+\?ed=2048"/);
+  assert.match(clash, /alpn: \[h2, http\/1\.1\]/);
+  assert.match(clash, /geox-url:\n  geoip: "https:\/\/testingcf\.jsdelivr\.net\//);
+  assert.match(clash, /- GEOSITE,CN,直接连接/);
+  // sing-box：tag 唯一、无 xhttp（官方内核不支持）、early data 用字段声明而非 path、二进制规则集
+  const sb = JSON.parse(await get('singbox'));
+  const nodes = sb.outbounds.filter(o => o.server);
+  assert.deepEqual(nodes.map(o => o.tag), ['同名', '同名.T', '同名·2', '同名.T·2']);
+  const tags = sb.outbounds.map(o => o.tag);
+  assert.equal(new Set(tags).size, tags.length, 'outbound tag 不重复');
+  assert.ok(nodes.every(o => o.transport.type === 'ws' && o.transport.max_early_data === 2048 && !o.transport.path.includes('?')));
+  assert.deepEqual(nodes[0].tls.alpn, ['h2', 'http/1.1']);
+  assert.ok(sb.route.rule_set.every(r => r.format === 'binary' && r.url.endsWith('.srs')));
+  assert.ok(!sb.outbounds.some(o => o.type === 'dns' || o.type === 'block'), '不含已移除的 dns / block 出站');
+  assert.ok(!JSON.stringify(sb.route.rules).includes('"geoip"'), '不含已移除的 geoip 规则');
 });

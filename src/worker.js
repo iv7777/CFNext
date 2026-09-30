@@ -134,6 +134,12 @@ profile:
   store-selected: true
   store-fake-ip: true
 
+# geosite / geoip 数据源（GEOSITE 规则依赖）：MetaCubeX 规则库，经 jsDelivr 镜像下载（GitHub release 国内常不可达）
+geox-url:
+  geoip: "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geoip.dat"
+  geosite: "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geosite.dat"
+  mmdb: "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/country.mmdb"
+
 # 流量嗅探
 sniffer:
   enable: true
@@ -226,6 +232,7 @@ dns:
     - rule-set:Direct
     - rule-set:Private
     - rule-set:China
+    - geosite:cn                # 国内域名返回真实 IP（geosite 库兜底，防 fake-ip 干扰国内应用）
   use-hosts: true
   respect-rules: true
   # 引导用 DNS（解析 DoH/DoT 服务器自身的域名），必须是 IP
@@ -286,6 +293,7 @@ rules:
   - RULE-SET,Tracking,REJECT
   - RULE-SET,AWAvenueAds,REJECT
   - RULE-SET,Advertising,REJECT
+  - GEOSITE,category-ads-all,REJECT        # geosite 广告分类兜底（覆盖规则集未收录的广告域名）
 
   # DNS 服务器域名：解析通道固定，避免 DNS 流量走错路径（防泄露关键）
   - DOMAIN-SUFFIX,alidns.com,直接连接
@@ -300,6 +308,7 @@ rules:
   - RULE-SET,AppleCN,直接连接
   - RULE-SET,Microsoft,直接连接        # 微软全家桶直连（Office / OneDrive / Windows 更新 / Teams / Xbox 等）
   - RULE-SET,China,直接连接             # 国内域名直连
+  - GEOSITE,CN,直接连接                  # geosite 国内域名兜底（覆盖规则集未收录的国内域名，先于 GEOIP 命中）
   # 阻止走代理的 QUIC（强制回退 TCP，避免 QUIC 绕过代理 / 被干扰）。
   # 放在直连规则之后：直连 QUIC（大陆 / 微软 / 苹果）不受影响。如需 Telegram 语音等 UDP，可删除此行。
   - AND,((DST-PORT,443),(NETWORK,UDP)),REJECT
@@ -1890,11 +1899,80 @@ async function resolveProxyIPs(host, port) {
   return result;
 }
 
-// 打开到目标的出站连接（含内置地区反代 / 自定义反代透明代理 / 出站代理 / 直连）
-// 所有模式均为透明代理：发送去掉 VLESS 头部的原始 TLS 数据，对端按 SNI 路由到目标
-async function openOutbound(parsed, cfg, colo, isVless) {
+// 出站并发竞速：同时发起多路连接，取最先握手成功的一路，后到的成功连接立即关闭（释放 CF 同时连接配额）。
+// 替代原先「串行尝试 + 逐级超时」：目标站在 Cloudflare 上时直连被回环保护拦截，过去要白等约 6s 才轮到反代
+async function raceConnect(jobs) {
+  if (!jobs || !jobs.length) return null;
+  let settled = false;
+  return await new Promise((resolve) => {
+    let left = jobs.length;
+    const finish = (sock) => {
+      left--;
+      if (sock) {
+        if (settled) { try { sock.close(); } catch (e) { /* 忽略 */ } }
+        else { settled = true; resolve(sock); }
+      } else if (left <= 0 && !settled) {
+        resolve(null);
+      }
+    };
+    for (const job of jobs) {
+      Promise.resolve().then(job).then((s) => finish(s && s.readable ? s : null), () => finish(null));
+    }
+  });
+}
+
+// 直连优先竞速：直连与反代并发发起，但优先采用直连——
+//   · 直连在 graceMs 内成功 → 用直连（反代是第三方 SNI 中转，多一跳且可能误路由）
+//   · 直连失败 / 窗口到期   → 用已就绪的反代（反代并发建立，不额外等待）
+//   · 反代也不可用          → 继续等直连
+// 若不设窗口，就近反代的握手普遍比跨境直连快，几乎所有 TLS 流量都会被反代抢走。
+// graceMs = 0：不等直连（目标确定在 CF 段，直连必被回环保护拦截）
+async function racePreferDirect(directJob, relayJobs, graceMs) {
+  let used = null;
+  const recycle = (s) => { if (s && s !== used) { try { s.close(); } catch (e) { /* 忽略 */ } } };
+  const directP = directJob
+    ? Promise.resolve().then(directJob).then((s) => (s && s.readable ? s : null), () => null)
+    : Promise.resolve(null);
+  const relayP = (relayJobs && relayJobs.length)
+    ? raceConnect(relayJobs).then((s) => (s && s.readable ? s : null), () => null)
+    : Promise.resolve(null);
+  let graceTimer = null;
+  const first = await Promise.race([
+    directP,
+    new Promise((r) => { graceTimer = setTimeout(() => r(GRACE_EXPIRED), graceMs); }),
+  ]);
+  clearTimeout(graceTimer);
+  if (first && first !== GRACE_EXPIRED) { used = first; relayP.then(recycle); return used; }   // 直连胜出
+  const relay = await relayP;
+  if (relay) { used = relay; directP.then(recycle); return used; }                              // 反代接管
+  used = await directP;                                                                          // 反代不可用：等直连
+  return used;
+}
+const GRACE_EXPIRED = Symbol('grace');
+
+const DIRECT_TIMEOUT = 4000;   // 直连超时（反代并发进行，无需久等）
+const RELAY_TIMEOUT = 4000;    // 单个反代 IP 连接超时
+const MAX_RACERS = 4;          // 单次竞速最多并发路数（CF 单请求同时出站连接上限 6，留余量给 DoH 等）
+const SNIFF_WAIT_MS = 80;      // 头部已完整但尚无数据时，等首包判定协议的上限（不能拖慢建连）
+const DIRECT_GRACE_MS = 300;   // 直连优先窗口
+
+// 首包协议判定：自定义反代与内置地区反代都是 SNI 型透明代理，只能搬运 TLS 流量（按 ClientHello 的 SNI 路由）。
+// 非 TLS 流量（Telegram MTProto / 明文 HTTP / 裸 TCP）经反代能握手但转发不出任何数据 → 客户端无限重连，
+// 因此非 TLS 只走直连与用户配置的出站代理（SOCKS5 / HTTP / SS 是真代理，可承载任意协议）。
+// TLS 记录头固定为 0x16 0x03；数据不足 3 字节为 unknown（按可走反代处理，保持原行为）
+function sniffPayloadKind(bytes) {
+  if (!bytes || bytes.byteLength < 3) return 'unknown';
+  return (bytes[0] === 0x16 && bytes[1] === 0x03) ? 'tls' : 'nontls';
+}
+
+// 打开到目标的出站连接（自定义反代 / 出站代理 / 直连 / 内置地区反代）
+// 反代均为透明代理：发送去掉 VLESS/Trojan 头部的原始 TLS 数据，对端按 SNI 路由到目标。
+// 出站模式语义：only = 仅走出站代理（失败用内置地区反代兜底）；'' 默认 = 出站代理优先，失败后直连 ∥ 反代；
+// no = 直连 ∥ 反代优先，都不通时最后用出站代理
+async function openOutbound(parsed, cfg, colo, isVless, payloadKind) {
   const proxy = parseProxyAddress(cfg.outboundProxy);
   const mode = cfg.outboundMode || '';
+  const allowSniRelay = payloadKind !== 'nontls';
 
   const viaProxy = proxy ? (proxy.type === 'http' || proxy.type === 'https'
     ? (t) => connectViaHttpProxy(proxy, t)
@@ -1902,66 +1980,55 @@ async function openOutbound(parsed, cfg, colo, isVless) {
       ? (t) => connectViaShadowsocks(proxy, t)
       : (t) => connectViaSocks5(proxy, t)) : null;
 
-  const buildAttempts = (target, timeoutMs) => {
-    const attempts = [];
-    if (mode === 'only') {
-      attempts.push(viaProxy ? () => viaProxy(target) : () => connectDirect(target, timeoutMs));
-    } else if (mode === 'no') {
-      attempts.push(() => connectDirect(target, timeoutMs));
-      if (viaProxy) attempts.push(() => viaProxy(target));
-    } else {
-      if (viaProxy) attempts.push(() => viaProxy(target));
-      attempts.push(() => connectDirect(target, timeoutMs));
-    }
-    return attempts;
-  };
-
   let lastErr;
-  const tryConnect = async (target, timeoutMs) => {
-    for (const fn of buildAttempts(target, timeoutMs)) {
-      try { return await fn(); } catch (e) { lastErr = e; }
-    }
-    return null;
-  };
+  const attempt = async (fn) => { try { const r = await fn(); if (r) return r; } catch (e) { lastErr = e; } return null; };
+  const fail = () => { throw lastErr || new Error('所有出站方式均失败'); };
 
-  // 1) 用户自定义 proxyIP 透明代理：填了「反代/落地 IP」就优先走它作为固定出口，失败再回退直连；
-  //    留空则整块跳过、行为不变。这是"临时切落地"开关：填什么落地=走什么落地，清空=恢复直连。
+  // 1) 用户填写的「反代 / 落地 IP」：作为固定出口优先使用（多个解析结果并发竞速），失败再走下面的流程
   const relay = cfg.proxyIP ? parseHostPort(cfg.proxyIP, 443) : null;
-  if (relay && relay.host) {
+  if (relay && relay.host && allowSniRelay) {
     let customTargets = await resolveProxyIPs(relay.host, relay.port);
     if (!customTargets.length) customTargets = [{ hostname: relay.host, port: relay.port }];
-    for (const target of customTargets) {
-      const r = await tryConnect(target, 6000);
-      if (r) return r;
-    }
+    const r = await raceConnect(customTargets.slice(0, MAX_RACERS).map(t => () => attempt(() => connectDirect(t, RELAY_TIMEOUT))));
+    if (r) return r;
   }
 
-  // 2) 直连目标（非 CF 网站直连可用；CF 网站回环保护会失败）
-  //    6s 连接超时：目标 SYN 被丢弃 / 直连被回环保护拦截时不再无限挂起，及时进入反代兜底
-  const directResult = await tryConnect({ hostname: parsed.addr, port: parsed.port }, 6000);
-  if (directResult) return directResult;
-
-  // 3) 兜底内置地区反代（透明代理：发送去掉 VLESS/Trojan 头部的原始 TLS 数据，对端按 SNI 路由到目标）
-  //    多地区轮询：本地区域优先，失败后依次尝试其余区域；单个反代失效不再导致
-  //    （尤其 CF 托管站点直连被回环保护拦截时）流量为 0；VLESS / Trojan / XHTTP 均启用
-  //    （对齐 1.0.6：Trojan 无反代兜底时 Clash Verge 测速 gstatic.com 被回环保护拦截 → 节点全部超时）
-  {
+  const target = { hostname: parsed.addr, port: parsed.port };
+  // 2) 内置地区反代：本地区（2 个 IP）+ 次地区（1 个 IP）并发，DoH 解析（5 分钟缓存）一并放入竞速
+  const relayJobs = () => {
+    if (!allowSniRelay) return [];
     const primary = selectRelayRegion(colo);
-    const regions = [primary, ...Object.keys(RELAY_DOMAINS).filter(r => r !== primary)].slice(0, 3);
-    for (const region of regions) {
-      const relayDomain = RELAY_DOMAINS[region];
-      if (!relayDomain) continue;
-      let relayTargets = [];
-      try { relayTargets = await resolveProxyIPs(relayDomain, 443); } catch (e) { /* 忽略 */ }
-      if (!relayTargets.length) continue;
-      for (const target of relayTargets) {
-        const r = await tryConnect(target, 5000);
-        if (r) return r;
-      }
-    }
-  }
+    const regions = [primary, ...Object.keys(RELAY_DOMAINS).filter(r => r !== primary)].slice(0, 2);
+    return regions.map((region, idx) => async () => {
+      let ts = [];
+      try { ts = await resolveProxyIPs(RELAY_DOMAINS[region], 443); } catch (e) { return null; }
+      if (!ts.length) return null;
+      return await raceConnect(ts.slice(0, idx === 0 ? 2 : 1).map(t => () => attempt(() => connectDirect(t, RELAY_TIMEOUT))));
+    });
+  };
+  const directJob = () => attempt(() => connectDirect(target, DIRECT_TIMEOUT));
+  const proxyJob = viaProxy ? () => attempt(() => viaProxy(target)) : null;
+  // 目标为 CF 段 IP → 直连必被回环保护拦截，不设直连窗口
+  const grace = isCloudflareIP(parsed.addr) ? 0 : DIRECT_GRACE_MS;
+  const pickBest = () => racePreferDirect(directJob, relayJobs().slice(0, MAX_RACERS - 1), grace);
 
-  throw lastErr || new Error('所有出站方式均失败');
+  if (mode === 'only') {
+    if (proxyJob) {
+      const r = await proxyJob(); if (r) return r;
+      const r2 = await racePreferDirect(null, relayJobs(), 0); if (r2) return r2;
+      return fail();
+    }
+    const r = await pickBest(); if (r) return r;   // 未配置出站代理：按直连处理
+    return fail();
+  }
+  if (mode === '' && proxyJob) {
+    const r = await proxyJob(); if (r) return r;
+    const r2 = await pickBest(); if (r2) return r2;
+    return fail();
+  }
+  const r = await pickBest(); if (r) return r;
+  if (proxyJob) { const r2 = await proxyJob(); if (r2) return r2; }
+  return fail();
 }
 
 // 双向管道：socket 可读 → send 回调；结束调用 onDone
@@ -1979,70 +2046,116 @@ async function pumpToReader(reader, send, onDone) {
 // ---------------------------------------------------------------------------
 // WebSocket 代理（VLESS / Trojan）
 // ---------------------------------------------------------------------------
+// WS 0-RTT 早数据（节点 path 的 ?ed=2048 / sing-box max_early_data）：客户端把首个数据包 base64url 编码后
+// 放进握手请求的 Sec-WebSocket-Protocol 头，服务端在握手阶段即可解析并抢先建立出站，省去约 1 个 RTT。
+// 只接受能通过协议校验的数据（VLESS：版本 0 + 本机 UUID；Trojan：密码哈希 + CRLF），其它取值
+// （如客户端声明的普通子协议名）一律返回 null，走原有流程，无副作用
+function decodeEarlyData(header, cfg) {
+  const raw = String(header || '').trim();
+  if (!raw || raw.length > 8192 || !/^[A-Za-z0-9\-_+/=]+$/.test(raw)) return null;
+  let bytes;
+  try {
+    const norm = raw.replace(/-/g, '+').replace(/_/g, '/');
+    const bin = atob(norm + '='.repeat((4 - norm.length % 4) % 4));
+    bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  } catch (e) { return null; }
+  if (!bytes.byteLength || bytes.byteLength > 6144) return null;
+  if (bytes.byteLength >= 17 && bytes[0] === 0) {
+    let want;
+    try { want = uuidToBytes(cfg.uuid); } catch (e) { return null; }
+    for (let i = 0; i < 16; i++) if (bytes[i + 1] !== want[i]) return null;
+    return bytes;
+  }
+  return detectTrojan(bytes, cfg) ? bytes : null;
+}
+
 async function handleWebSocketProxy(request, cfg) {
   const pair = new WebSocketPair();
   const [client, server] = Object.values(pair);
   try { server.accept({ allowHalfOpen: true }); } catch (e) { server.accept(); }
   // 关键：必须声明二进制类型，否则 CF 将二进制帧按 UTF-8 解码成 string，VLESS/Trojan 头（含 16 字节原始 UUID）会被损坏导致隧道失败
   server.binaryType = 'arraybuffer';
-  let socket = null, writer = null, headerSent = false, pending = null;
+  let socket = null, writer = null, headerSent = false, pending = null, protoWait = null, respSent = false;
 
   const send = (data) => { try { server.send(data); } catch (e) { /* 忽略 */ } };
+  const fail = (err) => { try { server.close(1011, String(err && err.message || err).slice(0, 120)); } catch (e) { /* 忽略 */ } };
+
+  // 首包处理：WS 数据帧与 0-RTT 早数据共用。headerSent 在任何 await 之前置位，
+  // 解析期间到达的后续帧走下方「暂存 / 直写」分支，不会重复解析
+  const handleFirstChunk = async (chunk, forced) => {
+    // 累积缓冲：WS 消息可能分片到达，不足头部长度时等待后续数据
+    if (chunk && chunk.byteLength) pending = pending ? concatBytes(pending, chunk) : chunk;
+    if (!pending || headerSent) return;
+    // 握手头正常仅数十字节；持续收到不完整分片（异常 / 恶意）时限制缓冲，防内存膨胀
+    if (pending.byteLength > 65536) throw new Error('握手头超过 64KB');
+    let parsed, isVless;
+    try {
+      // Trojan 判定：客户端发送 SHA224(密码) 的 56 字节 hex + CRLF；密码与节点生成同源（留空用 UUID）
+      const isTrojan = detectTrojan(pending, cfg);
+      // 分帧等待：部分客户端（mihomo 等）将 Trojan 头分帧发送（首帧可能仅 56 字节 SHA224 hex）。
+      // 此时 pending[0] 为 hex 字符（非 0）且不足 58 字节，不能按 VLESS 解析（会报版本错误而关闭连接），应等待后续分片
+      if (!isTrojan && pending[0] !== 0 && pending.byteLength < 58) return;
+      isVless = !isTrojan;
+      parsed = isTrojan ? parseTrojanHeader(pending) : parseVlessHeader(pending, cfg);
+    } catch (err) {
+      if (/头部过短/.test(err.message || '')) return;   // 等下一个分片
+      throw err;
+    }
+    // 头部解析成功立即回 VLESS 响应头（version=0 + addonsLen=0），早于首包判定与出站建连：
+    // 部分客户端（mihomo 等）收到这 2 字节才发送首个数据包，晚发会与服务端互相等待
+    if (!respSent && isVless && parsed.command !== 2) { respSent = true; send(new Uint8Array([0, 0])); }
+    // 首包判定出站方式（非 TLS 不走 SNI 型反代，见 sniffPayloadKind）；头部完整但暂无数据时短暂等待首包，
+    // 超时（SNIFF_WAIT_MS）仍无数据按 unknown 放行，不让连接悬挂
+    const payload = pending.byteLength > parsed.headerLength ? pending.subarray(parsed.headerLength) : null;
+    const payloadKind = sniffPayloadKind(payload);
+    if (payloadKind === 'unknown' && !forced) {
+      if (!protoWait) protoWait = setTimeout(() => { protoWait = null; handleFirstChunk(null, true).catch(fail); }, SNIFF_WAIT_MS);
+      return;
+    }
+    if (protoWait) { clearTimeout(protoWait); protoWait = null; }
+    headerSent = true;
+    // UDP 请求（command=0x02）：CF Workers 无 UDP socket 无法原生转发数据报，
+    // DNS(53) 查询 → DoH(HTTPS) 转换后回标准 DNS 响应（修复 V2rayNG 关闭「本地 DNS」时远端 DNS 不可用）；
+    // 其余 UDP 快速失败关闭连接（客户端自动回退），TCP（VLESS/Trojan WS/XHTTP）路径零影响
+    if (parsed.command === 2) {
+      try {
+        if (parsed.port === 53 && payload && payload.byteLength >= 12) {
+          const resp = await dnsToDoH(payload);
+          if (resp) send(resp);
+        }
+      } catch (e) { /* UDP 处理失败不响应，客户端按超时/回退处理 */ }
+      try { server.close(1000); } catch (e) { /* 忽略 */ }
+      return;
+    }
+    const conn = await openOutbound(parsed, cfg, request.cf && request.cf.colo, isVless, payloadKind);
+    socket = conn;
+    writer = conn.writable.getWriter();
+    // 透明代理：去掉 VLESS/Trojan 头部，发送原始 TLS 数据，由对端按 SNI 路由
+    // 补发 SOCKS5/HTTP 代理握手残留字节（目标端早期数据），避免 TLS 握手中途被截断
+    if (conn._preamble && conn._preamble.byteLength > 0) send(conn._preamble);
+    if (pending && pending.byteLength > parsed.headerLength) await writer.write(pending.subarray(parsed.headerLength));
+    pending = null;   // 出站就绪后清空缓冲，后续消息直接写出站
+    pumpToReader(conn.readable.getReader(), send, () => { try { server.close(1000); } catch (e) { /* 忽略 */ } });
+  };
+
+  // WS 0-RTT：先处理握手头中预发的首包，再处理数据帧；校验不通过时 earlyBytes 为 null，走原流程
+  const earlyBytes = decodeEarlyData(request.headers.get('sec-websocket-protocol'), cfg);
+  if (earlyBytes) handleFirstChunk(earlyBytes).catch(fail);
 
   server.addEventListener('message', async (ev) => {
     try {
       const chunk = typeof ev.data === 'string' ? TE.encode(ev.data) : new Uint8Array(ev.data);
-      if (!headerSent) {
-        // 累积缓冲：Workers 端 WS 消息可能分片到达，不足头部长度时等待后续数据
-        pending = pending ? concatBytes(pending, chunk) : chunk;
-        let parsed, isVless;
-        try {
-          // Trojan 判定：客户端发送 SHA224(密码) 的 56 字节 hex + CRLF；密码与节点生成同源（留空用 UUID）
-          let isTrojan = detectTrojan(pending, cfg);
-          // 分帧等待：部分客户端（mihomo 等）将 Trojan 头分帧发送（首帧可能仅 56 字节 SHA224 hex）。
-          // 此时 pending[0] 为 hex 字符（非 0）且不足 58 字节，不能按 VLESS 解析（会报版本错误而关闭连接），应等待后续分片
-          if (!isTrojan && pending.byteLength > 0 && pending[0] !== 0 && pending.byteLength < 58) return;
-          isVless = !isTrojan;
-          parsed = isTrojan ? parseTrojanHeader(pending) : parseVlessHeader(pending, cfg);
-        } catch (err) {
-          if (/头部过短/.test(err.message || '')) return;   // 等下一个分片
-          throw err;
-        }
-        headerSent = true;
-        // UDP 请求（command=0x02）：CF Workers 无 UDP socket 无法原生转发数据报，
-        // DNS(53) 查询 → DoH(HTTPS) 转换后回标准 DNS 响应（修复 V2rayNG 关闭「本地 DNS」时远端 DNS 不可用）；
-        // 其余 UDP 快速失败关闭连接（客户端自动回退），TCP（VLESS/Trojan WS/XHTTP）路径零影响
-        if (parsed.command === 2) {
-          try {
-            const payload = pending.subarray(parsed.headerLength);
-            if (parsed.port === 53 && payload.byteLength >= 12) {
-              const resp = await dnsToDoH(payload);
-              if (resp) send(resp);
-            }
-          } catch (e) { /* UDP 处理失败不响应，客户端按超时/回退处理 */ }
-          try { server.close(1000); } catch (e) { /* 忽略 */ }
-          return;
-        }
-        const conn = await openOutbound(parsed, cfg, request.cf && request.cf.colo, isVless);
-        socket = conn;
-        writer = conn.writable.getWriter();
-        // 透明代理：去掉 VLESS/Trojan 头部，发送原始 TLS 数据，由对端按 SNI 路由
-        // VLESS 协议：须先向客户端回 2 字节响应头（version=0 + addonsLen=0），否则客户端握手失败
-        if (isVless) send(new Uint8Array([0, 0]));
-        // 补发 SOCKS5/HTTP 代理握手残留字节（目标端早期数据），避免 TLS 握手中途被截断
-        if (conn._preamble && conn._preamble.byteLength > 0) send(conn._preamble);
-        if (pending && pending.byteLength > parsed.headerLength) await writer.write(pending.subarray(parsed.headerLength));
-        pending = null;   // 出站就绪后清空缓冲，后续消息直接写出站
-        pumpToReader(conn.readable.getReader(), send, () => { try { server.close(1000); } catch (e) { /* 忽略 */ } });
-      } else {
-        // 出站未就绪时暂存，避免头部之后的早期数据帧被丢弃（否则 TLS 握手不完整 → 连接通但流量为 0）
-        if (writer) await writer.write(chunk); else pending = pending ? concatBytes(pending, chunk) : chunk;
-      }
-    } catch (err) {
-      try { server.close(1011, String(err && err.message || err)); } catch (e) { /* 忽略 */ }
-    }
+      if (!headerSent) await handleFirstChunk(chunk);
+      // 出站未就绪时暂存，避免头部之后的早期数据帧被丢弃（否则 TLS 握手不完整 → 连接通但流量为 0）
+      else if (writer) await writer.write(chunk);
+      else pending = pending ? concatBytes(pending, chunk) : chunk;
+    } catch (err) { fail(err); }
   });
-  const cleanup = () => { if (socket) { try { socket.close(); } catch (e) { /* 忽略 */ } socket = null; } };
+  const cleanup = () => {
+    if (protoWait) { clearTimeout(protoWait); protoWait = null; }
+    if (socket) { try { socket.close(); } catch (e) { /* 忽略 */ } socket = null; }
+  };
   server.addEventListener('close', cleanup);
   server.addEventListener('error', cleanup);
   return new Response(null, { status: 101, webSocket: client });
@@ -2054,7 +2167,8 @@ async function handleXhttpProxy(request, cfg) {
   const first = await bodyReader.read();
   if (first.done) return new Response('empty', { status: 400 });
   const parsed = parseVlessHeader(first.value, cfg);
-  const conn = await openOutbound(parsed, cfg, request.cf && request.cf.colo, true);
+  const conn = await openOutbound(parsed, cfg, request.cf && request.cf.colo, true,
+    sniffPayloadKind(first.value.subarray(parsed.headerLength)));
   const writer = conn.writable.getWriter();
   await writer.write(first.value.subarray(parsed.headerLength));
 
@@ -2255,6 +2369,39 @@ function uriFragName(name) {
   return String(name).replace(/%/g, '%25').replace(/#/g, '%23').replace(/\?/g, '%3F').replace(/ /g, '%20');
 }
 
+// 多协议命名：同一地址同时下发多种协议时，Trojan 名称加「.T」、XHTTP 加「.X」（VLESS 保持原名），
+// 客户端一眼可辨协议，也避免 sing-box / Clash 因节点名重复而拒绝加载
+function protoNames(name, enV, enT, enX) {
+  const cnt = (enV ? 1 : 0) + (enT ? 1 : 0) + (enX ? 1 : 0);
+  return cnt <= 1 ? { v: name, t: name, x: name } : { v: name, t: name + '.T', x: name + '.X' };
+}
+
+// 订阅节点名全局去重：不同地址同名（如多个来源都叫「优选IP-01」）时依次追加「·2」「·3」，
+// 所有格式（链接 / Clash / sing-box / Surge 等）统一使用去重后的名称
+function uniqueNodeNames(nodes) {
+  const seen = new Set();
+  return nodes.map((n) => {
+    const h = n.indexOf('#');
+    if (h < 0) return n;
+    let name;
+    try { name = decodeURIComponent(n.slice(h + 1)); } catch (e) { name = n.slice(h + 1); }
+    let cand = name, k = 2;
+    while (seen.has(cand)) cand = name + '·' + k++;
+    seen.add(cand);
+    return cand === name ? n : n.slice(0, h + 1) + uriFragName(cand);
+  });
+}
+
+// 面板 ALPN 设置（h2 / http/1.1，逗号分隔）→ 数组；未设置返回 null（各格式按协议取默认值）
+function alpnList(alpn) {
+  const a = String(alpn || '').split(',').map(x => x.trim()).filter(x => /^[\w./-]+$/.test(x));
+  return a.length ? a : null;
+}
+// 分享链接中的 alpn 参数：逗号与斜杠原样输出（V2rayN 等按逗号拆分，整串编码为 %2C%2F 时部分客户端解析失败）
+function alpnParam(alpn) {
+  return (alpnList(alpn) || []).join(',');
+}
+
 function vlessNode(cfg, server, port, name, extra = {}) {
   const host = cfg.host;
   const addr = server.includes(':') && !server.startsWith('[') ? `[${server}]` : server;  // IPv6 需方括号
@@ -2264,16 +2411,18 @@ function vlessNode(cfg, server, port, name, extra = {}) {
   if (isTls) q += '&security=tls&sni=' + enc(host) + '&fp=chrome';
   else q += '&security=none';   // 80/8080/2052 等明文端口走明文 ws
   q += '&host=' + enc(host);
-  if (extra.type === 'xhttp' && isTls) {
+  const isXhttp = extra.type === 'xhttp' && isTls;
+  if (isXhttp) {
     // XHTTP（stream-one）：仅 TLS 端口生效；必须携带 extra（JSON）作为 XHTTP Extra，否则 V2rayN 无法识别完整 xhttp 配置
     // Padding 头/键由 UUID 内部派生（切片），客户端按此发送，服务端按 VLESS 流处理 body
     q += '&type=xhttp&mode=stream-one';
     q += '&extra=' + enc(JSON.stringify(xhttpPadding(cfg)));
   }
   else q += '&type=ws';   // 明文端口与默认路径均走 ws
-  q += '&path=' + enc('/' + cfg.path);
-  if (cfg.alpn) q += '&alpn=' + enc(cfg.alpn);
-  if (cfg.ech) {
+  // TLS 下的 ws 路径携带 ed=2048（WS 0-RTT 早数据，见 decodeEarlyData）；明文端口与 xhttp 不带
+  q += '&path=' + enc('/' + cfg.path + (!isXhttp && isTls ? '?ed=2048' : ''));
+  if (cfg.alpn && isTls) q += '&alpn=' + alpnParam(cfg.alpn);
+  if (cfg.ech && isTls) {
     // ECH：输出 "查询域名+DoH"（xray/V2rayN 客户端本地查询 ECH 配置，Worker 端拉取会与用户边缘密钥不匹配导致握手失败）
     q += '&ech=' + enc((cfg.echHost || 'cloudflare-ech.com') + '+' + (cfg.echDns || 'https://223.5.5.5/dns-query'));
   }
@@ -2287,10 +2436,11 @@ function trojanNode(cfg, server, port, name) {
   const isTls = !HTTP_PORTS.has(Number(port));
   // 明文端口（80/8080/8880/2052/2082/2086/2095）：走 security=none 明文 ws（不被 TLS 指纹检测，可用性高）；
   // TLS 端口：security=tls + sni/fp
+  const path = enc('/' + cfg.path + (isTls ? '?ed=2048' : ''));   // TLS 下携带 ed=2048（WS 0-RTT）
   let q = isTls
-    ? 'security=tls&sni=' + enc(host) + '&fp=chrome&host=' + enc(host) + '&type=ws&path=' + enc('/' + cfg.path)
-    : 'security=none&host=' + enc(host) + '&type=ws&path=' + enc('/' + cfg.path);
-  if (cfg.alpn && isTls) q += '&alpn=' + enc(cfg.alpn);
+    ? 'security=tls&sni=' + enc(host) + '&fp=chrome&host=' + enc(host) + '&type=ws&path=' + path
+    : 'security=none&host=' + enc(host) + '&type=ws&path=' + path;
+  if (cfg.alpn && isTls) q += '&alpn=' + alpnParam(cfg.alpn);
   if (cfg.ech && isTls) q += '&ech=' + enc((cfg.echHost || 'cloudflare-ech.com') + '+' + (cfg.echDns || 'https://223.5.5.5/dns-query'));   // ECH：仅 TLS 端口有效
   return `trojan://${cfg.trojanPassword || cfg.uuid}@${addr}:${port}?${q}#${uriFragName(name)}`;
 }
@@ -2575,9 +2725,10 @@ async function buildNodes(cfg, cap = NODE_CAP) {
     if (cfg.tlsOnly && !isTls) return;   // TLS 控制：仅下发 TLS 端口节点，明文端口跳过
     // 节点端口按源端口原样下发（默认/自定义/随机优选通常是 443），不做 TLS 端口随机（443 全域可达性最佳）
     const finalPort = Number(port);
-    if (cfg.enableVless) nodes.push(vlessNode(cfg, server, finalPort, name));
-    if (cfg.enableTrojan) nodes.push(trojanNode(cfg, server, isTls ? finalPort : Number(port), name));  // Trojan 明文/TLS 端口均下发
-    if (cfg.enableXhttp && isTls) nodes.push(vlessNode(cfg, server, finalPort, name, { type: 'xhttp' }));  // XHTTP 仅 TLS 端口
+    const nm = protoNames(name, cfg.enableVless, cfg.enableTrojan, cfg.enableXhttp && isTls);
+    if (cfg.enableVless) nodes.push(vlessNode(cfg, server, finalPort, nm.v));
+    if (cfg.enableTrojan) nodes.push(trojanNode(cfg, server, finalPort, nm.t));  // Trojan 明文/TLS 端口均下发
+    if (cfg.enableXhttp && isTls) nodes.push(vlessNode(cfg, server, finalPort, nm.x, { type: 'xhttp' }));  // XHTTP 仅 TLS 端口
   };
   // 按源端口（通常 443）下发；关闭「仅 TLS 端口」时，443 节点另追加一个 80 明文端口节点（名称加「·80」）
   const multiPort = (server, port, name, trusted) => {
@@ -2785,7 +2936,7 @@ function clashProxyYaml(p) {
     L.push('    skip-cert-verify: false');   // 安全修复：校验证书（按 servername 校验，与 server 是否为 IP 无关）
     // ALPN：ws/trojan 强制 HTTP/1.1（CF Worker 的 WebSocket 仅支持 HTTP/1.1 升级，mihomo utls(chrome) 默认 ALPN 含 h2 → WS 升级失败）；
     // xhttp 必须 h2（stream-one 依赖 HTTP/2 双向流，h1.1 请求体未发完 CF 边缘无法回传响应 → Clash Verge 节点全部超时）
-    L.push(p.network === 'xhttp' ? '    alpn: [h2]' : '    alpn: [http/1.1]');
+    L.push('    alpn: [' + (p.alpn && p.alpn.length ? p.alpn : (p.network === 'xhttp' ? ['h2'] : ['http/1.1'])).join(', ') + ']');
     L.push('    servername: ' + yamlVal(p.servername));
     if (p.type === 'trojan') L.push('    sni: ' + yamlVal(p.servername));   // mihomo trojan 只认 sni 字段（servername 被忽略）：CF 优选 IP 下缺 sni 时 TLS SNI 回落为 server(IP)，Go/utls 对 IP 型 ServerName 不发送 SNI 扩展 → CF 边缘无法路由 → 403 → Clash Verge 全 Error
     L.push('    client-fingerprint: chrome');
@@ -2819,6 +2970,9 @@ function clashProxyYaml(p) {
 function generateClash(cfg, nodes) {
   const host = cfg.host;
   const path = '/' + cfg.path;
+  // TLS 下 ws 路径携带 ed=2048：mihomo 据此启用 early data（首包预发进 Sec-WebSocket-Protocol，省 1 个 RTT）
+  const wsPath = path + '?ed=2048';
+  const alpnArr = alpnList(cfg.alpn);   // 面板 ALPN 设置；未设置时 ws 用 http/1.1、xhttp 用 h2
   const seen = new Set();
   // XHTTP 节点按 mihomo xhttp-opts 规范输出（含 x-padding 混淆参数），与 WS/Trojan 一并下发
   const proxies = nodes.map((n) => {
@@ -2837,11 +2991,11 @@ function generateClash(cfg, nodes) {
     seen.add(name);
     const base = {
       name, server: srv, port: prt, udp: true,
-      ...(tls ? { tls: true, 'skip-cert-verify': false, servername: host, 'client-fingerprint': 'chrome', alpn: ['http/1.1'] } : {}),
+      ...(tls ? { tls: true, 'skip-cert-verify': false, servername: host, 'client-fingerprint': 'chrome', alpn: alpnArr || ['http/1.1'] } : {}),
       ...(cfg.ech && tls ? { 'ech-opts': { enable: true, 'query-server-name': cfg.echHost || 'cloudflare-ech.com' } } : {})   // 修复 #6：mihomo ECH 官方格式为顶层 ech-opts（enable + query-server-name），旧 tls-opts.ech 不被识别导致 ECH 未生效
     };
     if (isTrojan) {
-      return { ...base, type: 'trojan', password: user, network: 'ws', 'ws-opts': { path, headers: { Host: host } } };
+      return { ...base, type: 'trojan', password: user, network: 'ws', 'ws-opts': { path: tls ? wsPath : path, headers: { Host: host } } };
     }
     if (xType === 'xhttp') {
       // 从节点链接的 extra 参数恢复 x-padding 混淆配置（由 UUID 派生，与服务端一致）
@@ -2849,7 +3003,7 @@ function generateClash(cfg, nodes) {
       try { xo = JSON.parse(getParam(n, 'extra') || '{}'); } catch (e) { /* extra 解析失败则用空 */ }
       return {
         ...base, type: 'vless', uuid: user, network: 'xhttp',
-        alpn: ['h2'],   // 修复：xhttp stream-one 依赖 HTTP/2 双向流必须 h2（ws 节点才用 http/1.1）
+        alpn: alpnArr || ['h2'],   // 未设置时 xhttp stream-one 依赖 HTTP/2 双向流必须 h2（ws 节点才用 http/1.1）
         'xhttp-opts': {
           path,
           mode: 'stream-one',
@@ -2863,7 +3017,7 @@ function generateClash(cfg, nodes) {
         }
       };
     }
-    return { ...base, type: 'vless', uuid: user, network: 'ws', 'ws-opts': { path, headers: { Host: host } } };
+    return { ...base, type: 'vless', uuid: user, network: 'ws', 'ws-opts': { path: tls ? wsPath : path, headers: { Host: host } } };
   });
   // 节点排序：443端口优先（非标准端口如8443在mihomo下HTTPS握手易被GFW干扰，放后面避免默认选中）
   proxies.sort((a, b) => (a.port === 443 ? 0 : 1) - (b.port === 443 ? 0 : 1));
@@ -2911,106 +3065,97 @@ FINAL,🐟 漏网之鱼
 }
 
 // ---------- Sing-box JSON ----------
+// sing-box 配置（1.12+ 格式）：旧版生成的配置在新内核无法启动（.list 文本当 source 规则集解析失败、
+// 已移除的 geoip 规则 / dns 出站 / inet4_address / 入站 sniff 字段、多协议节点 tag 重复），此处全部改为新写法
+const SINGBOX_RULE_SETS = [
+  ['geosite-category-ads-all', null],   // null = 拦截（route action reject）
+  ['geosite-cn', '🎯 全球直连'], ['geosite-google', '🌐 谷歌服务'], ['geosite-apple', '🍎 苹果服务'],
+  ['geosite-microsoft', 'Ⓜ️ 微软服务'], ['geosite-openai', '🤖 OpenAI'], ['geosite-spotify', '🌍 国外媒体'],
+  ['geosite-youtube', '🌍 国外媒体'], ['geosite-netflix', '🌍 国外媒体'], ['geosite-disney', '🌍 国外媒体'],
+  ['geosite-twitter', '🌍 国外媒体'], ['geosite-telegram', '🌍 国外媒体'], ['geosite-github', '🌍 国外媒体'],
+];
+// MetaCubeX 规则库 sing 分支的二进制规则集（.srs），经 jsDelivr 直连下载（国内可达）
+const SINGBOX_RULE_BASE = 'https://cdn.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/';
 function generateSingbox(cfg, nodes) {
   const host = cfg.host;
   const path = '/' + cfg.path;
-  const outbounds = nodes.map((n, i) => {
-    const { user, srv, prt, name, isTrojan, tls } = parseShareNode(n, i);
-    const type = getParam(n, 'type') || 'ws';
-    // XHTTP 在 sing-box 中不支持 uTLS（官方限制，xhttp+utls 会导致 outbound 异常/流量不通），xhttp 模式禁用 utls
+  const alpnArr = alpnList(cfg.alpn);
+  const seen = new Set();
+  // 官方 sing-box 内核没有 xhttp 传输（仅部分第三方分支支持），含 xhttp 出站的配置整体无法加载，因此不下发 XHTTP 节点
+  const outbounds = nodes.filter(n => getParam(n, 'type') !== 'xhttp').map((n, i) => {
+    const { user, srv, prt, name: baseName, isTrojan, tls } = parseShareNode(n, i);
+    // tag 必须唯一（重复时 sing-box 拒绝启动）：名称已由 uniqueNodeNames 去重，这里再兜底一次
+    let name = baseName, k = 2;
+    while (seen.has(name)) name = baseName + '·' + k++;
+    seen.add(name);
     // insecure=false：证书按 server_name 校验，即使 server 为 IP 也能通过；关闭校验会让中间人可解密流量
-    // 强制 HTTP/1.1 ALPN 避免 CF 边缘协商 h2 导致 WS 升级失败（v1.0.5 修复）
-    // xhttp stream-one 依赖 HTTP/2 双向流，ALPN 必须 h2（h1.1 经 CF 边缘请求体未发完响应无法回传 → 超时）；ws 才用 http/1.1
-    const tlsObj = tls ? (type === 'xhttp'
-      ? { enabled: true, server_name: host, insecure: false, alpn: ['h2'] }
-      : { enabled: true, server_name: host, insecure: false, alpn: ['http/1.1'], utls: { enabled: true, fingerprint: 'chrome' } })
+    // ALPN 取面板设置；未设置时用 http/1.1（CF 边缘协商 h2 会导致 WS 升级失败）
+    const tlsObj = tls
+      ? { enabled: true, server_name: host, insecure: false, alpn: alpnArr || ['http/1.1'], utls: { enabled: true, fingerprint: 'chrome' } }
       : { enabled: false };
-    // early data：TLS 下的 ws 走 2048 字节 early data（ed=2048），
-    // 减少首包往返；明文 ws 与 xhttp 不启用
-    const transport = type === 'xhttp' ? { type: 'xhttp', mode: 'stream-one', path } :
-      (tls ? {
-        type: 'ws', path, headers: { Host: host },
-        max_early_data: 2048, early_data_header_name: 'Sec-WebSocket-Protocol'
-      } : { type: 'ws', path, headers: { Host: host } });
+    // TLS 下的 ws 启用 early data：sing-box 由 max_early_data + early_data_header_name 控制，
+    // path 中不能再写 ?ed=2048（会导致握手失败）；明文 ws 不启用
+    const transport = tls
+      ? { type: 'ws', path, headers: { Host: host }, max_early_data: 2048, early_data_header_name: 'Sec-WebSocket-Protocol' }
+      : { type: 'ws', path, headers: { Host: host } };
     if (isTrojan) {
-      return {
-        type: 'trojan', tag: name, server: srv, server_port: prt,
-        password: user, tls: tlsObj,
-        transport
-      };
+      return { type: 'trojan', tag: name, server: srv, server_port: prt, password: user, tls: tlsObj, transport };
     }
-    return {
-      type: 'vless', tag: name, server: srv, server_port: prt,
-      uuid: user, packet_encoding: 'xudp',
-      tls: tlsObj,
-      transport
-    };
+    return { type: 'vless', tag: name, server: srv, server_port: prt, uuid: user, packet_encoding: 'xudp', tls: tlsObj, transport };
   });
   const tags = outbounds.map(o => o.tag);
-  // rule_set 分流（参考 CFNext sing-box 生成）：远程规则集（MetaCubeX .list 文本格式）+ 主流分流域名
-  const RULE_SETS = [
-    ['geosite-cn', '🎯 全球直连'], ['geosite-google', '🌐 谷歌服务'], ['geosite-apple', '🍎 苹果服务'],
-    ['geosite-microsoft', 'Ⓜ️ 微软服务'], ['geosite-openai', '🤖 OpenAI'], ['geosite-spotify', '🌍 国外媒体'],
-    ['geosite-youtube', '🌍 国外媒体'], ['geosite-netflix', '🌍 国外媒体'], ['geosite-disney', '🌍 国外媒体'],
-    ['geosite-twitter', '🌍 国外媒体'], ['geosite-telegram', '🌍 国外媒体'], ['geosite-github', '🌍 国外媒体'],
-    ['geosite-category-ads-all', 'block']
-  ];
   const config = {
     log: { level: 'info' },
-    // 完整 DNS + fakeip：远程 DoH 解析（走代理）+ 本地直连 DNS 兜底；fakeip 加速分流
+    // DNS：国内域名走直连 DNS（真实 IP），其余 A/AAAA 走 fakeip，兜底远程 DoH
     dns: {
       servers: [
-        { tag: 'dns-remote', address: 'https://1.1.1.1/dns-query' },
-        { tag: 'dns-direct', address: 'udp://223.5.5.5' }
+        { type: 'https', tag: 'dns-remote', server: '1.1.1.1' },
+        { type: 'udp', tag: 'dns-direct', server: '223.5.5.5' },
+        { type: 'fakeip', tag: 'dns-fakeip', inet4_range: '198.18.0.0/15' }
       ],
-      strategy: 'ipv4_only',
-      independent_cache: true,
-      fakeip: { enabled: true, inet4_range: '198.18.0.0/15', store_fakeip: true }
+      rules: [
+        { rule_set: 'geosite-cn', server: 'dns-direct' },
+        { query_type: ['A', 'AAAA'], server: 'dns-fakeip' }
+      ],
+      final: 'dns-remote',
+      strategy: 'ipv4_only'
     },
     inbounds: [
-      {
-        type: 'mixed', tag: 'mixed-in', listen: '127.0.0.1', listen_port: 2080,
-        sniff: true, sniff_override_destination: true
-      },
-      {
-        type: 'tun', tag: 'tun-in', interface_name: 'tun0',
-        inet4_address: ['172.19.0.1/30'], mtu: 9000,
-        auto_route: true, strict_route: true, stack: 'mixed',
-        sniff: true, sniff_override_destination: true
-      }
+      { type: 'mixed', tag: 'mixed-in', listen: '127.0.0.1', listen_port: 2080 },
+      { type: 'tun', tag: 'tun-in', interface_name: 'tun0', address: ['172.19.0.1/30'], mtu: 9000, auto_route: true, strict_route: true }
     ],
     outbounds: [
-      ...outbounds,
-      { type: 'direct', tag: 'direct' },
-      { type: 'block', tag: 'block' },
-      { type: 'dns', tag: 'dns-out' },
       { type: 'selector', tag: '🚀 节点选择', outbounds: tags },
       { type: 'selector', tag: '🎯 全球直连', outbounds: ['direct'] },
       { type: 'selector', tag: '🐟 漏网之鱼', outbounds: ['🚀 节点选择', '🎯 全球直连'] },
       { type: 'selector', tag: '🌍 国外媒体', outbounds: ['🚀 节点选择'] },
       { type: 'selector', tag: '🌐 谷歌服务', outbounds: ['🚀 节点选择'] },
       { type: 'selector', tag: '🤖 OpenAI', outbounds: ['🚀 节点选择'] },
-      { type: 'selector', tag: '🍎 苹果服务', outbounds: ['🎯 全球直连'] },
-      { type: 'selector', tag: 'Ⓜ️ 微软服务', outbounds: ['🎯 全球直连'] }
+      { type: 'selector', tag: '🍎 苹果服务', outbounds: ['🎯 全球直连', '🚀 节点选择'] },
+      { type: 'selector', tag: 'Ⓜ️ 微软服务', outbounds: ['🎯 全球直连', '🚀 节点选择'] },
+      ...outbounds,
+      { type: 'direct', tag: 'direct' }
     ],
     route: {
       rules: [
-        { protocol: 'dns', outbound: 'dns-out' },
+        { action: 'sniff' },
+        { protocol: 'dns', action: 'hijack-dns' },
         { ip_is_private: true, outbound: 'direct' },
-        ...RULE_SETS.map(([rs, out]) => ({ rule_set: [rs], outbound: out })),
-        { geoip: ['cn'], outbound: 'direct' },   // 大陆 IP 兜底直连（覆盖未收录域名 / 纯 IP 连接的大陆应用）
-        { ip_is_private: true, outbound: 'block' }
+        ...SINGBOX_RULE_SETS.map(([rs, out]) => out ? { rule_set: rs, outbound: out } : { rule_set: rs, action: 'reject' }),
+        { rule_set: 'geoip-cn', outbound: 'direct' }   // 大陆 IP 兜底直连（覆盖未收录域名 / 纯 IP 连接的大陆应用）
       ],
-      rule_set: RULE_SETS.map(([rs]) => ({
-        type: 'remote', tag: rs, format: 'source',
-        url: 'https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/' + rs + '.list'
-      })),
+      rule_set: [
+        ...SINGBOX_RULE_SETS.map(([rs]) => ({ type: 'remote', tag: rs, format: 'binary',
+          url: SINGBOX_RULE_BASE + rs.replace('geosite-', 'geosite/') + '.srs', download_detour: 'direct' })),
+        { type: 'remote', tag: 'geoip-cn', format: 'binary', url: SINGBOX_RULE_BASE + 'geoip/cn.srs', download_detour: 'direct' }
+      ],
       final: '🐟 漏网之鱼',
       auto_detect_interface: true,
-      default_domain_resolver: { server: 'dns-remote' }
+      default_domain_resolver: 'dns-direct'
     },
     experimental: {
-      clash_api: { external_controller: '127.0.0.1:9090' }
+      clash_api: { external_controller: '127.0.0.1:9090' },
+      cache_file: { enabled: true, store_fakeip: true }   // 缓存规则集与 fakeip 映射，重启无需重新下载
     }
   };
   return JSON.stringify(config, null, 2);
@@ -3379,6 +3524,7 @@ async function generateSubscription(cfg, requestUrl, format, ua, colo) {
   }
   // 严格封顶：多协议膨胀可能越过上限，统一截断（节点数量只做上限，来源不足时按实际数量下发）
   if (nodes.length > cap) nodes.length = cap;
+  nodes = uniqueNodeNames(nodes);
   let type, body;
   if (forced === 'clash') { type = 'text/yaml'; body = generateClash(rc, nodes); }
   else if (forced === 'singbox' || forced === 'sing-box') { type = 'application/json'; body = generateSingbox(rc, nodes); }
@@ -3513,8 +3659,8 @@ async function handleRequest(request, env) {
   const UA = request.headers.get('User-Agent') || '';
   const upgrade = (request.headers.get('Upgrade') || '').toLowerCase();
 
-  // HTTP → HTTPS
-  if (url.protocol === 'http:') {
+  // HTTP → HTTPS（WebSocket 升级除外：明文端口节点 80/8080 等以 http 到达，重定向会让其永远无法连接）
+  if (url.protocol === 'http:' && upgrade !== 'websocket') {
     return Response.redirect(url.href.replace('http://', 'https://'), 301);
   }
 
