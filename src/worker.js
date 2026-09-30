@@ -1,4 +1,4 @@
-//  === 面板集成：CFNext 新界面（独立设计）+ 配额安全（CF 用量监控）===
+//  === 面板集成：CFNext 新界面（独立设计）===
 // ============================================================================
 //  CFNext —— Cloudflare 代理管理面板 · 全新独立编写
 //  ----------------------------------------------------------------------------
@@ -14,8 +14,6 @@
 //    TROJAN_PASSWORD  Trojan 密码（开启 Trojan 时必填）
 //    ALPN         自定义 ALPN 协商（可选）
 //    YX           自定义优选 IP 列表（可选，格式 IP:port#名称，逗号分隔）
-//    CF_ACCOUNT_ID CF 账户监控：账户 ID（可选，与 CF_API_TOKEN 同时设置后可在面板查看当日用量）
-//    CF_API_TOKEN  CF 账户监控：API 令牌（可选，需 Workers 用量分析读取权限，如 Account Analytics 读权限）
 //    K            已绑定 KV 命名空间时读取图形化配置
 // ============================================================================
 import { connect } from 'cloudflare:sockets';
@@ -529,11 +527,6 @@ const CONFIG_SCHEMA = [
     pattern: '^https://\\S+$', hint: '须为 https:// 开头的 DoH 地址' },
   // TLS 控制：关闭下发全部节点，开启仅下发 TLS 端口节点（自定义域名部署时强制开启）
   { key: 'tlsOnly', type: 'bool', def: false, el: 'tls-only', label: '仅 TLS 端口' },
-  // 节点数量控制：默认开启，按 nodeLimitCount 限制下发节点总数（上限，不补足）
-  { key: 'nodeLimit', type: 'bool', def: true, el: 'q-nl-on', label: '节点数量控制' },
-  { key: 'nodeLimitCount', type: 'int', def: 500, el: 'q-nl-count', label: '节点上限', min: 1, max: 1000 },
-  // 轮询机制：开启后每次更新订阅轮询下发新节点（KV issued 去重 + 数量限制），关闭后忽略轮询与限制、下发全部节点
-  { key: 'polling', type: 'bool', def: false, el: 'q-poll-on', label: '轮询换新' },
   // ★ 节点测活（TCP 探测）总开关：默认关闭（推荐，对齐 V1.0.6）——订阅不做任何 TCP 握手/HTTP 探测与剔除，
   //   按数据源原始顺序全量下发、客户端自行择优（秒回，v2rayNG/AsteriskNG 刷新正常）；面板开启或 PROBE_ALIVE=1 强制开启。
   //   节点形态：所有模式统一按 1.0.6 机制——端口原样单端口下发（固定 443、不随机 TLS 端口、不追加明文端口变体）。
@@ -546,13 +539,6 @@ const CONFIG_SCHEMA = [
   //   精选池（实测 97% 可用）不会被误判清空，仅对非 CF 段（反代/ProxyIP）真实测活剔除死节点。
   //   可用环境变量 PROBE_ALIVE=0 覆盖关闭
   { key: 'probeAlive', type: 'bool', def: false, el: 'q-probe-on', label: '节点测活' },
-  // ---- 配额安全（账户监控）：填写 CF 账户 ID 与 API 令牌后，面板可查询当日用量并按需自动收缩节点上限 ----
-  { key: 'cfAccountId', type: 'string', def: '', el: 'a-cfid', label: 'Cloudflare 账户 ID', lower: true,
-    pattern: '^[0-9a-f]{32}$', hint: '账户 ID 为 32 位十六进制字符串（不是邮箱）', envLock: ['CF_ACCOUNT_ID'] },
-  { key: 'cfApiToken', type: 'secret', def: '', el: 'a-cftoken', label: 'Cloudflare API 令牌', maxLen: 256,
-    pattern: '^\\S+$', hint: 'API 令牌不能包含空格', envLock: ['CF_API_TOKEN'] },
-  // 开启后当日用量 ≥ 60% 免费额度时自动收缩订阅节点上限，保护账户（未显式设置时，已配置监控则默认开启）
-  { key: 'quotaAuto', type: 'bool', def: false, el: 'q-auto-on', label: '自动调节' },
   // ---- 落地与出站 ----
   { key: 'proxyIP', type: 'string', def: '', el: 's-proxyIP', label: '反代 / 落地 IP', maxLen: 256,
     pattern: '^[^\\s/]+$', hint: '格式为 host 或 host:port', check: 'hostPort' },
@@ -590,8 +576,8 @@ const CONFIG_SCHEMA = [
   { key: 'src.prefIp', type: 'bool', def: true, el: 'fl-pref-ip', label: '优选 IP' },
   // ---- 「优选 IP」的在线来源（默认模式；均只保留 Cloudflare 段 IP，结果缓存 10 分钟） ----
   { key: 'ipsrc.hostmonit', type: 'bool', def: true, el: 'ps-hostmonit', label: 'HostMonit 实时优选' },
-  // uouin 分线路优选：借用 api.uouin.com 网站内部接口（非开放 API，对方可能随时更换签名或封禁），默认关闭
-  { key: 'ipsrc.uouin', type: 'bool', def: false, el: 'ps-uouin', label: 'uouin 分线路优选' },
+  // uouin 分线路优选：借用 api.uouin.com 网站内部接口（非开放 API，对方可能随时更换签名或封禁），默认开启
+  { key: 'ipsrc.uouin', type: 'bool', def: true, el: 'ps-uouin', label: 'uouin 分线路优选' },
   // 两个自定义优选 API：填写返回 IP 列表的地址（纯 IP 行 / CSV / HTML 线路表 / base64 订阅 / vless 链接，支持 sub://）
   { key: 'ipsrc.api1', type: 'bool', def: false, el: 'ps-api1-on', label: '自定义优选 API 1' },
   { key: 'ipsrc.api1Url', type: 'string', def: '', el: 'ps-api1-url', label: '自定义优选 API 1 地址', maxLen: 1024,
@@ -1109,15 +1095,13 @@ function buildConfig(env, kvCfg) {
   if (env.PROBE_ALIVE === '1' || env.PROBE_ALIVE === 'true') cfg.probeAlive = true;
   if (env.PROBE_ALIVE === '0' || env.PROBE_ALIVE === 'false') cfg.probeAlive = false;
   // KV 图形化配置（更高优先级）：按字段表逐项合并，未登记的旧字段（如已移除的 fragment / src.customPref）自动忽略
-  let kvQuotaSet = false;   // KV 是否显式设置过 quotaAuto（用于自动调节默认值联动）
   if (kvCfg && typeof kvCfg === 'object') {
     for (const d of CONFIG_SCHEMA) {
       const v = getPath(kvCfg, d.key);
       if (v !== undefined) setPath(cfg, d.key, cloneJSON(v));
     }
-    if (kvCfg.quotaAuto !== undefined) kvQuotaSet = true;
   }
-  // 环境变量锁定字段（ADMIN / D / CF_ACCOUNT_ID / CF_API_TOKEN）优先于 KV：面板中这些项只读
+  // 环境变量锁定字段（ADMIN / D）优先于 KV：面板中这些项只读
   const locked = envLockedFields(env);
   for (const key of Object.keys(locked)) {
     const d = SCHEMA_BY_KEY.get(key);
@@ -1135,16 +1119,10 @@ function buildConfig(env, kvCfg) {
   // path 为空或为 "/" 时一律回退 UUID（兼容 KV 残留旧值，保证订阅 ws 路径与 Worker 面板路径统一为 /UUID）
   if (!cfg.path || cfg.path === '/') { cfg.path = cfg.uuid; cfg._pathAuto = true; }
   if (!Array.isArray(cfg.preferredIPs)) cfg.preferredIPs = parseIPList(cfg.preferredIPs);
-  // 自动调节默认值联动：用户未显式设置 quotaAuto 时——Cloudflare 监控已配置（面板输入或环境变量 CF_ACCOUNT_ID/CF_API_TOKEN）→ 默认开启；
-  // 未配置监控 → 默认关闭；用户显式保存过开关后一律以用户设置为准
-  if (!kvQuotaSet && hasQuotaMonitor(cfg, env)) cfg.quotaAuto = true;
   return cfg;
 }
-function hasQuotaMonitor(cfg, env) {
-  return Boolean((cfg.cfAccountId && cfg.cfApiToken) || (env.CF_ACCOUNT_ID && env.CF_API_TOKEN));
-}
 
-// 写入 KV：只保存字段表登记的配置项；由环境变量锁定的字段（管理密码、面板路径、CF 监控凭据）不写入
+// 写入 KV：只保存字段表登记的配置项；由环境变量锁定的字段（管理密码、面板路径）不写入
 // （避免明文密码落盘，也避免与环境变量不一致）。返回实际写入的对象；未绑定 KV 返回 null
 async function saveConfig(env, cfg) {
   if (!env.K || typeof env.K.put !== 'function') return null;
@@ -1158,80 +1136,6 @@ async function saveConfig(env, cfg) {
   return stored;
 }
 
-// ---------------------------------------------------------------------------
-// 配额安全：CF 账户用量监控（参考 CF-Workers-Monitor 的 GraphQL Analytics 思路，
-// 代码独立编写）—— 查询当日 Workers + Pages 请求量，对比免费额度 100,000 次/日
-// ---------------------------------------------------------------------------
-let QUOTA_CACHE = null;    // 模块级缓存：5 分钟内不重复请求 CF API（多 isolate 各自缓存，可接受）
-let QUOTA_BACKOFF = 0;    // 429 限流退避截止时间戳（限流后 15 分钟不再请求，避免拉长限流窗口）
-const QUOTA_LIMIT = 100000;
-const QUOTA_TTL = 300000;         // 正常缓存 5 分钟（GraphQL Analytics 有账户级日请求配额，低频查询更稳）
-const QUOTA_BACKOFF_TTL = 900000; // 429 退避 15 分钟
-
-async function getQuota(env, cfg) {
-  const accountId = String((env.CF_ACCOUNT_ID || (cfg && cfg.cfAccountId) || '')).trim();
-  const token = String((env.CF_API_TOKEN || (cfg && cfg.cfApiToken) || '')).trim();
-  if (!accountId || !token) return { configured: false };
-  const now = Date.now();
-  // 限流退避窗口内：优先沿用上次成功缓存（stale 标记），无缓存则明确提示稍后再试
-  if (now < QUOTA_BACKOFF) {
-    if (QUOTA_CACHE && QUOTA_CACHE.data) {
-      return Object.assign({}, QUOTA_CACHE.data, { stale: true, error: 'CF API 限流(429)，显示缓存数据（可能滞后）' });
-    }
-    return { configured: true, error: 'CF API 限流(429)，请 15 分钟后再试' };
-  }
-  if (QUOTA_CACHE && QUOTA_CACHE.at && (now - QUOTA_CACHE.at) < QUOTA_TTL) return QUOTA_CACHE.data;
-  try {
-    const start = new Date(); start.setUTCHours(0, 0, 0, 0);
-    const end = new Date();
-    const query = {
-      query: `query getBillingMetrics($accountId: string!, $filter: AccountWorkersInvocationsAdaptiveFilter_InputObject) {
-        viewer { accounts(filter:{accountTag:$accountId}) {
-          workersInvocationsAdaptive(limit:10000, filter:$filter) { sum { requests subrequests } quantiles { cpuTimeP50 } }
-          pagesFunctionsInvocationsAdaptiveGroups(limit:1000, filter:$filter) { sum { requests } }
-        } }
-      }`,
-      variables: { accountId, filter: { datetime_geq: start.toISOString(), datetime_leq: end.toISOString() } }
-    };
-    const res = await fetch('https://api.cloudflare.com/client/v4/graphql', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token },
-      body: JSON.stringify(query)
-    });
-    if (!res.ok) throw new Error('CF API HTTP ' + res.status);
-    const data = await res.json();
-    if (data.errors && data.errors.length) throw new Error('GraphQL: ' + JSON.stringify(data.errors).slice(0, 200));
-    const accounts = (data && data.data && data.data.viewer && data.data.viewer.accounts) || [];
-    if (!accounts.length) throw new Error('未找到账户数据（检查账户 ID 与令牌权限）');
-    const acc = accounts[0];
-    const w = (acc.workersInvocationsAdaptive || [])[0] || {};
-    const p = (acc.pagesFunctionsInvocationsAdaptiveGroups || []).reduce((s, g) => s + ((g && g.sum && g.sum.requests) || 0), 0);
-    const requests = (w.sum && w.sum.requests || 0) + p;
-    const cpuTime = (w.quantiles && w.quantiles.cpuTimeP50) || 0;
-    const subrequests = (w.sum && w.sum.subrequests || 0);
-    const percent = QUOTA_LIMIT > 0 ? Math.round((requests / QUOTA_LIMIT) * 1000) / 10 : 0;
-    const dataOut = {
-      configured: true,
-      limit: QUOTA_LIMIT,
-      today: { requests, cpuTime, subrequests },
-      percent,                                            // 0 - 100（一位小数）
-      remaining: Math.max(0, QUOTA_LIMIT - requests),
-      updatedAt: end.toISOString()
-    };
-    QUOTA_CACHE = { at: now, data: dataOut };
-    return dataOut;
-  } catch (e) {
-    const msg = (e && e.message) || String(e);
-    if (msg.indexOf('429') >= 0) {
-      QUOTA_BACKOFF = now + QUOTA_BACKOFF_TTL;
-      if (QUOTA_CACHE && QUOTA_CACHE.data) {
-        return Object.assign({}, QUOTA_CACHE.data, { stale: true, error: 'CF API 限流(429)，显示缓存数据（可能滞后）' });
-      }
-      return { configured: true, error: 'CF API 限流(429)，请 15 分钟后再试' };
-    }
-    return { configured: true, error: msg };
-  }
-}
 
 // ---------------------------------------------------------------------------
 // VLESS / Trojan 请求头解析
@@ -2639,7 +2543,7 @@ async function resolvePreferredDomains(domainsStr, limitPerDomain = 100, maxTota
   return out;
 }
 
-async function buildNodes(cfg, cap = 800, skipSet = null) {
+async function buildNodes(cfg, cap = NODE_CAP) {
   const nodes = [];
   const used = new Set();
   // 订阅模式：random 随机优选（CF CIDR 随机生成指定数量，不经域名解析）
@@ -2675,20 +2579,13 @@ async function buildNodes(cfg, cap = 800, skipSet = null) {
     push(server, Number(port) || 443, name, trusted);
   };
   if (mode === 'random') {
-    // 生成数量以面板「随机优选数量」为准；节点数量控制等上限（cap）只做封顶——
-    // 修复：原先开启节点数量控制时会把数量抬到上限（默认 500），面板填写的数量不起作用
+    // 生成数量以面板「随机优选数量」为准；节点上限（cap）只做封顶
     const n = Math.min(Math.max(parseInt(cfg.optimizer.subRandomCount) || 16, 1), Math.min(99, cap));
     // 数量 = 下发节点总数（含启用的所有协议），而非 IP 数：每个 IP 生成一条后计数，达 n 即止
     const protoCount = (cfg.enableVless ? 1 : 0) + (cfg.enableTrojan ? 1 : 0) + (cfg.enableXhttp ? 1 : 0) || 1;
     let made = 0;
-    // 去重下发：随机模式生成 3 倍数量后过滤已下发 IP；新 IP 排前、已下发 IP 紧随补齐，节点总量恒定
-    const randPool = randomIPsFromCidrs(RAND_CIDRS, Math.ceil(n / protoCount) * 3);
-    let randIPs = randPool;
-    if (skipSet) {
-      const unissued = randPool.filter(ip => !skipSet.has(ip));
-      const prev = randPool.filter(ip => skipSet.has(ip));
-      randIPs = [...unissued, ...prev];
-    }
+    // 生成 3 倍候选（随机碰撞去重后仍足够），按数量截取
+    const randIPs = randomIPsFromCidrs(RAND_CIDRS, Math.ceil(n / protoCount) * 3);
     for (const ip of randIPs) {
       if (made >= n) break;
       // 随机优选模式：按 1.0.6 机制——每个 IP 每协议仅固定 443 单端口下发，不随机 TLS 端口、不追加明文端口变体
@@ -2711,8 +2608,8 @@ async function buildNodes(cfg, cap = 800, skipSet = null) {
     multiPort(p.host, p.port, nm || '优选IP-' + String(i + 1).padStart(2, '0'));
   });
   // 双选（IPv4+IPv6）时把 preferredIPs 重排为 v4/v6 交替：各来源 v4 天然排前，
-  // 若不做交替，开启「节点数量控制 / 轮询」后 push 限流截断（cap）会先占满 v4，IPv6 被整体挤掉——
-  // 交替后按顺序截断天然保持 v4/v6 混合比例（约 1:1），数量控制与轮询开启时同样生效
+  // 若不做交替，节点上限（cap）截断时会先占满 v4，IPv6 被整体挤掉——
+  // 交替后按顺序截断天然保持 v4/v6 混合比例（约 1:1）
   let prefIPs = cfg.preferredIPs || [];
   if (wantV6 && !onlyV6 && prefIPs.length > 1) {
     const v4l = [], v6l = [];
@@ -3344,29 +3241,9 @@ function appendFallbackNodes(nodes, rc, cap, colo) {
   // 内置地区反代（proxyip.*.cmliussss.net）不再自动下发（用户要求订阅中不出现内置反代节点）
 }
 
-// 节点数上限（按 Workers / Pages 免费额度 10ms CPU 硬限调整）：
-//   - 纯行格式（v2ray 通用链接）拼接近乎零成本 → 800 上限，满足大量择优；
-//   - 结构化格式（Clash/Singbox/Surge/Loon/QuanX）模板化生成后实测 250 节点冷启动 ~5ms、300 节点 ~6ms、400 节点 ~8ms，
-//     为保免费版稳定（含网络/KV/解析开销）收紧到 300，避免 CPU 超限导致订阅 5xx；
-//   - 自定义订阅开启「追加内置及默认节点」时：轻量格式放宽到 800，结构化格式放宽到 300。
-// 生成订阅与面板「当前下发策略」共用同一计算，保证面板展示的上限即实际生效的上限
-function computeNodeCap(cfg, isHeavy) {
-  const mode = (cfg.optimizer && cfg.optimizer.subMode) || '';
-  let cap = isHeavy ? 300 : 800;
-  if (mode === 'custom' && cfg.optimizer && cfg.optimizer.subIncludeDefault) cap = isHeavy ? Math.max(cap, 300) : Math.max(cap, 800);
-  // 严格自定义模式（仅自定义节点）：汇聚多源时放宽上限，保证填入的节点数量对等下发（多协议膨胀不超此线即完整下发）
-  if (mode === 'custom' && !(cfg.optimizer && cfg.optimizer.subIncludeDefault)) cap = isHeavy ? Math.max(cap, 800) : Math.max(cap, 2000);
-  // 轮询机制关闭：不限制 Clash 300 / V2rayN 800 上限，一次性下发全部节点（数量由数据源与 fillCount 决定）
-  if (cfg.polling === false) cap = 10000;
-  // 节点数量控制（默认开启，全局生效，与轮询状态无关）：最多下发设定数量（上限 1000 防滥用），轮询关闭时同样受限
-  if (cfg.nodeLimit) {
-    const n = parseInt(cfg.nodeLimitCount) || 0;
-    if (n > 0) cap = Math.min(n, 1000);
-  }
-  // 配额安全自动调节：当日用量偏高时由路由层注入 _quotaCap，此处做最终收紧（永远不放大）
-  if (cfg._quotaCap) cap = Math.min(cap, cfg._quotaCap);
-  return cap;
-}
+// 单次订阅的节点上限（按 Workers / Pages 免费额度 10ms CPU 硬限设定）：结构化格式（Clash / Sing-box 等）
+// 实测约 400 节点 ~8ms，行式格式拼接成本很低；统一取 500
+const NODE_CAP = 500;
 
 // 根据 UA 或指定格式生成订阅
 async function generateSubscription(cfg, requestUrl, format, ua, colo) {
@@ -3474,28 +3351,16 @@ async function generateSubscription(cfg, requestUrl, format, ua, colo) {
     const named = resolved.map((x, i) => (/^[A-Za-z0-9.-]+\.[A-Za-z]{2,}-\d+$/.test(x.name || '')) ? Object.assign({}, x, { name: '优选IP-' + String(nameBase + i + 1).padStart(2, '0') }) : x);
     rc.preferredIPs = [...(rc.preferredIPs || []), ...named];
   }
-  // 轮询换新：读取上次已下发 IP（KV issued），把未下发过的 IP 排前、已下发过的排后——节点总量恒定，
-  // 每次更新订阅按上限截断后拿到的是新一批 IP。对所有模式的 IP 列表生效（修复：原先只作用于解析结果，
-  // 默认模式「全部地区」时解析结果为空，轮询形同虚设）
-  const skipSet = (cfg._skipIssued && cfg._skipIssued.size) ? cfg._skipIssued : null;
-  // 顺序为「最久未下发优先」：从未下发过的在前（保持原顺序），已下发过的按上次下发时间由旧到新排列，
-  // 多次更新后依次轮遍整个 IP 池（_skipIssued 为 Map：IP → 在轮询窗口中的位置，0 = 最近一次下发）
-  if (skipSet && rc.preferredIPs && rc.preferredIPs.length) {
-    const age = (x) => !skipSet.has(x.ip) ? Infinity : Number(skipSet.get(x.ip)) || 0;
-    rc.preferredIPs = rc.preferredIPs.map((x, i) => [age(x), i, x]).sort((a, b) => (b[0] - a[0]) || (a[1] - b[1])).map(e => e[2]);
-  }
   // 仅勾选 IPv6 时：resolved（地区筛选解析）在首次过滤之后才并入，此处二次过滤保证纯 v6（数量控制下不被 v4 挤占）
   if (onlyV6 && rc.preferredIPs) rc.preferredIPs = rc.preferredIPs.filter(x => String(x.ip).indexOf(':') >= 0);
   ua = (ua || '').toLowerCase();
   const forced = (format || '').toLowerCase();
-  // 结构化格式（Clash/Singbox/Surge/Loon/QuanX）与行式格式的节点上限不同，见 computeNodeCap
-  const isHeavy = ['clash', 'singbox', 'sing-box', 'surge', 'surfboard', 'loon', 'quanx', 'quantumultx'].includes(forced) || /clash|singbox|sing-box|surge|surfboard|loon|quantumult/.test(ua);
-  const cap = computeNodeCap(cfg, isHeavy);
+  const cap = NODE_CAP;
   // 随机优选节点无地区标记，随机模式下忽略地区筛选（ipType/isp 仍生效）
   const fl = (mode === 'random') ? Object.assign({}, cfg.filter, { region: 'all' }) : cfg.filter;
   // 不对优选 IP 池做 TCP 测活剔除（对齐 1.0.6）：Worker 边缘连通性 ≠ 客户端连通性，且 Workers 无法连接 CF 段 IP，
   // 测活只会误杀或拖慢订阅；全量按顺序下发由客户端自行择优（节点测活开启时仅做优选域名 DoH 预检）
-  let nodes = filterNodes(await buildNodes(rc, cap, skipSet), fl);
+  let nodes = filterNodes(await buildNodes(rc, cap), fl);
   // 兜底入口节点：自定义订阅严格模式（仅下发框内节点）不追加，其余模式追加原生地址与地区反代入口；
   // 仅勾选 IPv6 时跳过（原生地址/反代均为 IPv4 域名，混入会破坏「只下发 IPv6」语义）
   const strictCustom = (mode === 'custom' && !(cfg.optimizer && cfg.optimizer.subIncludeDefault));
@@ -3504,21 +3369,10 @@ async function generateSubscription(cfg, requestUrl, format, ua, colo) {
   // （客户端不会收到「无效订阅」）；域名节点由客户端自行解析，IPv4 / IPv6 均可
   if (!nodes.length) {
     const fb = Object.assign({}, rc, { preferredDomains: BUILTIN_OFFICIAL_DOMAINS.map((d, i) => d + '#域名-' + String(i + 1).padStart(2, '0')).join('\n'), preferredIPs: [], tlsOnly: true, optimizer: Object.assign({}, rc.optimizer, { subMode: '' }) });
-    nodes = await buildNodes(fb, cap, null);
+    nodes = await buildNodes(fb, cap);
   }
-  // 「节点数量控制」只做上限，不再补足：原补足来源 bestcf 地区池全部为非 CF 段中转 IP，过滤后恒为空
-  // （每次请求白白消耗 5 个子请求）；随机优选模式也不再被补足到上限，按面板「随机优选数量」下发
-  // 严格封顶：多协议膨胀可能越过 cap 一个 IP（3 条），统一截断到上限；节点数量控制开启时同样按设定值精确截断
+  // 严格封顶：多协议膨胀可能越过上限，统一截断（节点数量只做上限，来源不足时按实际数量下发）
   if (nodes.length > cap) nodes.length = cap;
-  // 收集本次下发的所有 IP 型节点地址（排除域名），记录到 KV issued 供下次去重
-  const issuedIPs = [];
-  const seenIssued = new Set();
-  for (const n of nodes) {
-    try {
-      const { host } = parseNodeServer(n);
-      if (isValidIp(host) && !seenIssued.has(host)) { seenIssued.add(host); issuedIPs.push(host); }
-    } catch (e) { /* 忽略解析失败 */ }
-  }
   let type, body;
   if (forced === 'clash') { type = 'text/yaml'; body = generateClash(rc, nodes); }
   else if (forced === 'singbox' || forced === 'sing-box') { type = 'application/json'; body = generateSingbox(rc, nodes); }
@@ -3541,7 +3395,7 @@ async function generateSubscription(cfg, requestUrl, format, ua, colo) {
   else if (ua.includes('quantumult')) { type = 'text/plain'; body = generateQuanX(rc, nodes); }
   // 默认（v2rayN / Shadowrocket / 未知客户端）：返回 base64 编码订阅（V2rayN 标准格式）
   else { type = 'text/plain'; body = nodes.join('\n'); }   // 明文（同 1.0.6，避免客户端按 GBK 解码 base64 导致中文名称乱码）
-  return { type, body, issued: issuedIPs, count: nodes.length };
+  return { type, body, count: nodes.length };
 }
 
 // ---------------------------------------------------------------------------
@@ -3615,73 +3469,26 @@ function safeNext(next, panelPath) {
 function authCookie(token) {
   return `luma_auth=${token}; Path=/; Max-Age=86400; HttpOnly; Secure; SameSite=Lax`;
 }
-// 返回给面板的配置：只含字段表登记的配置项，不下发管理密码与 CF API 令牌明文；附带面板需要的派生信息
+// 返回给面板的配置：只含字段表登记的配置项，不下发管理密码明文；附带面板需要的派生信息
 function publicConfig(cfg, env) {
   const out = pickSchema(cfg);
   out.version = VERSION;
   out.adminSet = !!cfg.admin;
-  out.cfApiTokenSet = !!cfg.cfApiToken;
   delete out.admin;
-  delete out.cfApiToken;
   out.path = cfg._pathAuto ? '' : cfg.path;        // 留空 = 面板路径跟随 UUID
   out.panelPath = cfg.path;                         // 当前生效的面板路径（保存后面板据此跳转）
   out.envLocked = envLockedFields(env);             // { 字段: 环境变量名 }：面板中只读
   out.kv = !!(env.K && typeof env.K.put === 'function');
-  // 实际生效的节点上限（未含配额自动调节，后者见 /api/quota 的 quotaCap）
-  out.caps = { light: computeNodeCap(cfg, false), heavy: computeNodeCap(cfg, true) };
   return out;
-}
-// 配额安全自动调节：当日用量 ≥ 60% 免费额度时按用量比例收缩下发上限（60%→1000 … 100%→100，最低 20）；未触发返回 null
-function quotaCapFor(cfg, q) {
-  if (!cfg.quotaAuto || !q || !q.configured || !q.today) return null;
-  if (q.today.requests < Math.round(QUOTA_LIMIT * 0.6)) return null;
-  const usage = q.today.requests / q.limit;
-  const scale = Math.max(0.1, (1 - usage) / 0.4);   // 60%→1.0，100%→0.1
-  return Math.max(20, Math.round(1000 * scale));
 }
 function formatConfigErrors(errors) {
   return errors.map(e => (e.label ? e.label + '：' : '') + e.msg).join('；');
 }
 
-// 轮询换新窗口：记住最近下发过的 IP 数（KV 键 issued）
-const ISSUED_WINDOW = 1000;
-// 生成订阅：/sub 与面板预览共用同一流程（轮询去重 + 配额自动调节），保证预览与客户端实际拿到的一致；
-// commit=false（预览）时不写入 KV 轮询窗口，预览不会消耗换新轮次
-async function serveSubscription(request, env, cfg, fmt, commit) {
+// 生成订阅：/sub 与面板预览共用同一流程，保证预览与客户端实际拿到的一致
+async function serveSubscription(request, env, cfg, fmt) {
   const UA = request.headers.get('User-Agent') || '';
-  // 读取上次下发的 IP（KV 键 issued），用于本次去重下发新 IP；轮询机制关闭时跳过（下发全部节点）
-  let skip = null;
-  if (cfg.polling !== false && env.K && typeof env.K.get === 'function') {
-    try {
-      const iv = await env.K.get('issued');
-      // Map：IP → 在窗口中的位置（0 = 最近一次下发，越大越久），供「最久未下发优先」排序；随机模式只用 has()
-      if (iv) { const j = JSON.parse(iv); if (Array.isArray(j.ips) && j.ips.length) skip = new Map(j.ips.map((ip, i) => [ip, i])); }
-    } catch (e) { /* 忽略 */ }
-  }
-  const subCfg = Object.assign({}, cfg);
-  if (skip) subCfg._skipIssued = skip;
-  // 配额安全：自动调节 —— 当日用量 ≥ 60% 免费额度时，按用量比例收缩本次下发上限（保护账户）
-  if (cfg.quotaAuto) {
-    try {
-      const cap = quotaCapFor(cfg, await getQuota(env, cfg));
-      if (cap) subCfg._quotaCap = cap;
-    } catch (e) { /* 监控失败不阻断订阅 */ }
-  }
-  const sub = await generateSubscription(subCfg, request.url, fmt, UA, request.cf && request.cf.colo);
-  if (commit && cfg.polling !== false && env.K && typeof env.K.put === 'function' && sub.issued && sub.issued.length) {
-    // 滑动窗口历史队列（按下发时间由新到旧）：本次下发的 IP 排前，历史 IP 随后，去重后保留最近 ISSUED_WINDOW 条。
-    // 窗口大于单次下发量，才能记住多轮下发、按「最久未下发优先」轮遍整个 IP 池（原 200 条窗口只记得上一轮，两批 IP 来回切换）
-    const prevIps = skip ? Array.from(skip.keys()) : [];
-    const win = [...new Set([...sub.issued, ...prevIps])].slice(0, ISSUED_WINDOW);
-    // KV 免费写配额仅 1,000 次/日：仅当窗口内容实际变化时才写入（轮询开启时每次换新都会写入一次）
-    const changed = win.length !== prevIps.length || win.some((ip, i) => ip !== prevIps[i]);
-    if (changed) {
-      const payload = JSON.stringify({ t: Date.now(), ips: win });
-      if (env._ctx && typeof env._ctx.waitUntil === 'function') env._ctx.waitUntil(env.K.put('issued', payload).catch(() => {}));
-      else await env.K.put('issued', payload).catch(() => {});
-    }
-  }
-  return sub;
+  return generateSubscription(Object.assign({}, cfg), request.url, fmt, UA, request.cf && request.cf.colo);
 }
 
 // 面板页面：注入字段表与共用校验函数（每个 isolate 只组装一次）。
@@ -3769,7 +3576,7 @@ async function handleRequest(request, env) {
   if (isSubRoot && (segs[1] === 'sub' || (segs.length === 1 && !isBrowserUA(UA) && !UA.startsWith('luma')))) {
     const fmt = segs.length >= 3 ? segs[2] : '';
     try {
-      const sub = await serveSubscription(request, env, cfg, fmt, true);
+      const sub = await serveSubscription(request, env, cfg, fmt);
       return new Response(sub.body, { status: 200, headers: { 'Content-Type': sub.type + '; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Disposition': 'attachment; filename="CFNext"; filename*=utf-8\'\'CFNext' } });
     } catch (e) {
       return new Response('订阅生成失败: ' + (e && e.message || e), { status: 500, headers: { 'Content-Type': 'text/plain; charset=utf-8' } });
@@ -3810,20 +3617,12 @@ async function handleRequest(request, env) {
           // 按字段表校验：只接受登记过的字段，逐项校验并规范化；有错误时返回字段级错误列表供面板标注
           const { patch, errors, ignored } = sanitizeConfigPatch(body, env);
           if (errors.length) return json({ ok: false, msg: formatConfigErrors(errors), errors, ignored }, 400);
-          // 首次保存联动：KV 从未显式设置过 quotaAuto 时，本次保存若已配置 Cloudflare 监控 → 自动调节默认开启
-          // （否则表单默认 false 会写入 KV，导致刷新后联动失效；用户后续手动关闭并保存后以用户为准）
-          let kvHadQuota = false;
-          try {
-            const kvJson = await env.K.get('config', { cacheTtl: 30 });
-            if (kvJson) { const kvCfg = JSON.parse(kvJson); if (kvCfg.quotaAuto !== undefined) kvHadQuota = true; }
-          } catch (e) { /* 读取失败按未设置处理 */ }
           const merged = pickSchema(cfg);
           if (cfg._pathAuto) merged.path = '';
           for (const d of CONFIG_SCHEMA) {
             const v = getPath(patch, d.key);
             if (v !== undefined) setPath(merged, d.key, v);
           }
-          if (!kvHadQuota && merged.quotaAuto === false && hasQuotaMonitor(merged, env)) merged.quotaAuto = true;
           const crossErrors = crossCheckConfig(merged);
           if (crossErrors.length) return json({ ok: false, msg: formatConfigErrors(crossErrors), errors: crossErrors, ignored }, 400);
           const stored = await saveConfig(env, merged);
@@ -3843,7 +3642,7 @@ async function handleRequest(request, env) {
       try {
         if (!env.K || typeof env.K.delete !== 'function') return json({ ok: false, msg: '未绑定 KV 命名空间，无需重置' }, 400);
         await env.K.delete('config');
-        await env.K.delete('issued');
+        await env.K.delete('issued');   // 清理旧版本（轮询换新）遗留的 issued 键
         return json({ ok: true, msg: '已重置：KV 已清空，面板还原为初始部署状态' });
       } catch (e) { return json({ ok: false, msg: '重置失败: ' + (e.message || e) }, 500); }
     }
@@ -3886,17 +3685,10 @@ async function handleRequest(request, env) {
       } });
     }
 
-    if (apiName === 'quota') {
-      try {
-        const q = await getQuota(env, cfg);
-        return json({ ok: true, data: Object.assign({}, q, { quotaAuto: !!cfg.quotaAuto, quotaCap: quotaCapFor(cfg, q) }) });
-      } catch (e) { return json({ ok: false, msg: '查询失败: ' + (e.message || e) }, 500); }
-    }
-
     if (apiName === 'sub') {
       const fmt = url.searchParams.get('fmt') || '';
       try {
-        const sub = await serveSubscription(request, env, cfg, fmt, false);
+        const sub = await serveSubscription(request, env, cfg, fmt);
         return json({ ok: true, type: sub.type, body: sub.body, count: sub.count });
       } catch (e) { return json({ ok: false, msg: '订阅生成失败: ' + (e.message || e) }, 500); }
     }

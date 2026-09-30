@@ -55,11 +55,10 @@ var NAV = [
   { id:'dashboard', name:'仪表盘', icon:'<path d="M4 4h7v7H4zM13 4h7v4h-7zM4 13h7v7H4zM13 11h7v9h-7z"/>' },
   { id:'nodes', name:'节点配置', icon:'<path d="M12 3l8 4.5v9L12 21l-8-4.5v-9zM12 12l8-4.5M12 12L4 7.5"/>' },
   { id:'optimizer', name:'优选配置', icon:'<path d="M12 19a7 7 0 1 0 0-14 7 7 0 0 0 0 14zM12 8v4l2.5 2.5M3 3l3 3"/>' },
-  { id:'quota', name:'配额安全', icon:'<path d="M12 3l7 3v5c0 4.5-3 8-7 10-4-2-7-5.5-7-10V6zM9 12l2 2 4-4"/>' },
   { id:'account', name:'面板设置', icon:'<path d="M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM4 21c0-3.5 3.6-6 8-6s8 2.5 8 6"/>' },
   { id:'about', name:'关于项目', icon:'<path d="M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM12 11v5M12 8h.01"/>' }
 ];
-var TITLES = { dashboard:'仪表盘', nodes:'节点配置', optimizer:'优选配置', quota:'配额安全', account:'面板设置', about:'关于项目' };
+var TITLES = { dashboard:'仪表盘', nodes:'节点配置', optimizer:'优选配置', account:'面板设置', about:'关于项目' };
 function buildNav(){
   var html = '';
   NAV.forEach(function(n){
@@ -183,7 +182,6 @@ function loadAll(){
       renderAll();
       makeSub(false);
       setConn(true);
-      refreshQuota();
       toast('配置已加载', 'ok');
     } else if (r && r.status === 403) {
       location.href = '/login?next=' + encodeURIComponent(APIPATH);
@@ -229,103 +227,6 @@ function protoText(){
 }
 function renderAll(){
   $('stProto').textContent = protoText();
-  renderQuota();
-}
-function renderQuota(){
-  var nl = !!(CFG && CFG.nodeLimit);
-  $('qNl').textContent = nl ? '已开启' : '关闭（默认分档上限）';
-  $('qNl').className = 'v ' + (nl ? 'ok' : '');
-  $('qNlCount').textContent = nl ? (CFG.nodeLimitCount || 500) + ' 节点' : '—';
-  var po = !(CFG && CFG.polling === false);
-  $('qPoll').textContent = po ? '已开启（每轮换新 IP）' : '关闭（每次下发全部）';
-  $('qPoll').className = 'v ' + (po ? 'ok' : '');
-  // 节点测活：开启 = 红字提醒（会误杀 CF 段精选池），关闭 = 绿字（推荐状态，对齐 V1.0.6）
-  var pa = !!(CFG && CFG.probeAlive);
-  $('qProbe').textContent = pa ? '已开启（剔除死节点，体感更快）' : '关闭（不测活，按 V1.x 原序下发）';
-  $('qProbe').className = 'v ' + (pa ? 'warn' : 'ok');
-  renderCaps();
-}
-// 当前生效的节点上限：由服务端按已保存配置计算（与生成订阅同一函数），叠加配额自动调节后的收紧值
-var QUOTA_CAP = null;
-function capText(n){
-  if (n == null) return '—';
-  var eff = QUOTA_CAP ? Math.min(n, QUOTA_CAP) : n;
-  var t = eff >= 10000 ? '不限（最多 10000）' : eff + ' 节点';
-  if (QUOTA_CAP && QUOTA_CAP < n) t += '（配额自动调节）';
-  return t;
-}
-function renderCaps(){
-  var c = (CFG && CFG.caps) || {};
-  $('qCapLight').textContent = capText(c.light);
-  $('qCapHeavy').textContent = capText(c.heavy);
-}
-function fmtNum(n){
-  if (n == null || isNaN(n)) return '—';
-  n = Number(n);
-  if (n >= 1e6) return (n / 1e6).toFixed(2) + 'M';
-  if (n >= 1e3) return (n / 1e3).toFixed(1) + 'k';
-  return String(n);
-}
-function showQuotaState(kind, text){
-  $('qQuotaWrap').style.display = (kind === 'data') ? '' : 'none';
-  $('qQuotaEmpty').style.display = (kind === 'empty') ? '' : 'none';
-  $('qQuotaErr').style.display = (kind === 'err') ? '' : 'none';
-  if (kind === 'err') $('qQuotaErrText').textContent = quotaErrText(text);
-  if (kind === 'data'){ $('qQuotaEmpty').style.display = 'none'; }
-}
-function quotaErrText(e){
-  var m = String(e || '');
-  if (m.indexOf('401') >= 0) return '认证失败（CF API 401）：请检查账户 ID 是否为 32 位十六进制、API 令牌是否有效且勾选 Account Analytics 读取权限';
-  if (m.indexOf('403') >= 0) return '无权限（CF API 403）：API 令牌缺少账户 Analytics 读取权限';
-  if (m.indexOf('429') >= 0) return 'CF API 限流（429）：已自动退避 15 分钟，期间沿用缓存数据';
-  if (m.indexOf('未找到账户') >= 0) return m + '：请核对 dash.cloudflare.com 右侧栏的 32 位账户 ID';
-  return m || '用量查询失败';
-}
-function renderQuotaData(d){
-  updDbQuota(d);
-  QUOTA_CAP = (d && d.quotaCap) || null;
-  renderCaps();
-  if (!d || !d.configured){
-    $('qQuotaSub').textContent = '未配置';
-    showQuotaState('empty');
-    return;
-  }
-  if (d.error && !d.stale){
-    $('qQuotaSub').textContent = '查询失败';
-    showQuotaState('err', d.error);
-    return;
-  }
-  $('qQuotaSub').textContent = d.stale ? '缓存数据' : '已连接';
-  showQuotaState('data');
-  $('qReq').textContent = fmtNum(d.today.requests) + ' / ' + fmtNum(d.limit);
-  var p = d.percent || 0;
-  $('qBar').style.width = Math.min(100, p) + '%';
-  $('qBar').style.background = p >= 90 ? 'linear-gradient(90deg,var(--err),var(--warn))' : (p >= 60 ? 'linear-gradient(90deg,var(--warn),var(--accent))' : 'linear-gradient(90deg,var(--ok),var(--accent))');
-  $('qPct').textContent = p + '%';
-  $('qPct').className = 'v ' + (p >= 90 ? 'bad' : (p >= 60 ? '' : 'ok'));
-  $('qRemain').textContent = fmtNum(d.remaining != null ? d.remaining : (d.limit - d.today.requests));
-  $('qCpu').textContent = (d.today.cpuTime != null) ? (d.today.cpuTime / 1000).toFixed(2) + ' s' : '—';
-  $('qSub').textContent = fmtNum(d.today.subrequests);
-  $('qAt').textContent = (d.updatedAt ? String(d.updatedAt).replace('T', ' ').replace('Z', '') + ' UTC' : '—') + (d.stale ? '（限流缓存）' : '');
-}
-function updDbQuota(d){
-  if (!d || !d.configured){ $('dbSub').textContent = '未配置监控'; $('dbWrap').style.display = 'none'; return; }
-  if (d.error && !d.stale){ $('dbSub').textContent = '查询失败'; $('dbWrap').style.display = 'none'; return; }
-  $('dbSub').textContent = d.stale ? '缓存数据' : '已连接';
-  $('dbWrap').style.display = '';
-  $('dbReq').textContent = fmtNum(d.today.requests) + ' / ' + fmtNum(d.limit);
-  var p = d.percent || 0;
-  $('dbBar').style.width = Math.min(100, p) + '%';
-  $('dbBar').style.background = p >= 90 ? 'linear-gradient(90deg,var(--err),var(--warn))' : (p >= 60 ? 'linear-gradient(90deg,var(--warn),var(--accent))' : 'linear-gradient(90deg,var(--ok),var(--accent))');
-  $('dbPct').textContent = p + '%';
-  $('dbPct').className = 'v ' + (p >= 90 ? 'bad' : (p >= 60 ? '' : 'ok'));
-}
-function refreshQuota(){
-  $('qQuotaSub').textContent = '查询中…';
-  api('quota').then(function(r){
-    if (r && r.ok) renderQuotaData(r.data);
-    else { $('qQuotaSub').textContent = '查询失败'; showQuotaState('err', (r && r.msg) || '查询失败'); }
-  }).catch(function(){ $('qQuotaSub').textContent = '查询失败'; showQuotaState('err', '无法连接服务器'); });
 }
 function parseIps(t){
   var out = [];
@@ -552,7 +453,6 @@ function saveAll(){
         fillForm();
         renderAll();
         makeSub(false);
-        refreshQuota();
         $('savedAt').textContent = '已保存：' + new Date().toLocaleTimeString();
         toast(r.msg || '已保存', 'ok');
       } else {
