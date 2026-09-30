@@ -260,24 +260,25 @@ test('检测更新：以仓库 CFNext.js 为基准，有更新时直接返回其
 });
 
 // ---------------- 优选 IP 来源与下发 ----------------
-const STABLE = new Set(['104.16.128.11', '172.67.72.4', '104.17.201.77', '104.16.66.7', '104.16.88.7',
-  '104.16.98.7', '104.17.2.7', '104.17.44.9', '104.18.34.34', '104.18.7.34', '104.19.191.31', '104.19.1.1',
-  '104.20.15.15', '104.20.1.1', '104.21.23.1', '104.21.2.1', '104.24.12.10', '104.25.0.1', '104.26.1.1', '162.159.128.1']);
 const subLinks = async (env) => (await (await call(env, `/${UUID}/sub`, { ua: 'v2rayN/7.0' })).text()).split('\n').filter(l => /^(vless|trojan):\/\//.test(l));
 const hostOf = (l) => l.match(/@(\[[^\]]+\]|[^:?]+)/)[1];
 const nameOf = (l) => decodeURIComponent(l.slice(l.indexOf('#') + 1));
 
-test('默认模式轮询换新：每次更新按「最久未下发优先」换一批 IP，保底 IP 固定在前', async () => {
-  const env = baseEnv({ K: kv({ config: { polling: true, nodeLimitCount: 60, filter: { ipType: ['IPv4'] } } }) });
+test('默认模式轮询换新：每次更新按「最久未下发优先」换一批 IP', async () => {
+  // 在线来源（自定义 API）提供 90 个 CF IP，节点上限 30：三次更新应拿到三批互不重复的 IP
+  const pool = Array.from({ length: 90 }, (_, i) => '104.16.10.' + (i + 1)).join('\n');
+  const offline = globalThis.fetch;
+  globalThis.fetch = async (url) => String(url) === 'https://pool.example.com/rotation.txt' ? new Response(pool) : new Response('Not Found', { status: 404 });
+  const env = baseEnv({ K: kv({ config: { polling: true, nodeLimitCount: 30, filter: { ipType: ['IPv4'] }, src: { prefDomain: false },
+    ipsrc: { hostmonit: false, api1: true, api1Url: 'https://pool.example.com/rotation.txt' } } }) });
   const batches = [];
-  for (let i = 0; i < 3; i++) {
-    const links = await subLinks(env);
-    assert.equal(links.length, 60);
-    const ips = links.map(hostOf).filter(h => /^\d+\.\d+\.\d+\.\d+$/.test(h));
-    assert.ok([...STABLE].every(ip => ips.includes(ip)), '保底 IP 每次都下发');
-    batches.push(new Set(ips.filter(ip => !STABLE.has(ip))));
-  }
-  assert.ok(batches[0].size > 0);
+  try {
+    for (let i = 0; i < 3; i++) {
+      const links = await subLinks(env);
+      assert.equal(links.length, 30);
+      batches.push(new Set(links.map(hostOf)));
+    }
+  } finally { globalThis.fetch = offline; }
   for (const [a, b] of [[0, 1], [1, 2], [0, 2]]) {
     assert.equal([...batches[a]].filter(ip => batches[b].has(ip)).length, 0, `第 ${a + 1} 与第 ${b + 1} 批不重复`);
   }
@@ -298,13 +299,13 @@ test('随机优选数量不被节点数量控制抬高', async () => {
   const env = baseEnv({ K: kv({ config: { optimizer: { subMode: 'random', subRandomCount: 16 }, nodeLimit: true, nodeLimitCount: 500, filter: { ipType: ['IPv4'] } } }) });
   const links = await subLinks(env);
   assert.equal(links.filter(l => /^优选IP-\d+$/.test(nameOf(l))).length, 16);
-  assert.equal(links.length, 16 + 20, '随机 16 + 内置保底 20');
+  assert.equal(links.length, 16, '只下发随机 16 个（不再追加内置保底节点）');
 });
 
-test('选择具体地区时仍保留不带地区的通用节点（含内置保底「优选IP-S」）', async () => {
+test('选择具体地区时仍保留不带地区的通用节点（优选域名节点）', async () => {
   const env = baseEnv({ K: kv({ config: { filter: { region: ['HK'], ipType: ['IPv4'] } } }) });
   const names = (await subLinks(env)).map(nameOf);
-  assert.ok(names.includes('优选IP-S01'));
+  assert.ok(names.some(n => /^优选IP-\d+$/.test(n)), '优选域名节点（通用）保留');
 });
 
 test('默认模式（IPv4+IPv6、节点测活开启）子请求数不超过免费版 50 个上限，DoH 不重复查询', async () => {
@@ -353,7 +354,7 @@ test('HostMonit 优选改为调用数据接口：按运营商命名、只保留 
   assert.ok(!links.some(l => hostOf(l) === '8.8.8.8'), '非 CF 段 IP 被丢弃');
   // 只勾选「移动」：剔除联通 / 电信节点，保留移动节点与不带运营商标记的通用节点
   assert.ok(!('联通-01' in byName) && !('电信-01' in byName), '未勾选运营商的节点被剔除');
-  assert.ok('优选IP-S01' in byName, '通用节点保留');
+  assert.ok(Object.keys(byName).some(n => /^优选IP-\d+$/.test(n)), '通用节点（优选域名）保留');
 });
 
 // ---------------- 优选 IP 来源开关：HostMonit / uouin / 自定义 API ----------------
@@ -494,4 +495,16 @@ test('分线路来源：某条线路的 IP 全部与其它线路重复时，该�
   const names = await withFetch(list, async () => (await subLinks(env2)).map(nameOf));
   assert.ok(names.includes('电信/联通-01'), '含联通的合并节点保留');
   assert.ok(!names.includes('移动-01'), '只标记移动的节点被剔除');
+});
+
+test('不再内置静态 IP 池；所有来源都没有产出时用官方域名兜底，订阅不为空', async () => {
+  // 默认模式：在线来源关闭 / 离线（前面的测试已写入 HostMonit 缓存，这里显式关闭）、优选域名关闭 → 官方域名兜底
+  const a = await subLinks(baseEnv({ K: kv({ config: { src: { prefDomain: false }, ipsrc: { hostmonit: false } } }) }));
+  assert.deepEqual(a.map(hostOf), ['cloudflare.com', 'www.cloudflare.com', 'speed.cloudflare.com']);
+  // 默认模式（优选域名开启、在线来源离线）：只有优选域名节点，没有任何 IP 节点
+  const b = await subLinks(baseEnv({ K: kv({ config: { filter: { ipType: ['IPv4'] }, ipsrc: { hostmonit: false } } }) }));
+  assert.ok(b.length > 0 && b.every(l => !/^\d+\.\d+\.\d+\.\d+$/.test(hostOf(l))), '无内置静态 IP');
+  // 严格自定义模式且列表为空 → 同样兜底
+  const c = await subLinks(baseEnv({ K: kv({ config: { optimizer: { subMode: 'custom' }, preferredDomains: '' } }) }));
+  assert.ok(c.some(l => hostOf(l) === 'cloudflare.com'));
 });

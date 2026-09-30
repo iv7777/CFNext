@@ -814,7 +814,7 @@ function onSubMode(){
   var m = $('o-submode').value;
   $('sm-custom').style.display = (m === 'custom') ? '' : 'none';
   $('sm-random').style.display = (m === 'random') ? '' : 'none';
-  // 「追加内置优选池与默认地区源」仅在自定义订阅 / 随机优选模式下可选；
+  // 「追加默认优选域名」仅在自定义订阅 / 随机优选模式下可选；
   // 订阅模式关闭（使用面板默认节点池）时强制为关闭并禁用，避免默认模式下误开追加导致行为不符
   if (m === '') {
     $('o-subinc').value = '0';
