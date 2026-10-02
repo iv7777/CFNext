@@ -17,7 +17,7 @@
 // ============================================================================
 import { connect } from 'cloudflare:sockets';
 
-const VERSION = '2.0.18';
+const VERSION = '2.0.19';
 
 // 更新检测：点击版本号后拉取仓库代码比对版本号；有新版本时返回最新代码供面板复制
 // 版本基准为仓库 main 分支根目录的 CFNext.js（由 build.mjs 生成的部署文件）
@@ -3493,7 +3493,7 @@ a:hover{text-decoration:underline}
 /* ===== 主区 ===== */
 .main{flex:1;min-width:0;display:flex;flex-direction:column}
 .topbar{display:flex;align-items:center;gap:14px;padding:14px 26px;border-bottom:1px solid var(--border);background:var(--topbar-bg);-webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px);position:sticky;top:0;z-index:40}
-.topbar h1{font-size:17px;font-weight:600;flex:1;min-width:0}
+.topbar-spacer{flex:1;min-width:0}   /* 页面标题只在内容区的标题栏显示一次，顶栏不再重复 */
 .pill{display:inline-flex;align-items:center;gap:6px;font-size:12px;padding:4px 10px;border-radius:20px;background:var(--ok-dim);color:var(--ok);white-space:nowrap}
 .pill.off{background:var(--err-dim);color:var(--err)}
 .pill .dot{width:6px;height:6px;border-radius:50%;background:currentColor}
@@ -3675,7 +3675,7 @@ pre.code{background:var(--bg2);border:1px solid var(--border);border-radius:8px;
 <div class="main">
   <div class="topbar">
     <button class="icon-btn hamb" id="hamb" title="菜单"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
-    <h1 id="pageTitle">仪表盘</h1>
+    <div class="topbar-spacer"></div>
     <span class="pill" id="connPill"><span class="dot"></span><span id="connText">连接中</span></span>
     <button class="icon-btn" id="themeBtn" title="切换日间 / 夜间"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path id="themeIcon" d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg></button>
   </div>
@@ -4056,7 +4056,6 @@ function switchView(id){
   document.querySelectorAll('.view').forEach(function(x){
     x.classList.toggle('on', x.getAttribute('data-view') === id);
   });
-  $('pageTitle').textContent = TITLES[id] || '';
   $('sidebar').classList.remove('open');
 }
 $('hamb').addEventListener('click', function(){ $('sidebar').classList.toggle('open'); });

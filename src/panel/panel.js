@@ -73,7 +73,6 @@ function switchView(id){
   document.querySelectorAll('.view').forEach(function(x){
     x.classList.toggle('on', x.getAttribute('data-view') === id);
   });
-  $('pageTitle').textContent = TITLES[id] || '';
   $('sidebar').classList.remove('open');
 }
 $('hamb').addEventListener('click', function(){ $('sidebar').classList.toggle('open'); });

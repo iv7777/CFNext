@@ -54,7 +54,7 @@ a:hover{text-decoration:underline}
 /* ===== 主区 ===== */
 .main{flex:1;min-width:0;display:flex;flex-direction:column}
 .topbar{display:flex;align-items:center;gap:14px;padding:14px 26px;border-bottom:1px solid var(--border);background:var(--topbar-bg);-webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px);position:sticky;top:0;z-index:40}
-.topbar h1{font-size:17px;font-weight:600;flex:1;min-width:0}
+.topbar-spacer{flex:1;min-width:0}   /* 页面标题只在内容区的标题栏显示一次，顶栏不再重复 */
 .pill{display:inline-flex;align-items:center;gap:6px;font-size:12px;padding:4px 10px;border-radius:20px;background:var(--ok-dim);color:var(--ok);white-space:nowrap}
 .pill.off{background:var(--err-dim);color:var(--err)}
 .pill .dot{width:6px;height:6px;border-radius:50%;background:currentColor}
