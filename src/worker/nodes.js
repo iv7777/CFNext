@@ -72,7 +72,8 @@ function vlessNode(cfg, server, port, name, extra = {}) {
   else q += '&type=ws';   // 明文端口与默认路径均走 ws
   // TLS 下的 ws 路径携带 ed=2048（WS 0-RTT 早数据，见 decodeEarlyData）；明文端口与 xhttp 不带
   q += '&path=' + enc('/' + cfg.path + (!isXhttp && isTls ? '?ed=2048' : ''));
-  if (cfg.alpn && isTls) q += '&alpn=' + alpnParam(cfg.alpn);
+  // ALPN：面板设置优先；XHTTP stream-one 依赖 HTTP/2 双向流，未设置时显式指定 h2（与 Clash 输出一致），不依赖客户端内核的默认值
+  if (isTls && (cfg.alpn || isXhttp)) q += '&alpn=' + (cfg.alpn ? alpnParam(cfg.alpn) : 'h2');
   if (cfg.ech && isTls) {
     // ECH：输出 "查询域名+DoH"（xray/V2rayN 客户端本地查询 ECH 配置，Worker 端拉取会与用户边缘密钥不匹配导致握手失败）
     q += '&ech=' + enc((cfg.echHost || 'cloudflare-ech.com') + '+' + (cfg.echDns || 'https://223.5.5.5/dns-query'));

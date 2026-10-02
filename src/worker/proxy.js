@@ -167,25 +167,31 @@ async function handleXhttpProxy(request, cfg) {
     try { await writer.close(); } catch (e) { /* 忽略 */ }
   })();
 
+  // 下行用 pull 驱动：只有客户端读走数据后才继续从目标连接读取（背压）。
+  // 此前在 start() 里无限循环 enqueue，客户端读得慢（或不读）时数据全部堆在内存里，下载大文件会撑爆 Worker 的 128MB 内存
+  const connReader = conn.readable.getReader();
   const respStream = new ReadableStream({
-    async start(controller) {
+    start(controller) {
       // 须先回 2 字节 VLESS 响应头（version=0 + addonsLen=0），否则 xhttp 客户端握手失败（真连接报 unexpected response version）
       controller.enqueue(new Uint8Array([0, 0]));
       // 补发 SOCKS5/HTTP 代理握手残留字节（目标端早期数据），避免 TLS 握手中途被截断
       if (conn._preamble && conn._preamble.byteLength > 0) controller.enqueue(conn._preamble);
-      const r = conn.readable.getReader();
+    },
+    async pull(controller) {
       try {
-        while (true) {
-          const { done, value } = await r.read();
-          if (done) break;
-          controller.enqueue(value);
-        }
-      } catch (e) { /* 忽略 */ }
+        const { done, value } = await connReader.read();
+        if (!done) { controller.enqueue(value); return; }
+      } catch (e) { /* 目标连接异常中断：按结束处理 */ }
       try { controller.close(); } catch (e) { /* 忽略 */ }
       try { conn.close(); } catch (e) { /* 忽略 */ }
     },
-    cancel() { try { conn.close(); } catch (e) { /* 忽略 */ } }
-  });
+    cancel() {
+      // 客户端断开：释放目标连接，并停止读取上行请求体
+      try { connReader.cancel(); } catch (e) { /* 忽略 */ }
+      try { conn.close(); } catch (e) { /* 忽略 */ }
+      try { bodyReader.cancel(); } catch (e) { /* 忽略 */ }
+    }
+  }, { highWaterMark: 256 * 1024, size: (chunk) => chunk.byteLength });
   return new Response(respStream, { status: 200, headers: { 'content-type': 'application/octet-stream', 'x-accel-buffering': 'no', 'cache-control': 'no-store' } });
 }
 

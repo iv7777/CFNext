@@ -17,7 +17,7 @@
 // ============================================================================
 import { connect } from 'cloudflare:sockets';
 
-const VERSION = '2.0.21';
+const VERSION = '2.0.22';
 
 // 更新检测：点击版本号后拉取仓库代码比对版本号；有新版本时返回最新代码供面板复制
 // 版本基准为仓库 main 分支根目录的 CFNext.js（由 build.mjs 生成的部署文件）
@@ -2228,25 +2228,31 @@ async function handleXhttpProxy(request, cfg) {
     try { await writer.close(); } catch (e) { /* 忽略 */ }
   })();
 
+  // 下行用 pull 驱动：只有客户端读走数据后才继续从目标连接读取（背压）。
+  // 此前在 start() 里无限循环 enqueue，客户端读得慢（或不读）时数据全部堆在内存里，下载大文件会撑爆 Worker 的 128MB 内存
+  const connReader = conn.readable.getReader();
   const respStream = new ReadableStream({
-    async start(controller) {
+    start(controller) {
       // 须先回 2 字节 VLESS 响应头（version=0 + addonsLen=0），否则 xhttp 客户端握手失败（真连接报 unexpected response version）
       controller.enqueue(new Uint8Array([0, 0]));
       // 补发 SOCKS5/HTTP 代理握手残留字节（目标端早期数据），避免 TLS 握手中途被截断
       if (conn._preamble && conn._preamble.byteLength > 0) controller.enqueue(conn._preamble);
-      const r = conn.readable.getReader();
+    },
+    async pull(controller) {
       try {
-        while (true) {
-          const { done, value } = await r.read();
-          if (done) break;
-          controller.enqueue(value);
-        }
-      } catch (e) { /* 忽略 */ }
+        const { done, value } = await connReader.read();
+        if (!done) { controller.enqueue(value); return; }
+      } catch (e) { /* 目标连接异常中断：按结束处理 */ }
       try { controller.close(); } catch (e) { /* 忽略 */ }
       try { conn.close(); } catch (e) { /* 忽略 */ }
     },
-    cancel() { try { conn.close(); } catch (e) { /* 忽略 */ } }
-  });
+    cancel() {
+      // 客户端断开：释放目标连接，并停止读取上行请求体
+      try { connReader.cancel(); } catch (e) { /* 忽略 */ }
+      try { conn.close(); } catch (e) { /* 忽略 */ }
+      try { bodyReader.cancel(); } catch (e) { /* 忽略 */ }
+    }
+  }, { highWaterMark: 256 * 1024, size: (chunk) => chunk.byteLength });
   return new Response(respStream, { status: 200, headers: { 'content-type': 'application/octet-stream', 'x-accel-buffering': 'no', 'cache-control': 'no-store' } });
 }
 
@@ -2511,7 +2517,8 @@ function vlessNode(cfg, server, port, name, extra = {}) {
   else q += '&type=ws';   // 明文端口与默认路径均走 ws
   // TLS 下的 ws 路径携带 ed=2048（WS 0-RTT 早数据，见 decodeEarlyData）；明文端口与 xhttp 不带
   q += '&path=' + enc('/' + cfg.path + (!isXhttp && isTls ? '?ed=2048' : ''));
-  if (cfg.alpn && isTls) q += '&alpn=' + alpnParam(cfg.alpn);
+  // ALPN：面板设置优先；XHTTP stream-one 依赖 HTTP/2 双向流，未设置时显式指定 h2（与 Clash 输出一致），不依赖客户端内核的默认值
+  if (isTls && (cfg.alpn || isXhttp)) q += '&alpn=' + (cfg.alpn ? alpnParam(cfg.alpn) : 'h2');
   if (cfg.ech && isTls) {
     // ECH：输出 "查询域名+DoH"（xray/V2rayN 客户端本地查询 ECH 配置，Worker 端拉取会与用户边缘密钥不匹配导致握手失败）
     q += '&ech=' + enc((cfg.echHost || 'cloudflare-ech.com') + '+' + (cfg.echDns || 'https://223.5.5.5/dns-query'));

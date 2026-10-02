@@ -1472,3 +1472,56 @@ test('Surge / Loon / Quantumult X 不输出 XHTTP 节点（它们没有 XHTTP �
   assert.match(await (await subOf(both, 'plain')).text(), /type=xhttp/);
   assert.match(await (await subOf(both, 'clash')).text(), /network: xhttp/);
 });
+
+// ---------------- XHTTP（stream-one）----------------
+const xhttpPost = (env, path, body) => worker.fetch(new Request(`https://node.example.com${path}`, { method: 'POST', body, duplex: 'half', headers: { 'User-Agent': 'Go-http-client/2.0' } }), env, {});
+
+test('XHTTP：Xray 风格请求（路径带结尾 / 与 x_padding 查询串）被接受，响应以 VLESS 响应头开始并转发上行数据', async () => {
+  const log = fakeNet({ 'slash.example': { delay: 5 } });
+  const env = baseEnv({ K: kv({ config: { enableXhttp: true } }) });
+  const res = await xhttpPost(env, `/${UUID}/?x_padding=${'x'.repeat(300)}`, vlessReq('slash.example', 443, TLS_HELLO));
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get('cache-control'), 'no-store');
+  assert.equal(res.headers.get('x-accel-buffering'), 'no');
+  const first = await res.body.getReader().read();
+  assert.deepEqual([...first.value], [0, 0], '响应以 2 字节 VLESS 响应头开始');
+  await until(() => log.some(s => s.written.length));
+  assert.equal(log[0].hostname, 'slash.example');
+  assert.deepEqual([...log[0].written[0]], TLS_HELLO);
+  // 未开启 XHTTP 时不接受代理请求
+  const off = await xhttpPost(baseEnv(), `/${UUID}/`, vlessReq('slash.example', 443, TLS_HELLO));
+  assert.notEqual(off.headers.get('content-type'), 'application/octet-stream');
+});
+
+test('XHTTP 下行有背压：客户端不读取时不会无限缓冲目标连接的数据；客户端断开后释放目标连接', async () => {
+  let pulls = 0, closed = false;
+  globalThis.__connect = () => ({
+    opened: Promise.resolve(),
+    writable: new WritableStream({ write() {} }),
+    readable: new ReadableStream({ pull(c) { pulls++; c.enqueue(new Uint8Array(64 * 1024)); } }),   // 目标不停地发数据
+    close() { closed = true; },
+  });
+  const env = baseEnv({ K: kv({ config: { enableXhttp: true } }) });
+  const body = new ReadableStream({ start(c) { c.enqueue(vlessReq('bp.example', 443, TLS_HELLO)); } });   // 请求体保持打开
+  const res = await xhttpPost(env, `/${UUID}`, body);
+  const reader = res.body.getReader();
+  assert.deepEqual([...(await reader.read()).value], [0, 0]);
+  assert.equal((await reader.read()).value.byteLength, 64 * 1024);
+  await new Promise(r => setTimeout(r, 100));   // 客户端停止读取
+  assert.ok(pulls <= 10, `目标连接被读取了 ${pulls} 次（无背压时会一直增长）`);
+  await reader.cancel();
+  assert.equal(closed, true, '客户端断开后关闭目标连接');
+});
+
+test('XHTTP 链接：未设置 ALPN 时显式带 alpn=h2（stream-one 依赖 HTTP/2），WS 节点不带；面板设置的 ALPN 优先', async () => {
+  const links = async (alpn) => {
+    const env = baseEnv({ K: kv({ config: customCfg({ enableXhttp: true, ...(alpn ? { alpn } : {}) }) }) });
+    return (await (await subOf(env, 'plain')).text()).split('\n').filter(Boolean);
+  };
+  let [ws, x] = await links();
+  assert.ok(!/alpn=/.test(ws) && /type=ws/.test(ws), 'WS 节点未设置 ALPN 时不带 alpn 参数');
+  assert.match(x, /type=xhttp&mode=stream-one&extra=[^&]+&path=%2F[0-9a-f-]+&alpn=h2(&|#)/);
+  [ws, x] = await links('h2,http/1.1');
+  assert.match(x, /&alpn=h2,http\/1\.1(&|#)/);
+  assert.match(ws, /&alpn=h2,http\/1\.1(&|#)/);
+});
