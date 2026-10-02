@@ -18,7 +18,7 @@
 // ============================================================================
 import { connect } from 'cloudflare:sockets';
 
-const VERSION = '2.1.4';
+const VERSION = '2.1.5';
 
 // 更新检测：点击版本号后拉取仓库代码比对版本号；有新版本时返回最新代码供面板复制
 // 版本基准为仓库 main 分支根目录的 CFNext.js（由 build.mjs 生成的部署文件）
@@ -3707,6 +3707,30 @@ pre.code{background:var(--bg2);border:1px solid var(--border);border-radius:8px;
 @media (max-width:560px){
   th,td{padding:8px 8px}
 }
+
+/* ===== 订阅预览：标签页 / 节点列表 / 节点二维码弹窗 ===== */
+.tabs{display:flex;gap:4px;border-bottom:1px solid var(--border);margin-bottom:12px}
+.tab{background:none;border:0;border-bottom:2px solid transparent;margin-bottom:-1px;padding:8px 12px;font:inherit;font-size:13px;color:var(--dim);cursor:pointer}
+.tab:hover{color:var(--text)}
+.tab.on{color:var(--accent);border-bottom-color:var(--accent);font-weight:600}
+.node-list{border:1px solid var(--border);border-radius:8px;max-height:420px;overflow:auto}
+.node-row{display:flex;align-items:center;gap:10px;padding:8px 12px;border-bottom:1px solid var(--border)}
+.node-row:last-child{border-bottom:0}
+.node-row .nm{flex:1;min-width:0}
+.node-row .nm b{display:block;font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.node-row .nm span{display:block;font-size:11.5px;color:var(--dim);font-family:ui-monospace,Consolas,monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.node-row .btn{flex:0 0 auto}
+.ptag{flex:0 0 auto;min-width:54px;text-align:center;font-size:11px;font-weight:600;padding:2px 7px;border-radius:5px;background:var(--accent-dim);color:var(--accent)}
+.ptag.trojan{background:var(--ok-dim);color:var(--ok)}
+.ptag.xhttp{background:rgba(217,119,6,.13);color:var(--warn)}
+.node-empty{padding:18px;text-align:center;color:var(--dim);font-size:13px}
+.modal{display:none;position:fixed;inset:0;z-index:90;background:rgba(15,23,42,.45);align-items:center;justify-content:center;padding:16px}
+.modal.show{display:flex}
+.modal-card{background:var(--card);border:1px solid var(--border);border-radius:12px;box-shadow:var(--shadow);padding:16px;width:100%;max-width:360px}
+.modal-head{display:flex;align-items:center;gap:10px}
+.modal-head b{flex:1;min-width:0;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.modal .qrbox img{width:auto;height:auto;max-width:100%;background:#fff}
+.modal pre.code{max-height:96px;margin-top:8px}
 </style>
 </head>
 <body>
@@ -3776,9 +3800,20 @@ pre.code{background:var(--bg2);border:1px solid var(--border);border-radius:8px;
         <div id="qrWrap" style="display:none"></div>
         <p class="hint" style="margin-top:12px" id="subHint"></p>
         <div id="subPrev" style="display:none;margin-top:12px">
-          <div class="kv"><span class="k">订阅类型</span><span class="v" id="prevType">—</span></div>
-          <div class="kv"><span class="k">节点数量</span><span class="v" id="prevCount">—</span></div>
-          <pre class="code" id="prevBody" style="margin-top:10px"></pre>
+          <div class="tabs" role="tablist">
+            <button class="tab" id="prevTabList" role="tab" onclick="prevTab('list')">节点列表</button>
+            <button class="tab" id="prevTabRaw" role="tab" onclick="prevTab('raw')">原始内容</button>
+          </div>
+          <div id="prevList">
+            <input type="text" id="nodeSearch" placeholder="搜索名称 / 地址 / 协议，如 香港、XHTTP" autocomplete="off" oninput="renderNodeList()">
+            <p class="hint" style="margin:8px 0 10px">单个节点可用 v2rayN / v2rayNG / Shadowrocket / NekoBox 等从剪贴板或二维码导入。单个节点不会随订阅更新（优选 IP 变化后需重新导入）；链接中含 UUID，请勿外传。</p>
+            <div class="node-list" id="nodeList"></div>
+          </div>
+          <div id="prevRaw">
+            <div class="kv"><span class="k">订阅类型</span><span class="v" id="prevType">—</span></div>
+            <div class="kv"><span class="k">节点数量</span><span class="v" id="prevCount">—</span></div>
+            <pre class="code" id="prevBody" style="margin-top:10px"></pre>
+          </div>
         </div>
       </div>
       <div class="card">
@@ -4026,6 +4061,14 @@ pre.code{background:var(--bg2);border:1px solid var(--border);border-radius:8px;
   <span class="saved-at" id="savedAt">尚未保存</span>
   <button class="btn danger" id="resetBtn" onclick="resetAll()">重置</button>
   <button class="btn primary" id="saveBtn" onclick="saveAll()"><span class="dirty-dot"></span>保存全部</button>
+</div>
+<div class="modal" id="nodeQr" onclick="if (event.target === this) closeNodeQr()">
+  <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="nodeQrName">
+    <div class="modal-head"><b id="nodeQrName"></b><button class="icon-btn" title="关闭" onclick="closeNodeQr()"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>
+    <div class="qrbox" id="nodeQrImg"></div>
+    <pre class="code" id="nodeQrLink"></pre>
+    <button class="btn primary" style="width:100%;margin-top:10px" onclick="copyText($('nodeQrLink').textContent)">复制链接</button>
+  </div>
 </div>
 <div class="toast" id="toast"></div>
 
@@ -4578,7 +4621,8 @@ function makeSub(showQR){
   $('subUrl').value = url;
   if (showQR) showQRCode(url);
 }
-$('subFmt').addEventListener('change', function(){ makeSub(false); });
+// 二维码已展开时随格式一起刷新（否则仍显示上一个格式的订阅地址）；已打开的预览也一并收起，避免显示旧格式的内容
+$('subFmt').addEventListener('change', function(){ makeSub($('qrWrap').style.display === 'block'); $('subPrev').style.display = 'none'; });
 function toggleQR(){
   var w = $('qrWrap');
   if (w.style.display === 'block'){ w.style.display = 'none'; return; }
@@ -4617,16 +4661,35 @@ function downloadSub(){
   a.click();
   a.remove();
 }
+// 订阅预览：两个标签页——「节点列表」（逐个节点复制 / 二维码，数据取明文节点链接，与订阅同一流程生成）
+// 与「原始内容」（所选格式的订阅原文）。链接类格式默认打开节点列表，配置文件类格式默认打开原始内容；各标签首次打开时才请求
+var PREV = { fmt: '', raw: false, list: false, nodes: [] };
+var LINK_FMTS = { auto: 1, v2ray: 1, plain: 1 };
 function previewSub(){
   var fmt = $('subFmt').value;
-  var box = $('subPrev');
-  box.style.display = 'block';
+  PREV = { fmt: fmt, raw: false, list: false, nodes: [] };
+  $('subPrev').style.display = 'block';
+  $('nodeSearch').value = '';
+  prevTab(LINK_FMTS[fmt] ? 'list' : 'raw');
+}
+function prevTab(t){
+  $('prevTabList').classList.toggle('on', t === 'list');
+  $('prevTabRaw').classList.toggle('on', t === 'raw');
+  $('prevList').style.display = t === 'list' ? 'block' : 'none';
+  $('prevRaw').style.display = t === 'raw' ? 'block' : 'none';
+  if (t === 'list' && !PREV.list) loadNodeList();
+  if (t === 'raw' && !PREV.raw) loadRawPreview();
+}
+function loadRawPreview(){
+  var fmt = PREV.fmt;
+  PREV.raw = true;
   $('prevType').textContent = '请求中…';
   $('prevCount').textContent = '—';
   $('prevBody').textContent = '';
   api('sub?fmt=' + encodeURIComponent(fmt === 'auto' ? '' : fmt))
     .then(function(r){
-      if (!r || !r.ok){ $('prevType').textContent = '预览失败'; $('prevBody').textContent = (r && r.msg) || '未知错误'; return; }
+      if (PREV.fmt !== fmt) return;
+      if (!r || !r.ok){ PREV.raw = false; $('prevType').textContent = '预览失败'; $('prevBody').textContent = (r && r.msg) || '未知错误'; return; }
       var body = r.body || '';
       var type = r.type || '';
       $('prevType').textContent = type || '—';
@@ -4644,8 +4707,80 @@ function previewSub(){
       $('prevCount').textContent = n + ' 个节点';
       $('prevBody').textContent = body.length > 2600 ? body.slice(0, 2600) + '\n…（已截断，完整内容请下载）' : body;
     })
-    .catch(function(){ $('prevType').textContent = '预览失败：无法连接服务器'; $('prevBody').textContent = ''; });
+    .catch(function(){ PREV.raw = false; $('prevType').textContent = '预览失败：无法连接服务器'; $('prevBody').textContent = ''; });
 }
+// 解析单条节点链接：名称（# 后）、协议标签、地址:端口
+function parseNodeLink(link){
+  var m = /^(vless|trojan):\/\/[^@]*@(\[[^\]]+\]|[^:?#\/]+):(\d+)/.exec(link);
+  if (!m) return null;
+  var hash = link.indexOf('#'), name = '';
+  if (hash >= 0) { try { name = decodeURIComponent(link.slice(hash + 1)); } catch (e) { name = link.slice(hash + 1); } }
+  var proto = m[1] === 'trojan' ? 'Trojan' : (/[?&]type=xhttp(&|#|$)/.test(link) ? 'XHTTP' : 'VLESS');
+  return { link: link, name: name || (m[2] + ':' + m[3]), proto: proto, addr: m[2] + ':' + m[3] };
+}
+function loadNodeList(){
+  var fmt = PREV.fmt;
+  PREV.list = true;
+  var box = $('nodeList');
+  box.textContent = '';
+  box.appendChild(mkEl('div', 'node-empty', '正在生成节点列表…'));
+  api('sub?fmt=plain')
+    .then(function(r){
+      if (PREV.fmt !== fmt) return;
+      if (!r || !r.ok){ PREV.list = false; box.textContent = ''; box.appendChild(mkEl('div', 'node-empty', '生成失败：' + ((r && r.msg) || '未知错误'))); return; }
+      PREV.nodes = String(r.body || '').split('\n').map(function(l){ return parseNodeLink(l.trim()); }).filter(Boolean);
+      $('nodeSearch').placeholder = '在 ' + PREV.nodes.length + ' 个节点中搜索名称 / 地址 / 协议，如 香港、XHTTP';
+      renderNodeList();
+    })
+    .catch(function(){ PREV.list = false; box.textContent = ''; box.appendChild(mkEl('div', 'node-empty', '生成失败：无法连接服务器')); });
+}
+function renderNodeList(){
+  var box = $('nodeList');
+  if (!PREV.list || !PREV.nodes) return;
+  var q = $('nodeSearch').value.trim().toLowerCase();
+  var shown = PREV.nodes.filter(function(n){
+    return !q || (n.name + ' ' + n.addr + ' ' + n.proto).toLowerCase().indexOf(q) >= 0;
+  });
+  box.textContent = '';
+  if (!PREV.nodes.length) { box.appendChild(mkEl('div', 'node-empty', '没有节点')); return; }
+  if (!shown.length) { box.appendChild(mkEl('div', 'node-empty', '没有匹配「' + q + '」的节点')); return; }
+  var frag = document.createDocumentFragment();
+  shown.forEach(function(n){
+    var row = mkEl('div', 'node-row');
+    row.appendChild(mkEl('span', 'ptag ' + n.proto.toLowerCase(), n.proto));
+    var nm = mkEl('div', 'nm');
+    nm.appendChild(mkEl('b', null, n.name));
+    nm.appendChild(mkEl('span', null, n.addr));
+    row.appendChild(nm);
+    var cp = mkEl('button', 'btn sm', '复制');
+    cp.onclick = function(){ copyText(n.link); };
+    var qr = mkEl('button', 'btn sm', '二维码');
+    qr.onclick = function(){ openNodeQr(n); };
+    row.appendChild(cp); row.appendChild(qr);
+    frag.appendChild(row);
+  });
+  box.appendChild(frag);
+}
+function openNodeQr(n){
+  $('nodeQrName').textContent = n.name;
+  $('nodeQrLink').textContent = n.link;
+  var img = $('nodeQrImg');
+  img.textContent = '';
+  try {
+    if (typeof qrcode !== 'function') throw new Error('二维码库未加载');
+    // 节点名称含中文：按 UTF-8 字节编码（库默认每个字符只取低 8 位，中文名会变成乱码）
+    if (qrcode.stringToBytesFuncs && qrcode.stringToBytesFuncs['UTF-8']) qrcode.stringToBytes = qrcode.stringToBytesFuncs['UTF-8'];
+    var q = qrcode(0, n.link.length > 500 ? 'L' : 'M');   // 长链接（XHTTP 带 extra）用低纠错级别，码点更稀疏、手机更容易识别
+    q.addData(n.link);
+    q.make();
+    // 每个码点取整数像素、按原始尺寸显示（缩放会让码点边缘模糊，降低识别率）
+    var cell = Math.max(2, Math.floor(300 / (q.getModuleCount() + 8)));
+    img.innerHTML = q.createImgTag(cell, cell * 4);
+  } catch (e) { img.appendChild(mkEl('div', 'hint', '二维码生成失败：' + e.message)); }
+  $('nodeQr').classList.add('show');
+}
+function closeNodeQr(){ $('nodeQr').classList.remove('show'); }
+document.addEventListener('keydown', function(e){ if (e.key === 'Escape') closeNodeQr(); });
 
 /* ===== 优选 IP 来源测试 ===== */
 var IPSRC_LABELS = { hostmonit: 'HostMonit 实时优选', uouin: 'uouin 分线路优选', api1: '自定义优选 API 1', api2: '自定义优选 API 2', domains: '优选域名' };

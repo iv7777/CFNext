@@ -77,9 +77,20 @@
         <div id="qrWrap" style="display:none"></div>
         <p class="hint" style="margin-top:12px" id="subHint"></p>
         <div id="subPrev" style="display:none;margin-top:12px">
-          <div class="kv"><span class="k">订阅类型</span><span class="v" id="prevType">—</span></div>
-          <div class="kv"><span class="k">节点数量</span><span class="v" id="prevCount">—</span></div>
-          <pre class="code" id="prevBody" style="margin-top:10px"></pre>
+          <div class="tabs" role="tablist">
+            <button class="tab" id="prevTabList" role="tab" onclick="prevTab('list')">节点列表</button>
+            <button class="tab" id="prevTabRaw" role="tab" onclick="prevTab('raw')">原始内容</button>
+          </div>
+          <div id="prevList">
+            <input type="text" id="nodeSearch" placeholder="搜索名称 / 地址 / 协议，如 香港、XHTTP" autocomplete="off" oninput="renderNodeList()">
+            <p class="hint" style="margin:8px 0 10px">单个节点可用 v2rayN / v2rayNG / Shadowrocket / NekoBox 等从剪贴板或二维码导入。单个节点不会随订阅更新（优选 IP 变化后需重新导入）；链接中含 UUID，请勿外传。</p>
+            <div class="node-list" id="nodeList"></div>
+          </div>
+          <div id="prevRaw">
+            <div class="kv"><span class="k">订阅类型</span><span class="v" id="prevType">—</span></div>
+            <div class="kv"><span class="k">节点数量</span><span class="v" id="prevCount">—</span></div>
+            <pre class="code" id="prevBody" style="margin-top:10px"></pre>
+          </div>
         </div>
       </div>
       <div class="card">
@@ -327,6 +338,14 @@
   <span class="saved-at" id="savedAt">尚未保存</span>
   <button class="btn danger" id="resetBtn" onclick="resetAll()">重置</button>
   <button class="btn primary" id="saveBtn" onclick="saveAll()"><span class="dirty-dot"></span>保存全部</button>
+</div>
+<div class="modal" id="nodeQr" onclick="if (event.target === this) closeNodeQr()">
+  <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="nodeQrName">
+    <div class="modal-head"><b id="nodeQrName"></b><button class="icon-btn" title="关闭" onclick="closeNodeQr()"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>
+    <div class="qrbox" id="nodeQrImg"></div>
+    <pre class="code" id="nodeQrLink"></pre>
+    <button class="btn primary" style="width:100%;margin-top:10px" onclick="copyText($('nodeQrLink').textContent)">复制链接</button>
+  </div>
 </div>
 <div class="toast" id="toast"></div>
 
