@@ -1,6 +1,6 @@
 # CFNext · Cloudflare 代理订阅面板
 
-> **CFNext —— 部署在 Cloudflare Workers / Pages 的代理订阅管理面板**，单文件同时实现 VLESS / Trojan / XHTTP 多协议代理与图形化配置：`/UUID`（或自定义路径）进入面板，`/sub` 输出订阅；内置优选域名与在线优选 IP 来源、ECH 加密、落地与出站代理（含可配置的地区反代）及地区 / 运营商 / IP 版本多维筛选，设置 `U` 与 `ADMIN` 即可部署，绑定 KV 后改完即生效。
+> **CFNext —— 部署在 Cloudflare Workers / Pages 的代理订阅面板**，单文件同时实现 VLESS / Trojan / XHTTP 多协议代理与图形化配置：`/UUID`（或自定义路径）进入面板，`/sub` 输出订阅；内置优选域名与在线优选 IP 来源、ECH 加密、落地与出站代理（含可配置的地区反代）及地区 / 运营商 / IP 版本多维筛选，设置 `U` 与 `ADMIN` 即可部署，绑定 KV 后改完即生效。
 >
 > **[Telegram 交流群](https://t.me/SZ_PAI)**　**[YouTube 频道](https://www.youtube.com/@PAI_CN)**
 
