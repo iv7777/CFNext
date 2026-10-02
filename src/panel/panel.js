@@ -464,6 +464,11 @@ function saveAll(){
     .catch(function(){ toast('保存失败：无法连接服务器', 'err'); })
     .then(function(){ btn.disabled = false; });
 }
+function logout(){
+  api('logout', { method: 'POST' })
+    .then(function(){ location.href = '/login?next=' + encodeURIComponent(APIPATH); })
+    .catch(function(){ toast('退出失败：无法连接服务器', 'err'); });
+}
 function resetAll(){
   if (!confirm('确定重置？将清空 KV 中全部面板配置与节点记录，面板还原为初始部署状态。此操作不可恢复！')) return;
   var btn = $('resetBtn');
@@ -495,7 +500,7 @@ function genUuid(){
 function exportConfig(){
   try {
     var data = collectForm();
-    SCHEMA.forEach(function(d){ if (d.type === 'secret' && getPath(data, d.key) !== undefined) setPath(data, d.key, ''); });
+    SCHEMA.forEach(function(d){ if ((d.type === 'secret' || d.noExport) && getPath(data, d.key) !== undefined) setPath(data, d.key, ''); });
     var blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
     var a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
@@ -519,7 +524,7 @@ function importConfig(input){
       var next = JSON.parse(JSON.stringify(CFG)), n = 0;
       SCHEMA.forEach(function(d){
         var v = getPath(data, d.key);
-        if (v === undefined || d.type === 'secret' || lockedEnv(d.key)) return;
+        if (v === undefined || d.type === 'secret' || d.noExport || lockedEnv(d.key)) return;
         setPath(next, d.key, v);
         n++;
       });
@@ -598,7 +603,7 @@ function showQRCode(url){
     q.addData(qrPayloadOf(fmt, url));
     q.make();
     w.innerHTML = '<div class="qrbox">' + q.createImgTag(4, 10) + '</div>';
-  } catch(e) { w.innerHTML = '<div class="hint">二维码生成失败：' + e.message + '</div>'; }
+  } catch(e) { w.textContent = ''; w.appendChild(mkEl('div', 'hint', '二维码生成失败：' + e.message)); }
 }
 // 二维码内容随订阅格式（客户端）联动：
 // Clash/Mihomo、Stash → clash://install-config（FlyClash / Clash Verge / Stash 扫码装订阅，配置名取订阅响应头 filename=CFNext）

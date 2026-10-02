@@ -78,8 +78,9 @@ FilterTW: &FilterTW '^(?=.*(?i)(台|🇹🇼|TW|tai|TPE|TSA|KHH))(?!.*5x).*$'
 
 # ==================== 监听器 ====================
 listeners:
-  # Shadowsocks监听器 - 远程连接家庭网络，端口和密码使用时请修改（默认密码请勿用于公网）
-  - {name: SS-IN,  type: shadowsocks, listen: '::', port: 10000, udp: true, password: Xf3#Lp9WqZ, cipher: aes-256-gcm}
+  # Shadowsocks监听器 - 远程连接家庭网络。密码由 CFNext 按 UUID 为本部署派生（每个部署不同），不再使用公开的默认密码；
+  # 如需对外开放请自行修改端口与密码
+  - {name: SS-IN,  type: shadowsocks, listen: '::', port: 10000, udp: true, password: "__CFNEXT_SS_PASSWORD__", cipher: aes-256-gcm}
   # Mixed监听器 - 分地区专用端口 玩法：本地浏览器插件或手机APP配置代理，实现分地区访问
   - {name: MIXED-SG, type: mixed, port: 50000, proxy: 新加坡节点}
   - {name: MIXED-US, type: mixed, port: 50001, proxy: 美国节点}
@@ -105,9 +106,9 @@ find-process-mode: 'always'
 keep-alive-interval: 15
 keep-alive-idle: 600
 
-# 认证配置（默认凭据请务必修改！）
+# 认证配置：密码由 CFNext 按 UUID 为本部署派生（每个部署不同），不再使用公开的默认凭据
 authentication:
-  - mihomo:yyds666
+  - "mihomo:__CFNEXT_AUTH_PASSWORD__"
 skip-auth-prefixes:
   - 192.168.1.0/24
   - 192.168.31.0/24
@@ -123,11 +124,14 @@ external-ui-url: https://github.com/Zephyruso/zashboard/releases/latest/download
 external-ui-name: zashboard
 external-ui: ui
 external-controller: 127.0.0.1:9090
-secret: yyds666    # 请修改为自定义密钥
-# 允许网页面板跨域访问
+secret: "__CFNEXT_API_SECRET__"    # 由 CFNext 按 UUID 为本部署派生，可自行修改
+# 允许跨域访问的面板来源（不再使用 "*"：任意网页都不能借浏览器访问本机控制接口）。使用其它在线面板时在此追加其域名
 external-controller-cors:
   allow-origins:
-    - "*"
+    - "http://127.0.0.1:9090"
+    - "http://localhost:9090"
+    - "https://board.zash.run.place"
+    - "https://metacubex.github.io"
   allow-private-network: true
 
 # 配置存储
@@ -171,7 +175,7 @@ tun:
   auto-redirect: true
   auto-detect-interface: true
   # 提示：系统级防泄露的最强手段是开启 TUN（自动劫持全部 DNS 流量）；
-  # 不开 TUN 时，请把系统 / LAN 设备的 DNS 指向 127.0.0.1:53（本机）或本机局域网 IP:53。
+  # 不开 TUN 时，请把系统 / 本机应用的 DNS 指向 127.0.0.1:1053；要给 LAN 设备提供 DNS，把下方 dns.listen 改为 0.0.0.0:1053（注意不要暴露到公网）。
 
 hosts:
   miwifi.com: 192.168.31.2
@@ -188,7 +192,7 @@ hosts:
 #   3) fake-ip-filter 补齐系统连通性检测 / 时间同步 / 运营商登录等域名，防止系统误判断网而回退运营商 DNS。
 dns:
   enable: true
-  listen: 0.0.0.0:53        # 本机 / LAN 设备可把 DNS 指向此地址，避免走运营商 DNS
+  listen: 127.0.0.1:1053    # 仅本机监听（53 端口需要管理员权限且常被系统占用，监听 0.0.0.0 还可能成为公网开放解析器）
   ipv6: true
   prefer-h3: false          # respect-rules 下官方不推荐 DoH3；且 QUIC 已被规则拦截
   cache-algorithm: arc      # 性能更优的 ARC 缓存算法
@@ -518,14 +522,14 @@ const CONFIG_SCHEMA = [
   // 自定义订阅路径别名：/<别名>/sub 同样输出订阅（不开放面板与管理接口）
   { key: 'subUrl', type: 'string', def: '', el: 'a-suburl', label: '自定义订阅路径', maxLen: 128, strip: ['^/+', '/+$', '/sub$', '/+$'],
     pattern: PATH_SEG_PATTERN, hint: '只填一段别名，如 AAZ（字母、数字及 . _ ~ -）', reserved: RESERVED_PATHS },
-  { key: 'admin', type: 'secret', def: '', el: 'a-admin', label: '管理密码', trim: false, maxLen: 256, envLock: ['ADMIN', 'admin'] },
+  { key: 'admin', type: 'secret', def: '', el: 'a-admin', label: '管理密码', trim: false, maxLen: 256, envLock: ['ADMIN', 'admin'], check: 'adminPass' },
   // 绑定域名：节点 SNI / Host，留空使用访问域名
   { key: 'host', type: 'string', def: '', el: 'a-host', label: '绑定域名', maxLen: 253, strip: ['^https?://', '[/?#].*$'],
     pattern: HOSTNAME_PATTERN, hint: '请填写域名，如 node.example.com' },
   // ---- 协议开关 ----
   { key: 'enableVless', type: 'bool', def: true, el: 'en-vless', label: 'VLESS 协议' },
   { key: 'enableTrojan', type: 'bool', def: false, el: 'en-trojan', label: 'Trojan 协议' },
-  { key: 'trojanPassword', type: 'string', def: '', el: 'tp-pass', label: 'Trojan 密码', trim: false, maxLen: 256 },
+  { key: 'trojanPassword', type: 'string', def: '', el: 'tp-pass', label: 'Trojan 密码', trim: false, maxLen: 256, noExport: true },   // noExport：面板「导出配置」不含此项（与管理密码一样不落进备份文件）
   { key: 'enableXhttp', type: 'bool', def: false, el: 'en-xhttp', label: 'XHTTP 协议' },
   // ---- 传输参数 ----
   { key: 'alpn', type: 'string', def: '', el: 'alpn', label: 'ALPN', maxLen: 64,
@@ -653,6 +657,10 @@ function checkFieldValue(def, v) {
 // 仅服务端执行的附加校验：返回错误信息字符串或 { value } 规范化结果
 const SS_METHODS = ['aes-128-gcm', 'aes-256-gcm', 'chacha20-ietf-poly1305'];
 const SERVER_CHECKS = {
+  adminPass(v) {
+    // 以摘要前缀开头的密码会被误当成已哈希的值，直接拒绝
+    if (v && String(v).startsWith('cfnext-pbkdf2$')) return '密码不能以 cfnext-pbkdf2$ 开头';
+  },
   hostPort(v) {
     if (!v) return;
     const { host, port } = parseHostPort(v, 443);
@@ -1145,6 +1153,18 @@ async function saveConfig(env, cfg) {
   if (!env.K || typeof env.K.put !== 'function') return null;
   const stored = pickSchema(cfg);
   stored.cfgRev = CONFIG_REV;
+  // 环境变量提供、且面板里没有被改动的值不写入 KV：否则一次保存就会把 PROXYIP / TROJAN_PASSWORD / ALPN 等
+  // 环境变量快照进 KV（KV 优先级更高），之后再改环境变量会被静默忽略，Trojan 密码等也会明文落盘。
+  // 面板中改成与环境变量不同的值才视为覆盖并保存
+  const envBase = buildConfig(env, null), defaults = schemaDefaults();
+  for (const d of CONFIG_SCHEMA) {
+    const ev = getPath(envBase, d.key);
+    if (JSON.stringify(ev) === JSON.stringify(getPath(defaults, d.key))) continue;   // 环境变量未提供该项
+    if (JSON.stringify(getPath(stored, d.key)) !== JSON.stringify(ev)) continue;     // 面板中已改动：保存为覆盖值
+    const ks = d.key.split('.');
+    const parent = ks.length > 1 ? getPath(stored, ks.slice(0, -1).join('.')) : stored;
+    if (parent) delete parent[ks[ks.length - 1]];
+  }
   for (const key of Object.keys(envLockedFields(env))) {
     const ks = key.split('.');
     const parent = ks.length > 1 ? getPath(stored, ks.slice(0, -1).join('.')) : stored;
@@ -3070,11 +3090,17 @@ function generateClash(cfg, nodes) {
   });
   // 节点排序：443端口优先（非标准端口如8443在mihomo下HTTPS握手易被GFW干扰，放后面避免默认选中）
   proxies.sort((a, b) => (a.port === 443 ? 0 : 1) - (b.port === 443 ? 0 : 1));
+  // 模板中的本地凭据按 UUID 派生（同一部署每次订阅结果稳定，不同部署互不相同），避免所有人共用公开的默认密码
+  const derive = (purpose) => sha224hex('cfnext-clash|' + purpose + '|' + cfg.uuid).slice(0, 20);
+  const template = CLASH_TEMPLATE
+    .split('__CFNEXT_SS_PASSWORD__').join(derive('ss'))
+    .split('__CFNEXT_AUTH_PASSWORD__').join(derive('auth'))
+    .split('__CFNEXT_API_SECRET__').join(derive('api'));
   const yaml = `# CFNext 订阅
 test-url: 'http://www.gstatic.com/generate_204'
 proxies:
 ${proxies.map(p => clashProxyYaml(p)).join('\n')}
-${CLASH_TEMPLATE}
+${template}
 `;
   return yaml;
 }
@@ -3611,7 +3637,7 @@ const PANEL_HTML = String.raw`
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>CFNext · Cloudflare 隧道面板</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect x='3' y='3' width='18' height='18' rx='5' fill='%232563eb'/%3E%3Cpath d='M8 15V9l8 6V9' stroke='%23ffffff' stroke-width='2' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
-<script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.js" integrity="sha384-8FWZA6BGMXhsfO+BLtrJK0We6gg5o1JyO8xQm6peWDEUs17ACA5ziE/NIAkl9z2k" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 :root{
@@ -4079,6 +4105,11 @@ pre.code{background:var(--bg2);border:1px solid var(--border);border-radius:8px;
         </div>
       </div>
       <div class="card">
+        <h3><span class="tick"></span>登录会话</h3>
+        <p class="hint" style="margin-top:0;margin-bottom:12px">登录状态保存在浏览器 Cookie 中，24 小时后自动失效。退出只清除当前浏览器的登录状态；要让所有已签发的登录状态立即失效，请修改管理密码或 UUID。</p>
+        <button class="btn" onclick="logout()">退出登录</button>
+      </div>
+      <div class="card">
         <h3><span class="tick"></span>运行信息</h3>
         <div class="kv"><span class="k">面板版本</span><span class="v" id="aVer">—</span></div>
         <div class="kv"><span class="k">KV 持久化</span><span class="v" id="aKv">—</span></div>
@@ -4132,7 +4163,7 @@ pre.code{background:var(--bg2);border:1px solid var(--border);border-radius:8px;
             <tr><td>Cloudflare 用量监控（GraphQL）</td><td class="mono">api.cloudflare.com/client/v4/graphql</td></tr>
             <tr><td>版本更新检测</td><td class="mono">raw.githubusercontent.com/iv7777/CFNext/...</td></tr>
             <tr><td>远程规则集（sing-box / Clash）</td><td class="mono">raw.githubusercontent.com/MetaCubeX/meta-rules-dat/...</td></tr>
-            <tr><td>面板二维码库</td><td class="mono">cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.min.js</td></tr>
+            <tr><td>面板二维码库</td><td class="mono">cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.js（SRI 校验）</td></tr>
           </tbody>
         </table></div>
       </div>
@@ -4615,6 +4646,11 @@ function saveAll(){
     .catch(function(){ toast('保存失败：无法连接服务器', 'err'); })
     .then(function(){ btn.disabled = false; });
 }
+function logout(){
+  api('logout', { method: 'POST' })
+    .then(function(){ location.href = '/login?next=' + encodeURIComponent(APIPATH); })
+    .catch(function(){ toast('退出失败：无法连接服务器', 'err'); });
+}
 function resetAll(){
   if (!confirm('确定重置？将清空 KV 中全部面板配置与节点记录，面板还原为初始部署状态。此操作不可恢复！')) return;
   var btn = $('resetBtn');
@@ -4646,7 +4682,7 @@ function genUuid(){
 function exportConfig(){
   try {
     var data = collectForm();
-    SCHEMA.forEach(function(d){ if (d.type === 'secret' && getPath(data, d.key) !== undefined) setPath(data, d.key, ''); });
+    SCHEMA.forEach(function(d){ if ((d.type === 'secret' || d.noExport) && getPath(data, d.key) !== undefined) setPath(data, d.key, ''); });
     var blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
     var a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
@@ -4670,7 +4706,7 @@ function importConfig(input){
       var next = JSON.parse(JSON.stringify(CFG)), n = 0;
       SCHEMA.forEach(function(d){
         var v = getPath(data, d.key);
-        if (v === undefined || d.type === 'secret' || lockedEnv(d.key)) return;
+        if (v === undefined || d.type === 'secret' || d.noExport || lockedEnv(d.key)) return;
         setPath(next, d.key, v);
         n++;
       });
@@ -4749,7 +4785,7 @@ function showQRCode(url){
     q.addData(qrPayloadOf(fmt, url));
     q.make();
     w.innerHTML = '<div class="qrbox">' + q.createImgTag(4, 10) + '</div>';
-  } catch(e) { w.innerHTML = '<div class="hint">二维码生成失败：' + e.message + '</div>'; }
+  } catch(e) { w.textContent = ''; w.appendChild(mkEl('div', 'hint', '二维码生成失败：' + e.message)); }
 }
 // 二维码内容随订阅格式（客户端）联动：
 // Clash/Mihomo、Stash → clash://install-config（FlyClash / Clash Verge / Stash 扫码装订阅，配置名取订阅响应头 filename=CFNext）
@@ -5045,6 +5081,32 @@ async function hmacHex(key, msg) {
   const sig = await crypto.subtle.sign('HMAC', k, TE.encode(msg));
   return Array.from(new Uint8Array(sig)).map(b => b.toString(16).padStart(2, '0')).join('');
 }
+// 管理密码存储：KV 中保存加盐 PBKDF2-SHA256 摘要（格式 前缀 + 迭代次数 + $ + 盐 + $ + 摘要），不再保存明文。
+// 迭代次数写在摘要里，日后可调高而不影响已保存的密码；取 1 万次是为了控制免费版 10ms CPU 限制下的登录开销。
+// 由环境变量 ADMIN 提供的密码仍是明文（环境变量本身即密钥存储），按常量时间比较。
+// 兼容：KV 中的旧版明文密码继续可用，下次在面板保存任意配置时自动改存摘要。
+const ADMIN_HASH_PREFIX = 'cfnext-pbkdf2$';
+const ADMIN_HASH_ITER = 10000;
+const toHex = (u8) => Array.from(u8).map(b => b.toString(16).padStart(2, '0')).join('');
+const fromHex = (h) => Uint8Array.from((String(h).match(/../g) || []).map(x => parseInt(x, 16)));
+async function pbkdf2Hex(password, salt, iter) {
+  const key = await crypto.subtle.importKey('raw', TE.encode(password), 'PBKDF2', false, ['deriveBits']);
+  return toHex(new Uint8Array(await crypto.subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt, iterations: iter }, key, 256)));
+}
+function isAdminHash(v) { return typeof v === 'string' && v.startsWith(ADMIN_HASH_PREFIX); }
+async function hashAdminPassword(password) {
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  return ADMIN_HASH_PREFIX + ADMIN_HASH_ITER + '$' + toHex(salt) + '$' + await pbkdf2Hex(password, salt, ADMIN_HASH_ITER);
+}
+async function verifyAdminPassword(stored, password) {
+  stored = String(stored || ''); password = String(password == null ? '' : password);
+  if (!stored) return false;
+  if (!isAdminHash(stored)) return timingSafeEqual(password, stored);   // 环境变量 / 旧版明文
+  const parts = stored.slice(ADMIN_HASH_PREFIX.length).split('$');
+  const iter = parseInt(parts[0], 10);
+  if (parts.length !== 3 || !(iter >= 1000 && iter <= 100000) || !parts[1] || !parts[2]) return false;
+  return timingSafeEqual(await pbkdf2Hex(password, fromHex(parts[1]), iter), parts[2]);
+}
 const AUTH_TTL_MS = 24 * 60 * 60 * 1000;
 function authKey(cfg) { return 'cfnext-auth|' + String(cfg.admin) + '|' + String(cfg.uuid); }
 async function makeAuthToken(cfg) {
@@ -5060,20 +5122,44 @@ async function requireAuth(request, cfg) {
   if (!exp || !sig || !/^\d+$/.test(exp) || Number(exp) < Date.now()) return false;
   return timingSafeEqual(sig, await hmacHex(authKey(cfg), exp));
 }
-// 登录失败限速（按客户端 IP，同一 Worker 实例内生效，属尽力而为）：15 分钟内最多 5 次失败
+// 登录失败限速（按客户端 IP，同一 Worker 实例内生效，属尽力而为）：15 分钟内最多 5 次失败。
+// IPv6 按 /64 网段计数（单个用户通常拥有整个 /64，逐地址计数会被轻易绕过）；
+// 表满时只淘汰最旧项，不再整表清空（否则攻击者灌入大量来源即可清零所有计数）
 const LOGIN_FAILS = new Map();
-const LOGIN_MAX_FAILS = 5, LOGIN_WINDOW_MS = 15 * 60 * 1000;
+const LOGIN_MAX_FAILS = 5, LOGIN_WINDOW_MS = 15 * 60 * 1000, LOGIN_TABLE_MAX = 5000;
+function loginRateKey(ip) {
+  ip = String(ip || 'unknown');
+  if (ip.indexOf(':') < 0) return ip;
+  const dbl = ip.indexOf('::');
+  let groups;
+  if (dbl >= 0) {
+    const left = ip.slice(0, dbl).split(':').filter(Boolean), right = ip.slice(dbl + 2).split(':').filter(Boolean);
+    groups = [...left, ...Array(Math.max(0, 8 - left.length - right.length)).fill('0'), ...right];
+  } else groups = ip.split(':');
+  return groups.slice(0, 4).map(g => (g || '0').toLowerCase().replace(/^0+(?=.)/, '')).join(':') + '::/64';
+}
 function loginBlocked(ip) {
-  const r = LOGIN_FAILS.get(ip);
+  const k = loginRateKey(ip), r = LOGIN_FAILS.get(k);
   if (!r) return false;
-  if (Date.now() - r.t > LOGIN_WINDOW_MS) { LOGIN_FAILS.delete(ip); return false; }
+  if (Date.now() - r.t > LOGIN_WINDOW_MS) { LOGIN_FAILS.delete(k); return false; }
   return r.n >= LOGIN_MAX_FAILS;
 }
 function loginFail(ip) {
-  const r = LOGIN_FAILS.get(ip);
-  if (!r || Date.now() - r.t > LOGIN_WINDOW_MS) LOGIN_FAILS.set(ip, { n: 1, t: Date.now() });
+  const k = loginRateKey(ip), now = Date.now(), r = LOGIN_FAILS.get(k);
+  if (!r || now - r.t > LOGIN_WINDOW_MS) { LOGIN_FAILS.delete(k); LOGIN_FAILS.set(k, { n: 1, t: now }); }
   else r.n++;
-  if (LOGIN_FAILS.size > 5000) LOGIN_FAILS.clear();
+  // Map 按插入顺序遍历，而记录的时间戳是首次失败时间——最先插入的就是最先过期的，淘汰最旧项即可（O(1)）
+  while (LOGIN_FAILS.size > LOGIN_TABLE_MAX) LOGIN_FAILS.delete(LOGIN_FAILS.keys().next().value);
+}
+function loginSuccess(ip) { LOGIN_FAILS.delete(loginRateKey(ip)); }
+// 登录页与登录接口只对「知道面板路径」的人开放：next 必须指向面板路径（面板入口的跳转自带），
+// 否则返回 404——扫描器无法凭 /login 识别部署，也无法在不知道路径的情况下爆破管理密码
+function loginNextOk(next, panelPath) {
+  next = String(next || '');
+  if (!/^\/[^\/\\]/.test(next)) return false;
+  let seg = next.slice(1).split(/[\/?#]/)[0];
+  try { seg = decodeURIComponent(seg); } catch (e) { return false; }
+  return seg === panelPath;
 }
 function safeNext(next, panelPath) {
   next = String(next || '');
@@ -5130,8 +5216,9 @@ async function handleRequest(request, env) {
   const path = url.pathname.replace(/^\/+|\/+$/g, '');
   const segs = path.split('/');
 
-  // ---------- 版本接口 ----------
+  // ---------- 版本接口（仅登录后可用；公开会让扫描器识别部署与版本） ----------
   if (segs[0] === 'version') {
+    if (!(await requireAuth(request, cfg))) return new Response('Not Found', { status: 404 });
     return json({ version: VERSION });
   }
 
@@ -5141,11 +5228,12 @@ async function handleRequest(request, env) {
     if (!cfg.admin) return new Response('Not Found', { status: 404 });
     if (request.method === 'POST') {
       const clientIp = request.headers.get('CF-Connecting-IP') || 'unknown';
-      if (loginBlocked(clientIp)) return json({ ok: false, msg: '尝试次数过多，请 15 分钟后再试' }, 429);
       const body = await request.text();
       const params = new URLSearchParams(body);
-      if (timingSafeEqual(params.get('password') || '', cfg.admin)) {
-        LOGIN_FAILS.delete(clientIp);
+      if (!loginNextOk(params.get('next'), panelPath)) return new Response('Not Found', { status: 404 });
+      if (loginBlocked(clientIp)) return json({ ok: false, msg: '尝试次数过多，请 15 分钟后再试' }, 429);
+      if (await verifyAdminPassword(cfg.admin, params.get('password') || '')) {
+        loginSuccess(clientIp);
         const token = await makeAuthToken(cfg);
         return new Response(JSON.stringify({ ok: true, next: safeNext(params.get('next'), panelPath) }), {
           status: 200,
@@ -5158,6 +5246,7 @@ async function handleRequest(request, env) {
       loginFail(clientIp);
       return json({ ok: false, msg: '密码错误' }, 403);
     }
+    if (!loginNextOk(url.searchParams.get('next'), panelPath)) return new Response('Not Found', { status: 404 });
     return new Response(loginHTML, { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8' } });
   }
 
@@ -5238,6 +5327,8 @@ async function handleRequest(request, env) {
           }
           const crossErrors = crossCheckConfig(merged);
           if (crossErrors.length) return json({ ok: false, msg: formatConfigErrors(crossErrors), errors: crossErrors, ignored }, 400);
+          // KV 里的管理密码只存摘要：面板新设的密码，以及旧版遗留的明文密码，都在这里转成摘要
+          if (merged.admin && !isAdminHash(merged.admin) && !envLockedFields(env).admin) merged.admin = await hashAdminPassword(merged.admin);
           const stored = await saveConfig(env, merged);
           // 直接用刚写入的数据组装新配置（不回读 KV：边缘缓存可能仍是旧值）
           const fresh = buildConfig(env, stored);
@@ -5248,6 +5339,13 @@ async function handleRequest(request, env) {
         } catch (e) { return json({ ok: false, msg: '保存失败: ' + (e.message || e) }, 500); }
       }
       return json({ ok: false, msg: '仅支持 GET / POST' }, 405);
+    }
+
+    if (apiName === 'logout') {
+      if (request.method !== 'POST') return json({ ok: false, msg: '仅支持 POST' }, 405);
+      // 会话令牌是无状态的签名令牌，无法在服务端单独吊销：这里清除浏览器中的 Cookie。
+      // 要让已签发的令牌全部失效，修改管理密码或 UUID 即可（签名密钥随之变化）
+      return json({ ok: true, msg: '已退出登录' }, 200, { 'Set-Cookie': 'luma_auth=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax' });
     }
 
     if (apiName === 'reset') {
@@ -5312,8 +5410,26 @@ async function handleRequest(request, env) {
   return new Response('Not Found', { status: 404 });
 }
 
+// 安全响应头：只加在 HTML 页面与 JSON 接口上（订阅、WebSocket、XHTTP 流不动）。
+// CSP 允许面板自带的内联脚本 / 样式与 jsDelivr 上带 SRI 的二维码库；frame-ancestors 'none' 防止面板被嵌入框架点击劫持
+const PAGE_CSP = "default-src 'none'; script-src 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'";
+function withSecurityHeaders(res) {
+  if (!res || res.status === 101 || res.webSocket) return res;
+  const ct = res.headers.get('Content-Type') || '';
+  const isHtml = /^text\/html/i.test(ct), isJson = /^application\/json/i.test(ct);
+  if (!isHtml && !isJson) return res;
+  const h = new Headers(res.headers);
+  h.set('X-Content-Type-Options', 'nosniff');
+  h.set('Referrer-Policy', 'no-referrer');
+  if (isHtml) {
+    h.set('Content-Security-Policy', PAGE_CSP);
+    h.set('X-Frame-Options', 'DENY');
+  }
+  return new Response(res.body, { status: res.status, statusText: res.statusText, headers: h });
+}
+
 export default {
   async fetch(request, env, ctx) {
-    return handleRequest(request, Object.assign({}, env, { _ctx: ctx }));
+    return withSecurityHeaders(await handleRequest(request, Object.assign({}, env, { _ctx: ctx })));
   }
 };

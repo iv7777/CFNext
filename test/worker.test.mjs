@@ -40,9 +40,9 @@ async function call(env, path, { method = 'GET', body, cookie, ua = BROWSER, hea
   if (body !== undefined && typeof body !== 'string') { h['Content-Type'] = 'application/json'; body = JSON.stringify(body); }
   return worker.fetch(new Request('https://node.example.com' + path, { method, headers: h, body, redirect: 'manual' }), env, {});
 }
-async function login(env, password = 'pw') {
+async function login(env, password = 'pw', panelPath = UUID) {
   const res = await call(env, '/login', {
-    method: 'POST', body: 'password=' + encodeURIComponent(password),
+    method: 'POST', body: 'password=' + encodeURIComponent(password) + '&next=' + encodeURIComponent('/' + panelPath),
     headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'CF-Connecting-IP': '203.0.113.' + Math.floor(Math.random() * 250) },
   });
   assert.equal(res.status, 200, 'login should succeed');
@@ -175,7 +175,7 @@ test('修改 UUID：重新签发登录态并返回新面板路径（问题 2）'
 
 test('环境变量锁定的字段在面板只读、保存时忽略（问题 3）', async () => {
   const env = baseEnv({ D: 'panel' });
-  const cookie = await login(env);
+  const cookie = await login(env, 'pw', 'panel');
   const r = await (await call(env, '/panel/api/config', { cookie })).json();
   assert.deepEqual(r.data.envLocked, { path: 'D', admin: 'ADMIN' });
   const res = await call(env, '/panel/api/config', { method: 'POST', cookie, body: { path: 'other' } });
@@ -855,4 +855,114 @@ test('XHTTP：首个请求体块短于 VLESS 头部时累积后再解析', async
   await until(() => log.some(s => s.written.length));
   assert.equal(log[0].hostname, 'xh.example');
   assert.deepEqual([...log[0].written[0]], TLS_HELLO);
+});
+
+// ---------------- 批次 2 修复：Clash 本地凭据 / 登录加固 / 管理密码存储 / 环境变量不固化 / 页面安全头 ----------------
+const nextQs = (path) => '?next=' + encodeURIComponent('/' + path);
+
+test('Clash 模板不再包含公开的默认凭据：SS 密码 / 认证 / API 密钥按 UUID 派生且稳定，CORS 不再是 *，DNS 只监听本机', async () => {
+  const get = async (env) => (await subOf(env, 'clash')).text();
+  const a = await get(baseEnv({ K: kv({ config: customCfg() }) }));
+  assert.ok(!/yyds666|Xf3#Lp9WqZ|__CFNEXT_/.test(a), '无默认密码 / 未替换的占位符');
+  const d = (purpose, uuid = UUID) => createHash('sha224').update(`cfnext-clash|${purpose}|${uuid}`).digest('hex').slice(0, 20);
+  assert.ok(a.includes(`password: "${d('ss')}"`) && a.includes(`- "mihomo:${d('auth')}"`) && a.includes(`secret: "${d('api')}"`), '与 UUID 派生一致（同时校验 SHA-224 实现）');
+  assert.equal(await get(baseEnv({ K: kv({ config: customCfg() }) })), a, '同一部署每次订阅结果稳定');
+  const other = await (await withFetch(notFound, () => call(baseEnv({ U: UUID2, K: kv({ config: customCfg() }) }), `/${UUID2}/sub/clash`, { ua: 'x' }))).text();
+  assert.ok(!other.includes(d('api')) && other.includes(`secret: "${d('api', UUID2)}"`), '不同部署密钥不同');
+  assert.ok(!/allow-origins:\n\s+- "\*"/.test(a), 'CORS 不是 *');
+  assert.match(a, /listen: 127\.0\.0\.1:1053/);
+});
+
+test('管理密码：面板设置的密码以加盐摘要存入 KV；旧版明文密码在下次保存时升级；以摘要前缀开头的密码被拒绝', async () => {
+  const env = baseEnv({ ADMIN: undefined, K: kv({ config: { admin: 'legacy-pw' } }) });
+  const cookie = await login(env, 'legacy-pw');                       // 旧版明文仍可登录
+  assert.equal(stored(env).admin, 'legacy-pw');
+  const r = await (await call(env, `/${UUID}/api/config`, { method: 'POST', cookie, body: { alpn: 'h2' } })).json();
+  assert.equal(r.ok, true);
+  const h = stored(env).admin;
+  assert.match(h, /^cfnext-pbkdf2\$10000\$[0-9a-f]{32}\$[0-9a-f]{64}$/, '保存任意配置后明文升级为摘要');
+  assert.ok(!JSON.stringify(stored(env)).includes('legacy-pw'));
+  await login(env, 'legacy-pw');                                      // 密码不变，仍可登录
+  // 修改密码：新密码生效，旧密码失效；每次的盐不同
+  const cookie2 = await login(env, 'legacy-pw');
+  const set = await call(env, `/${UUID}/api/config`, { method: 'POST', cookie: cookie2, body: { admin: 'brand-new' } });
+  assert.ok(set.headers.get('Set-Cookie'), '密码变更后重新签发登录态');
+  assert.notEqual(stored(env).admin, h);
+  assert.ok(!JSON.stringify(stored(env)).includes('brand-new'));
+  await login(env, 'brand-new');
+  const bad = await call(env, '/login', { method: 'POST', body: 'password=legacy-pw&next=' + encodeURIComponent('/' + UUID), headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'CF-Connecting-IP': '198.51.100.77' } });
+  assert.equal(bad.status, 403);
+  const rej = await call(env, `/${UUID}/api/config`, { method: 'POST', cookie: await login(env, 'brand-new'), body: { admin: 'cfnext-pbkdf2$x' } });
+  assert.equal(rej.status, 400);
+});
+
+test('登录加固：/login 与 /version 对不知道面板路径的人返回 404；IPv6 按 /64 计数；限速表满时不会被清零', async () => {
+  const env = baseEnv();
+  assert.equal((await call(env, '/login')).status, 404);
+  assert.equal((await call(env, '/login?next=/wrong')).status, 404);
+  assert.equal((await call(env, '/login' + nextQs(UUID))).status, 200);
+  const post = (pw, ip, path = UUID) => call(env, '/login', { method: 'POST', body: `password=${pw}&next=${encodeURIComponent('/' + path)}`,
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'CF-Connecting-IP': ip } });
+  assert.equal((await post('pw', '203.0.113.1', 'wrong')).status, 404, 'next 不指向面板路径：不处理、不计数');
+  assert.equal((await call(env, '/version')).status, 404);
+  assert.equal((await call(env, '/version', { cookie: await login(env) })).status, 200);
+  // 同一 /64 内换地址也算同一来源
+  const p = '2001:db8:' + Math.floor(Math.random() * 60000).toString(16) + ':1';
+  for (let i = 0; i < 5; i++) assert.equal((await post('bad', `${p}::${i + 1}`)).status, 403);
+  assert.equal((await post('pw', `${p}:ffff:ffff:ffff:ffff`)).status, 429, '同 /64 的其它地址同样被限制');
+  assert.equal((await post('pw', `${p}::1`)).status, 429, '限速期间正确密码也不接受');
+  // 灌入大量来源后，已被限制的来源仍然受限（旧实现表满即整体清空）
+  const victim = '192.0.2.' + (1 + Math.floor(Math.random() * 250));
+  const flood = async (from, to) => { for (let i = from; i < to; i++) await post('bad', `10.${i >> 8 & 255}.${i & 255}.9`); };
+  await flood(0, 4900);
+  for (let i = 0; i < 5; i++) await post('bad', victim);
+  await flood(4900, 5600);   // 表超过 5000 上限：旧实现整表清空，新实现只淘汰最旧的来源
+  assert.equal((await post('pw', victim)).status, 429, '灌表不能清零已有计数');
+});
+
+test('环境变量提供的值不会因为一次保存被固化进 KV；面板改成不同的值才保存为覆盖', async () => {
+  const env = baseEnv({ ADMIN: undefined, PROXYIP: 'relay.example.com:443', TROJAN: 'true', TROJAN_PASSWORD: 'env-tp', ALPN: 'h2',
+    K: kv({ config: { admin: 'pw' } }) });
+  const first = await call(env, `/${UUID}/api/config`, { method: 'POST', cookie: await login(env), body: { tlsOnly: false } });
+  const r = await first.json();
+  assert.equal(r.ok, true);
+  const cookie = first.headers.get('Set-Cookie').split(';')[0];   // 旧版明文密码升级为摘要后登录态重新签发
+  const s = stored(env);
+  for (const k of ['proxyIP', 'enableTrojan', 'trojanPassword', 'alpn', 'uuid']) assert.equal(k in s, false, `${k} 不应固化进 KV`);
+  assert.equal(s.tlsOnly, false, '面板里改动的其它项正常保存');
+  // 环境变量之后变更，立即生效（KV 中没有旧快照）
+  const later = { ...env, PROXYIP: 'new-relay.example.com:443' };
+  const cfgRes = await call(later, `/${UUID}/api/config`, { cookie });
+  const cfg = await cfgRes.json();
+  assert.equal(cfg.data.proxyIP, 'new-relay.example.com:443');
+  // 面板中改成不同的值：保存为覆盖
+  await call(env, `/${UUID}/api/config`, { method: 'POST', cookie, body: { proxyIP: 'mine.example.com:443', alpn: 'http/1.1' } });
+  assert.equal(stored(env).proxyIP, 'mine.example.com:443');
+  assert.equal(stored(env).alpn, 'http/1.1');
+  assert.equal('trojanPassword' in stored(env), false);
+});
+
+test('页面安全头：面板 / 登录页带 CSP、frame-ancestors、nosniff；订阅不受影响；二维码脚本带 SRI；支持退出登录', async () => {
+  const env = baseEnv();
+  const cookie = await login(env);
+  const panel = await call(env, `/${UUID}`, { cookie });
+  const html = await panel.text();
+  for (const res of [panel, await call(env, '/login' + nextQs(UUID))]) {
+    assert.match(res.headers.get('Content-Security-Policy'), /frame-ancestors 'none'/);
+    assert.match(res.headers.get('Content-Security-Policy'), /default-src 'none'/);
+    assert.equal(res.headers.get('X-Frame-Options'), 'DENY');
+    assert.equal(res.headers.get('X-Content-Type-Options'), 'nosniff');
+    assert.equal(res.headers.get('Referrer-Policy'), 'no-referrer');
+  }
+  assert.match(html, /<script src="https:\/\/cdn\.jsdelivr\.net\/npm\/qrcode-generator@1\.4\.4\/qrcode\.js" integrity="sha384-[A-Za-z0-9+/=]+" crossorigin="anonymous"/);
+  const api = await call(env, `/${UUID}/api/status`, { cookie });
+  assert.equal(api.headers.get('X-Content-Type-Options'), 'nosniff');
+  assert.equal(api.headers.get('Content-Security-Policy'), null, 'JSON 接口不带页面 CSP');
+  const sub = await call(env, `/${UUID}/sub`, { ua: 'v2rayN/7' });
+  assert.equal(sub.headers.get('Content-Security-Policy'), null);
+  // 退出登录：清除 Cookie
+  const out = await call(env, `/${UUID}/api/logout`, { method: 'POST', cookie });
+  assert.equal(out.status, 200);
+  assert.match(out.headers.get('Set-Cookie'), /luma_auth=; .*Max-Age=0/);
+  assert.equal((await call(env, `/${UUID}/api/logout`)).status, 403, '未登录不可调用');
 });
