@@ -18,7 +18,7 @@ function clashProxyYaml(p) {
   L.push('    udp: true');
   if (p.tls) {
     L.push('    tls: true');
-    L.push('    skip-cert-verify: false');   // 安全修复：校验证书（按 servername 校验，与 server 是否为 IP 无关）
+    L.push('    skip-cert-verify: false');   // 校验证书（按 servername 校验，与 server 是否为 IP 无关）
     // ALPN：ws/trojan 强制 HTTP/1.1（CF Worker 的 WebSocket 仅支持 HTTP/1.1 升级，mihomo utls(chrome) 默认 ALPN 含 h2 → WS 升级失败）；
     // xhttp 必须 h2（stream-one 依赖 HTTP/2 双向流，h1.1 请求体未发完 CF 边缘无法回传响应 → Clash Verge 节点全部超时）
     L.push('    alpn: [' + (p.alpn && p.alpn.length ? p.alpn : (p.network === 'xhttp' ? ['h2'] : ['http/1.1'])).join(', ') + ']');
@@ -41,8 +41,7 @@ function clashProxyYaml(p) {
     L.push('    xhttp-opts:');
     L.push('      path: ' + yamlVal(xo.path));
     L.push('      mode: ' + yamlVal(xo.mode));
-    // 修复：mihomo 规范中 XHTTP 请求主机字段名为 host（headers.Host 是错误写法，
-    // 会导致 Nekobox 等客户端把 'Host: 域名' 整行误导入 XHTTP 标头导致节点报错）
+    // mihomo 规范中 XHTTP 请求主机字段名为 host（headers.Host 会被 Nekobox 等客户端把 'Host: 域名' 整行误导入 XHTTP 标头）
     L.push('      host: ' + yamlVal(xo.host));
     L.push('      x-padding-obfs-mode: ' + yamlVal(xo['x-padding-obfs-mode']));
     L.push('      x-padding-method: ' + yamlVal(xo['x-padding-method']));
@@ -77,7 +76,7 @@ function generateClash(cfg, nodes) {
     const base = {
       name, server: srv, port: prt, udp: true,
       ...(tls ? { tls: true, 'skip-cert-verify': false, servername: host, 'client-fingerprint': 'chrome', alpn: alpnArr || ['http/1.1'] } : {}),
-      ...(cfg.ech && tls ? { 'ech-opts': { enable: true, 'query-server-name': cfg.echHost || 'cloudflare-ech.com' } } : {})   // 修复 #6：mihomo ECH 官方格式为顶层 ech-opts（enable + query-server-name），旧 tls-opts.ech 不被识别导致 ECH 未生效
+      ...(cfg.ech && tls ? { 'ech-opts': { enable: true, 'query-server-name': cfg.echHost || 'cloudflare-ech.com' } } : {})   // mihomo ECH 格式为顶层 ech-opts（enable + query-server-name）
     };
     if (isTrojan) {
       return { ...base, type: 'trojan', password: user, network: 'ws', 'ws-opts': { path: tls ? wsPath : path, headers: { Host: host } } };
@@ -92,7 +91,7 @@ function generateClash(cfg, nodes) {
         'xhttp-opts': {
           path,
           mode: 'stream-one',
-          // 修复：mihomo 规范 XHTTP 主机字段为 host（headers.Host 会被 Nekobox 误读为标头）
+          // 主机字段为 host（headers.Host 会被 Nekobox 误读为标头）
           host,
           'x-padding-obfs-mode': xo.xPaddingObfsMode !== undefined ? xo.xPaddingObfsMode : true,
           'x-padding-method': xo.xPaddingMethod || 'tokenish',
@@ -122,7 +121,7 @@ ${template}
 }
 
 // Surfboard（Surge 兼容格式，不支持 VLESS/XHTTP，Trojan 必须 TLS）：
-// 只下发 Trojan TLS 节点（密码与服务端一致，见 trojanNode）。不再把 VLESS 节点改写成「密码=UUID」的 Trojan：
+// 只下发 Trojan TLS 节点（密码与服务端一致，见 trojanNode）。不把 VLESS 节点改写成「密码=UUID」的 Trojan：
 // 服务端仅在启用 Trojan 时才接受 Trojan 连接，且密码可能与 UUID 不同，改写出的节点连不上。
 // 未启用 Trojan 时无节点可用，直接报错提示，而不是输出一份全部失效的配置。
 function generateSurfboard(cfg, nodes) {
@@ -154,8 +153,7 @@ FINAL,🐟 漏网之鱼
 }
 
 // ---------- Sing-box JSON ----------
-// sing-box 配置（1.12+ 格式）：旧版生成的配置在新内核无法启动（.list 文本当 source 规则集解析失败、
-// 已移除的 geoip 规则 / dns 出站 / inet4_address / 入站 sniff 字段、多协议节点 tag 重复），此处全部改为新写法
+// sing-box 配置（1.12+ 格式）：规则集用 remote 二进制 .srs，不使用已移除的 geoip 规则 / dns 出站 / inet4_address / 入站 sniff 字段，节点 tag 保持唯一
 const SINGBOX_RULE_SETS = [
   ['geosite-category-ads-all', null],   // null = 拦截（route action reject）
   ['geosite-cn', '🎯 全球直连'], ['geosite-google', '🌐 谷歌服务'], ['geosite-apple', '🍎 苹果服务'],

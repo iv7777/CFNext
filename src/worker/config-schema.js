@@ -26,8 +26,6 @@ const PATH_SEG_PATTERN = '^[A-Za-z0-9._~-]+$';
 const HOSTNAME_PATTERN = '^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*$';
 const RESERVED_PATHS = ['login', 'version'];
 
-// KV 配置结构版本：2 起「仅 TLS 端口」默认开启（见 buildConfig 迁移）
-const CONFIG_REV = 2;
 const CONFIG_SCHEMA = [
   // ---- 面板设置 ----
   { key: 'uuid', type: 'string', def: '', el: 'a-uuid', label: 'UUID', required: true, lower: true,
@@ -313,7 +311,7 @@ const BUILTIN_OFFICIAL_DOMAINS = ['cloudflare.com', 'www.cloudflare.com', 'speed
 
 // 内置默认优选域名：第三方 CNAME 域名，解析到 Cloudflare 边缘；节点 server 直接下发域名
 // （客户端连接时动态 DNS 解析，拿到当前最优 CF 边缘 IP，可用性远高于静态 IP 快照）。
-// 2026-10 用面板「优选域名 → 测试」实测：25 个中 11 个解析失败、无 A 记录或解析到非 Cloudflare 段（无法作入口），已剔除，保留 14 个。
+// 均已用面板「优选域名 → 测试」验证：能解析且落在 Cloudflare 段（解析失败或非 CF 段的域名无法作入口）。
 // 面板「优选域名」填写后会整体替换本列表
 const DEFAULT_PREFERRED_DOMAINS = [
   'cloudflare.182682.xyz', 'cdn.2020111.xyz', 'cf.0sm.com', 'cf.090227.xyz', 'cfip.1323123.xyz',

@@ -24,7 +24,7 @@ function readAddress(data, view, offset, atyp) {
 }
 
 // VLESS 请求头：Version(1) | UUID(16) | AddonsLen(1) | Addons | Cmd(1) | Port(2) | Atyp(1) | Addr | [TCP]1字节User | [UDP]数据包
-// 安全修复：校验 VLESS UUID（原版读过 16 字节 UUID 却从不比对，任意 UUID 都能使用代理）
+// 必须校验 UUID，否则任意 UUID 都能使用代理
 let UUID_BYTES_CACHE = { s: null, b: null };
 function uuidToBytes(u) {
   const str = String(u || '');
@@ -156,15 +156,15 @@ function trojanPasswordHash(pass) {
   if (pass !== _trojanPassC) { _trojanPassC = pass; _trojanHashC = sha224hex(pass); }
   return _trojanHashC;
 }
-// Trojan 头判定（v1.0.5 修复）：56 字节 SHA224 hex + CRLF；密码匹配或纯 hex 特征均可识别
+// Trojan 头判定：56 字节 SHA224 hex + CRLF；密码匹配或纯 hex 特征均可识别
 function detectTrojan(pending, cfg) {
   if (!cfg.enableTrojan || !pending || pending.byteLength < 58) return false;
   const head = pending.subarray(0, 56);
-  // 安全修复：仅密码哈希匹配才视为 Trojan（原版任意 56 位十六进制都放行）
+  // 仅密码哈希匹配才视为 Trojan（不能放行任意 56 位十六进制）
   return TD.decode(head).toLowerCase() === trojanPasswordHash(cfg.trojanPassword || cfg.uuid);
 }
 
-// DoH 端点池（UDP/DNS → DoH 转换用；v1.0.5 修复：V2rayNG 关闭「本地 DNS」时远端 DNS 不可用）
+// DoH 端点池（UDP/DNS → DoH 转换用，使 V2rayNG 关闭「本地 DNS」时远端 DNS 仍可用）
 // Cloudflare 优先（Worker 与其同机房，延迟最低，且用户的查询不必先经过第三方境内解析器），其余按序兜底
 const DOH_ENDPOINTS = [
   'https://cloudflare-dns.com/dns-query',

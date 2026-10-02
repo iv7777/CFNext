@@ -33,7 +33,7 @@ async function fetchRepoFile(name){
     return { txt, version: extractVersion(txt) };
   } catch (e) { return { error: (e && e.message) || String(e) }; }
 }
-async function checkUpdate(env){
+async function checkUpdate(){
   const now = Date.now();
   if (UPDATE_CACHE && now - UPDATE_CACHE.t < 60000) return UPDATE_CACHE.r;
   // 拉取仓库 CFNext.js：比对版本号，有更新时直接把这次拉取的内容作为最新代码返回

@@ -123,8 +123,7 @@ async function resolvePreferredDomains(domainsStr, limitPerDomain = 100, maxTota
   const list = String(domainsStr || '').split(/[\n,;]+/).map(s => s.trim().replace(/^\*\./, '')).filter(Boolean);
   const now = Date.now();
   // DoH 降级链：CF 官方 1.1.1.1 优先（Worker 与 1.1.1.1 同机房，内网时延 <5ms），仅当请求本身失败（网络错误 / 非 200）
-  // 才降级阿里 DNS——修复：原先两个 DoH 并发查询，每次解析固定消耗 2 个子请求（免费版每次请求上限 50），
-  // 且「无该类型记录」也被当作失败；现在正常情况下每次解析只计 1 个子请求
+  // 才降级阿里 DNS：正常情况下每次解析只计 1 个子请求（免费版每次请求上限 50），「无该类型记录」不算失败
   const dohs = ['https://cloudflare-dns.com/dns-query', 'https://dns.alidns.com/resolve'];
   const qry = async (d, type, filter) => {
     for (const url of dohs) {
@@ -297,10 +296,9 @@ async function resolvePreferredDomains(domainsStr, limitPerDomain = 100, maxTota
             }
           }
           if (nm) { counters[nm] = (counters[nm] || 0) + 1; rec.push({ ip, port, name: nm + '-' + String(counters[nm]).padStart(2, '0') }); }
-          // 提取不到地区的中文名称（如「自有-A」）原样保留（截断 40 字符），不再丢弃成「优选IP-XX」
+          // 提取不到地区的中文名称（如「自有-A」）原样保留（截断 40 字符）
           else rec.push({ ip, port, name: rawName.slice(0, 40) });
         }
-        // 已移除「地区回退生成」：源内无可用 IP 时不再用随机 CF IP 冒充该地区节点
         await storeUrlCache(ck, rec);
         return rec.slice();   // 返回副本：均衡截断的 shift() 会原地修改数组，直接返回引用会污染缓存
       } catch (e) {
@@ -310,7 +308,7 @@ async function resolvePreferredDomains(domainsStr, limitPerDomain = 100, maxTota
         return [];   // 无历史缓存才返回空
       }
     }
-    // 缓存键包含记录类型（修复：原先 A 与 A+AAAA 共用同一键，IPv6 查询可能命中只含 IPv4 的缓存）
+    // 缓存键包含记录类型：A 与 A+AAAA 不能共用同一键，否则 IPv6 查询可能命中只含 IPv4 的缓存
     const dk = d + '|' + family;
     const hit = DNH_CACHE.get(dk);
     if (hit && now - hit.t < 10 * 60 * 1000) return hit.ips.slice(0, limitPerDomain).map((ip, i) => ({ ip, port: 443, name: d + '-' + (i + 1) }));
@@ -484,7 +482,7 @@ const FILTER_IPTYPES = ['IPv4', 'IPv6'];
 // 任何维度筛选后为空时逐级放宽（isp → ipType → region），保证订阅永不为空（避免客户端「无效订阅」）
 function filterNodes(nodes, filter) {
   if (!filter || !filter.region && !filter.ipType && !filter.isp) return nodes;
-  const region = filter.region || 'all';
+  const region = Array.isArray(filter.region) && filter.region.length ? filter.region : ['all'];
   const ipType = filter.ipType || FILTER_IPTYPES;
   const isp = filter.isp || FILTER_ISPS;
   // 预解析节点（名称解析一次，供各轮过滤与池标记检查复用）
@@ -499,10 +497,8 @@ function filterNodes(nodes, filter) {
     return { host, name, up, isps: nodeIsps(up), regions: nodeRegions(name, up) };
   });
   const apply = (rg, t, s) => {
-    // rg 兼容字符串（旧配置 'all'/'HK'）与数组（面板多选地区 ['HK','SG']）；数组含 'all' 或空 = 全部地区
-    const tg = Array.isArray(rg)
-      ? (rg.length === 0 || rg.includes('all') ? null : rg.flatMap(r => REGION_TAGS[r] || []))
-      : (rg !== 'all' ? (REGION_TAGS[rg] || []) : null);
+    // rg 为面板多选的地区数组（如 ['HK','SG']），含 'all' = 全部地区
+    const tg = rg.includes('all') ? null : rg.flatMap(r => REGION_TAGS[r] || []);
     const partial = s.length > 0 && s.length < FILTER_ISPS.length;
     return nodes.filter((n, i) => {
       const m = meta[i];
@@ -510,14 +506,12 @@ function filterNodes(nodes, filter) {
       if (!m.name) return false;  // 跳过无法解析的非法节点
       // 地区过滤仅剔除明确标记为其它地区的节点；不带地区标记的通用节点（优选IP-XX / 域名 / 原生地址 /
       // 运营商线路节点如「移动-01」「电信-U01」等）是 CF 通用入口，任意地区可用，一律保留
-      // （修复：原先按名称格式判断「通用」，HostMonit / uouin 等按运营商命名的节点在选定地区时被误删）
       if (tg && m.regions.length && !m.regions.some(r => rg.includes(r))) return false;
       if (t.length === 1) {
         if (t[0] === 'IPv4' && isV6) return false;
         if (t[0] === 'IPv6' && !isV6) return false;
       }
       // 运营商筛选与地区筛选一致：只剔除明确标记为未勾选运营商的节点，不带运营商标记的通用节点保留
-      // （修复：原先只要池中有任一带运营商标记的节点，就会把所有通用节点一并剔除）
       if (partial && m.isps.length && !m.isps.some(k => s.includes(k))) return false;
       return true;
     });
@@ -525,7 +519,7 @@ function filterNodes(nodes, filter) {
   let out = apply(region, ipType, isp);
   if (!out.length) out = apply(region, ipType, FILTER_ISPS);          // 放宽 isp
   if (!out.length) out = apply(region, FILTER_IPTYPES, FILTER_ISPS);  // 放宽 ipType
-  if (!out.length) out = apply('all', FILTER_IPTYPES, FILTER_ISPS);   // 放宽 region
+  if (!out.length) out = apply(['all'], FILTER_IPTYPES, FILTER_ISPS);   // 放宽 region
   return out;
 }
 

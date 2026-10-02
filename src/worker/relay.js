@@ -53,7 +53,7 @@ async function resolveProxyIPs(host, port) {
   return job;
 }
 async function resolveProxyIPsUncached(host, port) {
-  // 每种记录类型按端点顺序查询：前一个端点失败才换下一个（正常 1 个子请求，不再 3 个端点同时发）；
+  // 每种记录类型按端点顺序查询：前一个端点失败才换下一个（正常只占 1 个子请求）；
   // SERVFAIL 等视为失败换端点，NOERROR / NXDOMAIN 视为确定结果
   const dohQuery = async (type, filterType) => {
     const r = await dohFirst(PROXYIP_DOHS, (url) => url + '?name=' + encodeURIComponent(host) + '&type=' + type, (j) => {
@@ -104,7 +104,7 @@ async function resolveProxyIPsUncached(host, port) {
 }
 
 // 出站并发竞速：同时发起多路连接，取最先握手成功的一路，后到的成功连接立即关闭（释放 CF 同时连接配额）。
-// 替代原先「串行尝试 + 逐级超时」：目标站在 Cloudflare 上时直连被回环保护拦截，过去要白等约 6s 才轮到反代
+// 比串行尝试更快：目标站在 Cloudflare 上时直连会被回环保护拦截，串行要白等约 6s 才轮到反代
 async function raceConnect(jobs) {
   if (!jobs || !jobs.length) return null;
   let settled = false;
@@ -285,7 +285,7 @@ async function openOutbound(parsed, cfg, colo, payloadKind) {
 // 下行管道（WebSocket）：socket 可读 → send 回调；结束调用 onDone。
 // 合并小块：运行时的 socket 读取每次只给约 4KB，逐块 send 时 1MB 就是约 256 条 WS 消息，每条都有固定 CPU 开销
 // （免费版每个请求只有 10ms CPU）。读到一块后，把「已经到达」的后续数据（同一轮 I/O 内、不额外等待网络）
-// 合并成最多 64KB 一条消息再发：本地 workerd 实测每 MB CPU 约 13ms → 8ms，消息数减少约 16 倍。
+// 合并成最多 64KB 一条消息再发：workerd 实测每 MB CPU 约 13ms → 8ms，消息数减少约 16 倍。
 // 只在读满时合并：一次读到不足 4KB 说明缓冲已读空（交互流量），直接发出，不等待；
 // 读满 4KB 时才用 0ms 定时器探测后续数据是否已到达（读取先于定时器完成 = 已在缓冲中），否则立即发出已攒的
 // （定时器粒度约 1ms，若对每块都等会让交互往返多约 1ms）

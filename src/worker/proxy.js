@@ -93,7 +93,7 @@ async function handleWebSocketProxy(request, cfg) {
     if (protoWait) { clearTimeout(protoWait); protoWait = null; }
     headerSent = true;
     // UDP 请求（command=0x02）：CF Workers 无 UDP socket 无法原生转发数据报，
-    // DNS(53) 查询 → DoH(HTTPS) 转换后回标准 DNS 响应（修复 V2rayNG 关闭「本地 DNS」时远端 DNS 不可用）；
+    // DNS(53) 查询 → DoH(HTTPS) 转换后回标准 DNS 响应（使 V2rayNG 关闭「本地 DNS」时远端 DNS 仍可用）；
     // 其余 UDP 快速失败关闭连接（客户端自动回退），TCP（VLESS/Trojan WS/XHTTP）路径零影响
     if (parsed.command === 2) {
       try {
@@ -143,8 +143,8 @@ async function handleWebSocketProxy(request, cfg) {
   server.addEventListener('close', cleanup);
   server.addEventListener('error', cleanup);
   // 拒绝 WebSocket 压缩（permessage-deflate）：客户端请求时运行时会自动协商，对视频等已压缩数据毫无收益，
-  // 实测每 MB CPU 约 12ms → 49ms（免费版每个请求只有 10ms CPU）。响应里给出不含 permessage-deflate 的扩展值，
-  // 运行时即不启用压缩并从响应中去掉该头；旧兼容日期的运行时本就不压缩，同样会去掉该头（均已在 workerd 实测）
+  // workerd 实测每 MB CPU 约 12ms → 49ms（免费版每个请求只有 10ms CPU）。响应里给出不含 permessage-deflate 的扩展值，
+  // 运行时即不启用压缩并从响应中去掉该头
   return new Response(null, { status: 101, webSocket: client, headers: { 'Sec-WebSocket-Extensions': 'identity' } });
 }
 

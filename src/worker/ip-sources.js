@@ -16,11 +16,9 @@ function decodeUtf8OrGbk(buf) {
 }
 
 // 订阅时自动拉取最新优选 IP：HostMonit 优选 API（按移动 / 联通 / 电信分线路实测的 Cloudflare IP），10 分钟缓存。
-// 修复：原先抓取 stock.hostmonit.com/CloudFlareYes 页面，该页面已改版为前端渲染的单页应用，HTML 中不含任何 IP，
-// 每次都拿到 0 个；现改为调用其数据接口（key 为社区项目通用的公开 key，接口失效时由其它来源兜底）。
+// 调用其数据接口（key 为社区项目通用的公开 key，接口失效时由其它来源兜底）。
 // 节点名带运营商（如「移动-01」），面板「运营商偏好」筛选据此生效。失败时沿用上次成功结果，都没有则返回 null
-// 机房内共享缓存（Cache API）：第三方优选来源的结果各实例原先只缓存在自己的内存里，每个新实例 / 每次冷启动都要重新请求对方；
-// 放进 caches.default 后同一机房的所有实例共用，10 分钟内只请求一次。Cache API 不可用（本地测试 / 部分域名下 put 不生效）时静默退回内存缓存
+// 机房内共享缓存（Cache API）：第三方优选来源的结果放进 caches.default，同一机房的所有实例共用，10 分钟内只请求一次（内存缓存则每个新实例 / 冷启动都要重新请求）。Cache API 不可用（本地测试 / 部分域名下 put 不生效）时静默退回内存缓存
 const SHARED_CACHE_BASE = 'https://cfnext-cache.invalid/';
 async function sharedCacheGet(key) {
   try {
@@ -41,9 +39,9 @@ const HOSTMONIT_API = 'https://api.hostmonit.com/get_optimization_ip';
 const HOSTMONIT_KEY = 'iDetkOys';
 const HOSTMONIT_LINE_CN = { CM: '移动', CU: '联通', CT: '电信' };
 const SUBPREF_CACHE = { t: 0, ips: null };
-// 分线路优选结果合并：同一 IP 常被多条线路同时选中（实测 HostMonit 有时 5 个联通 IP 全部与移动 / 电信重复）。
+// 分线路优选结果合并：同一 IP 常被多条线路同时选中。
 // 订阅中同一 IP 只能出现一次，因此每个 IP 生成一个节点，名称包含它出现的全部线路（如「移动/联通-01」），
-// 运营商筛选勾选其中任一线路即保留——修复：原先只保留首条线路的名称，重复 IP 的其它线路（如联通）整组消失。
+// 运营商筛选勾选其中任一线路即保留。
 // 输入 [{ ip, line }]（按接口顺序），输出 [{ ip, label, seq }]，seq 为同一名称下的两位序号
 function mergeIpLines(entries) {
   const byIp = new Map();

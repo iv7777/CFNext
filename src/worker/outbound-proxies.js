@@ -28,7 +28,7 @@ async function connectDirect(target, timeoutMs) {
 
 // 通过 SOCKS5 代理建立到目标的连接
 async function connectViaSocks5(proxy, target) {
-  // 修复：代理连接同样走 6s 超时快速失败（原先无超时，代理不可达时永久挂起 → 出站代理填写后全部超时）
+  // 6s 超时快速失败：代理不可达时不能永久挂起
   const socket = await connectWithTimeout(proxy.host, proxy.port, 6000);
   const writer = socket.writable.getWriter();
   const reader = socket.readable.getReader();
@@ -78,7 +78,7 @@ async function connectViaSocks5(proxy, target) {
   if (rep[3] === 1) await readN(6);
   else if (rep[3] === 3) { const l = (await readN(1))[0]; await readN(l + 2); }
   else if (rep[3] === 4) await readN(18);
-  // 修复：握手期间多读的字节（目标端早期数据）不能直接丢弃，挂到 socket._preamble，
+  // 握手期间多读的字节（目标端早期数据）不能丢弃：挂到 socket._preamble，
   // 由 WebSocket / xhttp 转发前先补发给客户端，避免 Telegram 等 TLS 握手中途被截断
   if (pending.byteLength > 0) socket._preamble = pending;
   writer.releaseLock();
@@ -88,7 +88,7 @@ async function connectViaSocks5(proxy, target) {
 
 // 通过 HTTP/HTTPS CONNECT 代理建立连接
 async function connectViaHttpProxy(proxy, target) {
-  // 修复：代理连接同样走 6s 超时快速失败（原先无超时，代理不可达时永久挂起 → 出站代理填写后全部超时）
+  // 6s 超时快速失败：代理不可达时不能永久挂起
   const socket = await connectWithTimeout(proxy.host, proxy.port, 6000);
   const writer = socket.writable.getWriter();
   const reader = socket.readable.getReader();
@@ -100,7 +100,7 @@ async function connectViaHttpProxy(proxy, target) {
   // 读取响应头直到空行；空行后同包多读的字节（目标端早期数据）一并保留
   const { head, leftover } = await readUntilCRLFCRLF(reader);
   if (!/^HTTP\/\d\.\d\s+2\d\d/i.test(head)) throw new Error('HTTP 代理 CONNECT 失败: ' + head.split('\r\n')[0]);
-  // 修复：残留字节挂 socket._preamble，由 WebSocket / xhttp 转发前先补发给客户端
+  // 残留字节挂 socket._preamble（用法同 SOCKS5）
   if (leftover && leftover.byteLength > 0) socket._preamble = leftover;
   writer.releaseLock();
   reader.releaseLock();
@@ -407,7 +407,7 @@ async function readUntilCRLFCRLF(reader) {
     if (done) break;
     buf = concatBytes(buf, value);
     const idx = findBytes(buf, [13, 10, 13, 10]);
-    // 修复：返回头部文本 + 空行之后同一包内多读的残留字节（不再丢弃）
+    // 返回头部文本 + 空行之后同一包内多读的残留字节
     if (idx >= 0) return { head: TD.decode(buf.subarray(0, idx)), leftover: buf.subarray(idx + 4) };
   }
   return { head: TD.decode(buf), leftover: new Uint8Array(0) };
