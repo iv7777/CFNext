@@ -189,7 +189,7 @@ function sniffPayloadKind(bytes) {
 // 反代均为透明代理：发送去掉 VLESS/Trojan 头部的原始 TLS 数据，对端按 SNI 路由到目标。
 // 出站模式语义：only = 仅走出站代理（失败用内置地区反代兜底）；'' 默认 = 出站代理优先，失败后直连 ∥ 反代；
 // no = 直连 ∥ 反代优先，都不通时最后用出站代理
-async function openOutbound(parsed, cfg, colo, isVless, payloadKind) {
+async function openOutbound(parsed, cfg, colo, payloadKind) {
   const proxy = parseProxyAddress(cfg.outboundProxy);
   const mode = cfg.outboundMode || '';
   const allowSniRelay = payloadKind !== 'nontls';

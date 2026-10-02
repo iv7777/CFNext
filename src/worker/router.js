@@ -57,7 +57,7 @@ async function makeAuthToken(cfg) {
 async function requireAuth(request, cfg) {
   if (!cfg.admin) return false;
   const cookies = request.headers.get('Cookie') || '';
-  const m = cookies.match(/(?:^|;\s*)luma_auth=([^;]+)/);
+  const m = cookies.match(/(?:^|;\s*)cfnext_auth=([^;]+)/);
   if (!m) return false;
   const [exp, sig] = m[1].split('.');
   if (!exp || !sig || !/^\d+$/.test(exp) || Number(exp) < Date.now()) return false;
@@ -107,7 +107,7 @@ function safeNext(next, panelPath) {
   return (/^\/[^\/\\]/.test(next)) ? next : ('/' + panelPath);
 }
 function authCookie(token) {
-  return `luma_auth=${token}; Path=/; Max-Age=86400; HttpOnly; Secure; SameSite=Lax`;
+  return `cfnext_auth=${token}; Path=/; Max-Age=86400; HttpOnly; Secure; SameSite=Lax`;
 }
 // 返回给面板的配置：只含字段表登记的配置项，不下发管理密码明文；附带面板需要的派生信息
 function publicConfig(cfg, env) {
@@ -132,7 +132,7 @@ function formatConfigErrors(errors) {
 // 生成订阅：/sub 与面板预览共用同一流程，保证预览与客户端实际拿到的一致
 async function serveSubscription(request, env, cfg, fmt) {
   const UA = request.headers.get('User-Agent') || '';
-  return generateSubscription(Object.assign({}, cfg), request.url, fmt, UA, request.cf && request.cf.colo);
+  return generateSubscription(Object.assign({}, cfg), request.url, fmt, UA);
 }
 
 // 面板页面：注入字段表与共用校验函数（每个 isolate 只组装一次）。
@@ -141,7 +141,8 @@ function panelPage() {
   if (!PANEL_PAGE) {
     PANEL_PAGE = PANEL_HTML
       .replace('/*@CFNEXT_SCHEMA@*/null', () => JSON.stringify(clientSchema()).replace(/</g, '\\u003c'))
-      .replace('/*@CFNEXT_CHECK@*/null', () => '(' + checkFieldValue.toString() + ')');
+      .replace('/*@CFNEXT_CHECK@*/null', () => '(' + checkFieldValue.toString() + ')')
+      .replace('/*@CFNEXT_HTTP_PORTS@*/null', () => JSON.stringify([...HTTP_PORTS]));
   }
   return PANEL_PAGE;
 }
@@ -224,7 +225,7 @@ async function handleRequest(request, env) {
   }
 
   // ---------- 订阅 ----------
-  if (isSubRoot && (segs[1] === 'sub' || (segs.length === 1 && !isBrowserUA(UA) && !UA.startsWith('luma')))) {
+  if (isSubRoot && (segs[1] === 'sub' || (segs.length === 1 && !isBrowserUA(UA)))) {
     const fmt = segs.length >= 3 ? segs[2] : '';
     try {
       const sub = await serveSubscription(request, env, cfg, fmt);
@@ -295,7 +296,7 @@ async function handleRequest(request, env) {
       if (request.method !== 'POST') return json({ ok: false, msg: '仅支持 POST' }, 405);
       // 会话令牌是无状态的签名令牌，无法在服务端单独吊销：这里清除浏览器中的 Cookie。
       // 要让已签发的令牌全部失效，修改管理密码或 UUID 即可（签名密钥随之变化）
-      return json({ ok: true, msg: '已退出登录' }, 200, { 'Set-Cookie': 'luma_auth=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax' });
+      return json({ ok: true, msg: '已退出登录' }, 200, { 'Set-Cookie': 'cfnext_auth=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax' });
     }
 
     if (apiName === 'reset') {
@@ -380,7 +381,7 @@ function withSecurityHeaders(res) {
 }
 
 export default {
-  async fetch(request, env, ctx) {
-    return withSecurityHeaders(await handleRequest(request, Object.assign({}, env, { _ctx: ctx })));
+  async fetch(request, env) {
+    return withSecurityHeaders(await handleRequest(request, env));
   }
 };

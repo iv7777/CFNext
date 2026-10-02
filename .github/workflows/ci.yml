@@ -4,6 +4,9 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -16,5 +19,7 @@ jobs:
         run: node build.mjs --check
       - name: 语法检查
         run: node --check CFNext.js
+      - name: 静态检查（eslint）
+        run: npm run lint
       - name: 测试
         run: node --test

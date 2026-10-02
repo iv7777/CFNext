@@ -2,7 +2,7 @@
 // 配置字段表（单一数据源）
 // ---------------------------------------------------------------------------
 // 以下全部由本表驱动，新增配置项只需在此加一行 + 在面板 HTML 放一个 id 与 el 对应的控件：
-//   - DEFAULT_CONFIG（默认值）
+//   - schemaDefaults()（各字段默认值）
 //   - 从 KV 读取配置时的字段合并（未登记的旧字段自动忽略）
 //   - 保存接口 POST /api/config 的白名单与校验（sanitizeConfigPatch）
 //   - 面板的表单回填 / 收集 / 未保存标记 / 字段级错误提示（表与 checkFieldValue 在下发面板时注入页面）
@@ -57,19 +57,11 @@ const CONFIG_SCHEMA = [
   // 自定义 ECH DNS：客户端获取 ECH 配置的 DoH 地址（留空用默认 223.5.5.5）
   { key: 'echDns', type: 'string', def: '', el: 'ech-dns', label: 'ECH DNS', maxLen: 512,
     pattern: '^https://\\S+$', hint: '须为 https:// 开头的 DoH 地址' },
-  // TLS 控制：关闭下发全部节点，开启仅下发 TLS 端口节点（自定义域名部署时强制开启）
+  // TLS 控制：默认开启，只下发 TLS 端口节点；关闭后 443 节点另追加 80 明文节点，来源自带的明文端口原样下发（开启 ECH 时强制仅 TLS）
   { key: 'tlsOnly', type: 'bool', def: true, el: 'tls-only', label: '仅 TLS 端口' },
-  // ★ 节点测活（TCP 探测）总开关：默认关闭（推荐，对齐 V1.0.6）——订阅不做任何 TCP 握手/HTTP 探测与剔除，
-  //   按数据源原始顺序全量下发、客户端自行择优（秒回，v2rayNG/AsteriskNG 刷新正常）；面板开启或 PROBE_ALIVE=1 强制开启。
-  //   节点形态：所有模式统一按 1.0.6 机制——端口原样单端口下发（固定 443、不随机 TLS 端口、不追加明文端口变体）。
-  //   关闭：所有测活函数直接放行，不做任何 TCP 握手/HTTP 探测与剔除——节点的下发策略、出入站方式、
-  //   ProxyIP 等节点相关均按 V1.x 处理：按数据源原始顺序（bestcf 地区池行序 = 质量序）全量下发，客户端自行择优；
-  //   开启：对候选地址做 TCP 握手/HTTP 探测并剔除判死项，
-  //   含精选池/优选 IP/域名预检/ProxyIP 兜底各环节的测活剔除（自定义订阅 / 随机优选模式除外：不进行测活）。
-  //   注意：Cloudflare 运行时禁止出站连接 CF IP 段（官方文档：Outbound TCP sockets to
-  //   Cloudflare IP ranges are blocked），因此对 CF 段 IP 跳过 TCP 探测、直接视为可用——
-  //   精选池（实测 97% 可用）不会被误判清空，仅对非 CF 段（反代/ProxyIP）真实测活剔除死节点。
-  //   可用环境变量 PROBE_ALIVE=0 覆盖关闭
+  // 节点测活：默认关闭。开启后只对默认模式的「优选域名」做预检（DoH 解析不到 Cloudflare 段 IP 的死域名不下发），
+  // 其它来源一律不测活、按来源顺序全量下发由客户端择优——Workers 运行时禁止出站连接 Cloudflare IP 段，对 CF 段 IP 的 TCP 探测恒失败。
+  // 环境变量 PROBE_ALIVE=1 / 0 可强制开启 / 关闭
   { key: 'probeAlive', type: 'bool', def: false, el: 'q-probe-on', label: '节点测活' },
   // ---- 落地与出站 ----
   { key: 'proxyIP', type: 'string', def: '', el: 's-proxyIP', label: '反代 / 落地 IP', maxLen: 256,
@@ -84,8 +76,6 @@ const CONFIG_SCHEMA = [
   // [{ ip, port, name }]
   { key: 'preferredIPs', type: 'ipList', def: [], el: 'f-preferred', custom: true, label: '优选节点', check: 'ipList' },
   // ---- 订阅模式参数 ----
-  // 随机补足已移除：保持 0（仅为兼容旧 KV 配置保留字段）
-  { key: 'optimizer.fillCount', type: 'int', def: 0, label: '随机补足', min: 0, max: 100000 },
   // 订阅模式：'' 关闭（使用面板默认）/ custom 自定义订阅（支持汇聚）/ random 随机优选
   { key: 'optimizer.subMode', type: 'enum', def: '', el: 'o-submode', label: '订阅模式', options: ['', 'custom', 'random'] },
   // random 模式随机优选数量
@@ -306,8 +296,6 @@ function crossCheckConfig(cfg) {
 function clientSchema() {
   return CONFIG_SCHEMA.map(d => { const o = Object.assign({}, d); delete o.check; return o; });
 }
-
-const DEFAULT_CONFIG = schemaDefaults();
 
 // 内置官方直连域名：节点池为空时的最后兜底（保证订阅不为空），以及仅勾选 IPv6 时的 AAAA 来源
 const BUILTIN_OFFICIAL_DOMAINS = ['cloudflare.com', 'www.cloudflare.com', 'speed.cloudflare.com'];

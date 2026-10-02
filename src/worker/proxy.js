@@ -102,7 +102,7 @@ async function handleWebSocketProxy(request, cfg) {
       try { server.close(1000); } catch (e) { /* 忽略 */ }
       return;
     }
-    const conn = await openOutbound(parsed, cfg, request.cf && request.cf.colo, isVless, payloadKind);
+    const conn = await openOutbound(parsed, cfg, request.cf && request.cf.colo, payloadKind);
     socket = conn;
     writer = conn.writable.getWriter();
     // 透明代理：去掉 VLESS/Trojan 头部，发送原始 TLS 数据，由对端按 SNI 路由
@@ -152,7 +152,7 @@ async function handleXhttpProxy(request, cfg) {
   }
   if (parsed.command !== 1) throw new Error('XHTTP 仅支持 TCP 命令');
   const firstPayload = buf.subarray(parsed.headerLength);
-  const conn = await openOutbound(parsed, cfg, request.cf && request.cf.colo, true, sniffPayloadKind(firstPayload));
+  const conn = await openOutbound(parsed, cfg, request.cf && request.cf.colo, sniffPayloadKind(firstPayload));
   const writer = conn.writable.getWriter();
   if (firstPayload.byteLength) await writer.write(firstPayload);
 

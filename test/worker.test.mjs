@@ -61,7 +61,7 @@ test('GET /api/config 返回字段表默认值（与旧 DEFAULT_CONFIG 一致）
     host: '', enableVless: true, enableTrojan: false, trojanPassword: '', enableXhttp: false,
     alpn: '', ech: false, echHost: 'cloudflare-ech.com', echDns: '', tlsOnly: true,
     probeAlive: false, proxyIP: '', outboundProxy: '', outboundMode: '', preferredIPs: [],
-    optimizer: { fillCount: 0, subMode: '', subRandomCount: 16, subIncludeDefault: false },
+    optimizer: { subMode: '', subRandomCount: 16, subIncludeDefault: false },
     filter: { region: ['all'], ipType: ['IPv4', 'IPv6'], isp: ['移动', '联通', '电信'] },
     src: { native: false, prefDomain: true, prefIp: true },
   };
@@ -166,7 +166,7 @@ test('修改 UUID：重新签发登录态并返回新面板路径（问题 2）'
   assert.equal(r.data.uuid, UUID2);
   assert.equal(r.data.panelPath, UUID2, '路径跟随 UUID');
   const newCookie = res.headers.get('Set-Cookie');
-  assert.ok(newCookie && newCookie.startsWith('luma_auth='));
+  assert.ok(newCookie && newCookie.startsWith('cfnext_auth='));
   const again = await call(env, `/${UUID2}/api/config`, { cookie: newCookie.split(';')[0] });
   assert.equal(again.status, 200, '新令牌可直接访问新路径');
   const old = await call(env, `/${UUID2}/api/config`, { cookie });
@@ -963,7 +963,7 @@ test('页面安全头：面板 / 登录页带 CSP、frame-ancestors、nosniff；
   // 退出登录：清除 Cookie
   const out = await call(env, `/${UUID}/api/logout`, { method: 'POST', cookie });
   assert.equal(out.status, 200);
-  assert.match(out.headers.get('Set-Cookie'), /luma_auth=; .*Max-Age=0/);
+  assert.match(out.headers.get('Set-Cookie'), /cfnext_auth=; .*Max-Age=0/);
   assert.equal((await call(env, `/${UUID}/api/logout`)).status, 403, '未登录不可调用');
 });
 
@@ -1125,4 +1125,92 @@ test('机房共享缓存：优选 API 结果写入 / 读取 Cache API；命中�
   const env = baseEnv({ K: kv({ config: { filter: { ipType: ['IPv4'] }, src: { prefDomain: false }, ipsrc: { hostmonit: false, uouin: false, api1: true, api1Url: urlC } } }) });
   const t = await withFetch((u) => u === urlC ? new Response('104.16.6.6') : notFound(), async () => (await call(env, `/${UUID}/sub`, { ua: 'v2rayN/7.0' })).text());
   assert.match(t, /@104\.16\.6\.6:443/);
+});
+
+// ---------------- 批次 4：纯函数已知答案 / 协议头模糊测试 / 面板注入 ----------------
+import { readFileSync } from 'node:fs';
+import { createHmac, hkdfSync, createCipheriv, randomBytes } from 'node:crypto';
+// 构建产物里的内部函数不对外导出：去掉 import / export default 后在函数作用域内求值，取出要测的纯函数
+const internals = (() => {
+  const src = readFileSync(new URL('../CFNext.js', import.meta.url), 'utf8')
+    .replace(/^import .*$/m, '').replace('export default {', 'const __default = {');
+  return new Function('connect', src + '\n;return { md5hex, sha224hex, sha1Bytes, hmacSha1, hkdfSha1, poly1305, chacha20Poly1305Seal, chacha20Poly1305Open, parseVlessHeader, parseTrojanHeader, HTTP_PORTS, ipInCidrV6, isValidIp, parseProxyAddress, loginRateKey };')(() => { throw new Error('no sockets'); });
+})();
+const hex = (u8) => Buffer.from(u8).toString('hex');
+const fromHexStr = (h) => new Uint8Array(Buffer.from(h.replace(/\s+/g, ''), 'hex'));
+const lens = [0, 1, 3, 55, 56, 57, 63, 64, 65, 119, 120, 127, 128, 1000];   // 覆盖填充边界
+const msgOf = (n) => 'x'.repeat(n);
+
+test('MD5 / SHA-224 / SHA-1 / HMAC-SHA1 / HKDF-SHA1 与 node:crypto 结果一致（含 RFC 已知答案与填充边界）', () => {
+  assert.equal(internals.md5hex(''), 'd41d8cd98f00b204e9800998ecf8427e');
+  assert.equal(internals.md5hex('abc'), '900150983cd24fb0d6963f7d28e17f72');
+  assert.equal(internals.sha224hex('abc'), '23097d223405d8228642a477bda255b32aadbce4bda0b3f7e36c9da7');
+  assert.equal(hex(internals.sha1Bytes(new TextEncoder().encode('abc'))), 'a9993e364706816aba3e25717850c26c9cd0d89d');
+  for (const n of lens) {
+    const m = msgOf(n), bytes = new TextEncoder().encode(m);
+    assert.equal(internals.md5hex(m), createHash('md5').update(m).digest('hex'), `md5 len ${n}`);
+    assert.equal(internals.sha224hex(m), createHash('sha224').update(m).digest('hex'), `sha224 len ${n}`);
+    assert.equal(hex(internals.sha1Bytes(bytes)), createHash('sha1').update(m).digest('hex'), `sha1 len ${n}`);
+  }
+  const key = randomBytes(100), data = randomBytes(77);   // 密钥超过一个分组：先哈希
+  assert.equal(hex(internals.hmacSha1(key, data)), createHmac('sha1', key).update(data).digest('hex'));
+  const ikm = randomBytes(32), salt = randomBytes(16);
+  for (const keyLen of [16, 32]) {
+    assert.equal(hex(internals.hkdfSha1(ikm, salt, keyLen)), Buffer.from(hkdfSync('sha1', ikm, salt, 'ss-subkey', keyLen)).toString('hex'), `hkdf ${keyLen}`);
+  }
+});
+
+test('Poly1305 / ChaCha20-Poly1305 通过 RFC 8439 已知答案，并与 node:crypto 互通、拒绝被篡改的数据', () => {
+  // RFC 8439 §2.5.2 Poly1305
+  const tag = internals.poly1305(fromHexStr('85d6be7857556d337f4452fe42d506a80103808afb0db2fd4abff6af4149f51b'), new TextEncoder().encode('Cryptographic Forum Research Group'));
+  assert.equal(hex(tag), 'a8061dc1305136c6c22b8baf0c0127a9');
+  // RFC 8439 §2.8.2 AEAD
+  const key = fromHexStr('808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f');
+  const nonce = fromHexStr('070000004041424344454647');
+  const aad = fromHexStr('50515253c0c1c2c3c4c5c6c7');
+  const pt = new TextEncoder().encode("Ladies and Gentlemen of the class of '99: If I could offer you only one tip for the future, sunscreen would be it.");
+  const sealed = internals.chacha20Poly1305Seal(key, nonce, pt, aad);
+  assert.equal(hex(sealed.slice(-16)), '1ae10b594f09e26a7e902ecbd0600691');
+  assert.equal(hex(sealed.slice(0, 16)), 'd31a8d34648e60db7b86afbc53ef7ec2');
+  assert.equal(Buffer.from(internals.chacha20Poly1305Open(key, nonce, sealed, aad)).toString(), Buffer.from(pt).toString());
+  // 与 node 互通（随机数据、多种长度）
+  for (const n of [0, 1, 15, 16, 17, 64, 65, 200, 1000]) {
+    const k = randomBytes(32), nc = randomBytes(12), p = randomBytes(n);
+    const c = createCipheriv('chacha20-poly1305', k, nc, { authTagLength: 16 });
+    const expected = Buffer.concat([c.update(p), c.final(), c.getAuthTag()]);
+    assert.equal(hex(internals.chacha20Poly1305Seal(k, nc, p)), expected.toString('hex'), `seal len ${n}`);
+  }
+  const bad = Uint8Array.from(sealed); bad[3] ^= 1;
+  assert.equal(internals.chacha20Poly1305Open(key, nonce, bad, aad), null, '篡改后认证失败');
+});
+
+test('协议头解析：任意截断只会报「头部过短」；乱码只会抛普通 Error（不出现 RangeError / TypeError）', () => {
+  const cfg = { uuid: UUID };
+  const trojanHex = createHash('sha224').update(UUID).digest('hex');
+  const vless = [vlessReq('example.com', 443), vlessReqV6(443), new Uint8Array([0, ...uuidBytes, 3, 7, 7, 7, 1, 0, 80, 1, 1, 2, 3, 4])];
+  for (const full of vless) {
+    const header = internals.parseVlessHeader(full, cfg).headerLength;
+    for (let k = 0; k < header; k++) {
+      assert.throws(() => internals.parseVlessHeader(full.slice(0, k), cfg), (e) => e.constructor === Error && /头部过短/.test(e.message), `VLESS 截断 ${k}/${header}`);
+    }
+    assert.equal(internals.parseVlessHeader(full.slice(0, header), cfg).headerLength, header);
+  }
+  const trojanFull = new Uint8Array([...Buffer.from(trojanHex + '\r\n'), 1, 3, 11, ...Buffer.from('example.com'), 1, 187, 13, 10]);
+  for (let k = 0; k < trojanFull.length; k++) {
+    assert.throws(() => internals.parseTrojanHeader(trojanFull.slice(0, k)), (e) => e.constructor === Error && /头部过短/.test(e.message), `Trojan 截断 ${k}`);
+  }
+  assert.equal(internals.parseTrojanHeader(trojanFull).addr, 'example.com');
+  for (let i = 0; i < 500; i++) {   // 随机字节：要么解析成功，要么抛出我们自己的 Error
+    const junk = randomBytes(1 + Math.floor(Math.random() * 90)); if (i % 2) { junk[0] = 0; junk.set(uuidBytes.slice(0, Math.min(16, junk.length - 1)), 1); }
+    for (const parse of [(b) => internals.parseVlessHeader(b, cfg), (b) => internals.parseTrojanHeader(b)]) {
+      try { parse(junk); } catch (e) { assert.equal(e.constructor, Error, `${e.name}: ${e.message}`); }
+    }
+  }
+});
+
+test('面板注入服务端的明文端口表（不再各存一份）', async () => {
+  const env = baseEnv();
+  const html = await (await call(env, `/${UUID}`, { cookie: await login(env) })).text();
+  assert.ok(html.includes('var HTTP_PORTS = ' + JSON.stringify([...internals.HTTP_PORTS])), '注入值与服务端 HTTP_PORTS 一致');
+  assert.ok(!html.includes('/*@CFNEXT_HTTP_PORTS@*/'), '占位符已替换');
 });

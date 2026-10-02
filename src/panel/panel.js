@@ -684,7 +684,7 @@ function testIpSource(src){
 }
 // 测试结果按「仅 TLS 端口」当前状态（含未保存的修改）展示实际会下发的节点，规则与服务端 buildNodes 一致：
 // 开启（或开启 ECH）时跳过明文端口；关闭时 443 节点另追加「名称·80」的 80 明文节点
-var HTTP_PORTS = [80, 8080, 8880, 2052, 2082, 2086, 2095];
+var HTTP_PORTS = /*@CFNEXT_HTTP_PORTS@*/null || [80, 8080, 8880, 2052, 2082, 2086, 2095];   // 服务端下发同一份明文端口表，这里的默认值仅作兜底
 var LAST_IPTEST = null;
 function tlsOnlyNow(){ return $('tls-only').checked || $('ech-on').checked; }
 function rerenderIpTest(){ if (LAST_IPTEST) renderIpTest(LAST_IPTEST.src, LAST_IPTEST.r); }

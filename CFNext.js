@@ -1,5 +1,4 @@
 // ⚠ 本文件由 build.mjs 自动生成：请修改 src/ 下的源文件后运行 `node build.mjs`，不要直接编辑本文件。
-//  === 面板集成：CFNext 新界面（独立设计）===
 // ============================================================================
 //  CFNext —— Cloudflare 代理管理面板 · 全新独立编写
 //  ----------------------------------------------------------------------------
@@ -12,14 +11,14 @@
 //    S / OUTBOUND 出站代理（可选，socks5:// / http:// / ss:// 或 host:port）
 //    ECH          设为 true/1 开启 ECH 加密（可选）
 //    TROJAN       设为 true/1 开启 Trojan 协议（可选）
-//    TROJAN_PASSWORD  Trojan 密码（开启 Trojan 时必填）
+//    TROJAN_PASSWORD  Trojan 密码（可选，留空则使用 UUID）
 //    ALPN         自定义 ALPN 协商（可选）
 //    YX           自定义优选 IP 列表（可选，格式 IP:port#名称，逗号分隔）
 //    K            已绑定 KV 命名空间时读取图形化配置
 // ============================================================================
 import { connect } from 'cloudflare:sockets';
 
-const VERSION = '2.0.12';
+const VERSION = '2.0.13';
 
 // 更新检测：点击版本号后拉取仓库代码比对版本号；有新版本时返回最新代码供面板复制
 // 版本基准为仓库 main 分支根目录的 CFNext.js（由 build.mjs 生成的部署文件）
@@ -413,10 +412,6 @@ const CLOUDFLARE_CIDRS_V6 = [
   '2400:cb00::/32', '2606:4700::/32', '2803:f800::/32', '2405:b500::/32',
   '2405:8100::/32', '2a06:98c0::/29', '2c0f:f248::/32'
 ];
-// IPv6 随机补足/随机优选专用段（筛选含 IPv6 时使用，与 IPv4 补足同一可达性原则）
-const REACHABLE_CIDRS_V6 = [
-  '2606:4700::/32', '2400:cb00::/32', '2803:f800::/32', '2a06:98c0::/29', '2c0f:f248::/32'
-];
 // Cloudflare 官方公开 IPv6 网段（https://www.cloudflare.com/ips-v6/ 动态拉取，6 小时缓存；
 // 失败回退内置段；实测官方段随机地址 TCP+TLS 全端口可用，与 IPv4 补足同机制）
 let OFFICIAL_V6_CIDRS = CLOUDFLARE_CIDRS_V6.slice();
@@ -479,17 +474,11 @@ const REGION_CN = {
 
 // IPv4+IPv6 混合时只对前 N 个优选域名查询 AAAA（控制子请求数，见 generateSubscription 默认模式）
 const V6_DOMAIN_LIMIT = 12;
-// 优选 API / 地区池中的非 CF 段 IP（如 bestcf 地区池，全部为第三方中转服务器）一律按 CF 段过滤丢弃：
-// 第三方中转可获知部署域名与连接元数据，安全起见不再信任（仅「自定义订阅 · 仅自定义节点」模式原样下发，用户自担）
-function isTrustedRegionPool(url) {
-  return false;
-}
-
 // ---------------------------------------------------------------------------
 // 配置字段表（单一数据源）
 // ---------------------------------------------------------------------------
 // 以下全部由本表驱动，新增配置项只需在此加一行 + 在面板 HTML 放一个 id 与 el 对应的控件：
-//   - DEFAULT_CONFIG（默认值）
+//   - schemaDefaults()（各字段默认值）
 //   - 从 KV 读取配置时的字段合并（未登记的旧字段自动忽略）
 //   - 保存接口 POST /api/config 的白名单与校验（sanitizeConfigPatch）
 //   - 面板的表单回填 / 收集 / 未保存标记 / 字段级错误提示（表与 checkFieldValue 在下发面板时注入页面）
@@ -544,19 +533,11 @@ const CONFIG_SCHEMA = [
   // 自定义 ECH DNS：客户端获取 ECH 配置的 DoH 地址（留空用默认 223.5.5.5）
   { key: 'echDns', type: 'string', def: '', el: 'ech-dns', label: 'ECH DNS', maxLen: 512,
     pattern: '^https://\\S+$', hint: '须为 https:// 开头的 DoH 地址' },
-  // TLS 控制：关闭下发全部节点，开启仅下发 TLS 端口节点（自定义域名部署时强制开启）
+  // TLS 控制：默认开启，只下发 TLS 端口节点；关闭后 443 节点另追加 80 明文节点，来源自带的明文端口原样下发（开启 ECH 时强制仅 TLS）
   { key: 'tlsOnly', type: 'bool', def: true, el: 'tls-only', label: '仅 TLS 端口' },
-  // ★ 节点测活（TCP 探测）总开关：默认关闭（推荐，对齐 V1.0.6）——订阅不做任何 TCP 握手/HTTP 探测与剔除，
-  //   按数据源原始顺序全量下发、客户端自行择优（秒回，v2rayNG/AsteriskNG 刷新正常）；面板开启或 PROBE_ALIVE=1 强制开启。
-  //   节点形态：所有模式统一按 1.0.6 机制——端口原样单端口下发（固定 443、不随机 TLS 端口、不追加明文端口变体）。
-  //   关闭：所有测活函数直接放行，不做任何 TCP 握手/HTTP 探测与剔除——节点的下发策略、出入站方式、
-  //   ProxyIP 等节点相关均按 V1.x 处理：按数据源原始顺序（bestcf 地区池行序 = 质量序）全量下发，客户端自行择优；
-  //   开启：对候选地址做 TCP 握手/HTTP 探测并剔除判死项，
-  //   含精选池/优选 IP/域名预检/ProxyIP 兜底各环节的测活剔除（自定义订阅 / 随机优选模式除外：不进行测活）。
-  //   注意：Cloudflare 运行时禁止出站连接 CF IP 段（官方文档：Outbound TCP sockets to
-  //   Cloudflare IP ranges are blocked），因此对 CF 段 IP 跳过 TCP 探测、直接视为可用——
-  //   精选池（实测 97% 可用）不会被误判清空，仅对非 CF 段（反代/ProxyIP）真实测活剔除死节点。
-  //   可用环境变量 PROBE_ALIVE=0 覆盖关闭
+  // 节点测活：默认关闭。开启后只对默认模式的「优选域名」做预检（DoH 解析不到 Cloudflare 段 IP 的死域名不下发），
+  // 其它来源一律不测活、按来源顺序全量下发由客户端择优——Workers 运行时禁止出站连接 Cloudflare IP 段，对 CF 段 IP 的 TCP 探测恒失败。
+  // 环境变量 PROBE_ALIVE=1 / 0 可强制开启 / 关闭
   { key: 'probeAlive', type: 'bool', def: false, el: 'q-probe-on', label: '节点测活' },
   // ---- 落地与出站 ----
   { key: 'proxyIP', type: 'string', def: '', el: 's-proxyIP', label: '反代 / 落地 IP', maxLen: 256,
@@ -571,8 +552,6 @@ const CONFIG_SCHEMA = [
   // [{ ip, port, name }]
   { key: 'preferredIPs', type: 'ipList', def: [], el: 'f-preferred', custom: true, label: '优选节点', check: 'ipList' },
   // ---- 订阅模式参数 ----
-  // 随机补足已移除：保持 0（仅为兼容旧 KV 配置保留字段）
-  { key: 'optimizer.fillCount', type: 'int', def: 0, label: '随机补足', min: 0, max: 100000 },
   // 订阅模式：'' 关闭（使用面板默认）/ custom 自定义订阅（支持汇聚）/ random 随机优选
   { key: 'optimizer.subMode', type: 'enum', def: '', el: 'o-submode', label: '订阅模式', options: ['', 'custom', 'random'] },
   // random 模式随机优选数量
@@ -793,8 +772,6 @@ function crossCheckConfig(cfg) {
 function clientSchema() {
   return CONFIG_SCHEMA.map(d => { const o = Object.assign({}, d); delete o.check; return o; });
 }
-
-const DEFAULT_CONFIG = schemaDefaults();
 
 // 内置官方直连域名：节点池为空时的最后兜底（保证订阅不为空），以及仅勾选 IPv6 时的 AAAA 来源
 const BUILTIN_OFFICIAL_DOMAINS = ['cloudflare.com', 'www.cloudflare.com', 'speed.cloudflare.com'];
@@ -1573,7 +1550,7 @@ function ssCipherAlgo(method) {
 // CF Workers 的 crypto.subtle 官方支持矩阵不含 CHACHA20-POLY1305（SS 最常用的 chacha20-ietf-poly1305
 // 用 WebCrypto 会抛 NotSupportedError → 出站全超时），故 chacha20-poly1305（RFC 8439）与
 // HKDF-SHA1 用纯 JS 实现，不依赖 WebCrypto；AES-GCM 保留 WebCrypto（CF 明确支持、性能好）。
-// （rotl32 复用文件已有的 MD5 实现 737 行 function rotl32）
+// （rotl32 复用 utils.js 中 MD5 实现的同名函数）
 
 // SHA-1（FIPS 180-4）
 function sha1Bytes(data) {
@@ -1818,18 +1795,6 @@ async function connectViaShadowsocks(proxy, target) {
 }
 
 
-async function readN(reader, n) {
-  const out = new Uint8Array(n);
-  let got = 0;
-  while (got < n) {
-    const { done, value } = await reader.read();
-    if (done) throw new Error('连接被关闭');
-    const need = n - got;
-    out.set(value.subarray(0, Math.min(need, value.length)), got);
-    got += Math.min(need, value.length);
-  }
-  return out;
-}
 async function readUntilCRLFCRLF(reader) {
   let buf = new Uint8Array(0);
   while (buf.length < 65536) {
@@ -2047,7 +2012,7 @@ function sniffPayloadKind(bytes) {
 // 反代均为透明代理：发送去掉 VLESS/Trojan 头部的原始 TLS 数据，对端按 SNI 路由到目标。
 // 出站模式语义：only = 仅走出站代理（失败用内置地区反代兜底）；'' 默认 = 出站代理优先，失败后直连 ∥ 反代；
 // no = 直连 ∥ 反代优先，都不通时最后用出站代理
-async function openOutbound(parsed, cfg, colo, isVless, payloadKind) {
+async function openOutbound(parsed, cfg, colo, payloadKind) {
   const proxy = parseProxyAddress(cfg.outboundProxy);
   const mode = cfg.outboundMode || '';
   const allowSniRelay = payloadKind !== 'nontls';
@@ -2225,7 +2190,7 @@ async function handleWebSocketProxy(request, cfg) {
       try { server.close(1000); } catch (e) { /* 忽略 */ }
       return;
     }
-    const conn = await openOutbound(parsed, cfg, request.cf && request.cf.colo, isVless, payloadKind);
+    const conn = await openOutbound(parsed, cfg, request.cf && request.cf.colo, payloadKind);
     socket = conn;
     writer = conn.writable.getWriter();
     // 透明代理：去掉 VLESS/Trojan 头部，发送原始 TLS 数据，由对端按 SNI 路由
@@ -2275,7 +2240,7 @@ async function handleXhttpProxy(request, cfg) {
   }
   if (parsed.command !== 1) throw new Error('XHTTP 仅支持 TCP 命令');
   const firstPayload = buf.subarray(parsed.headerLength);
-  const conn = await openOutbound(parsed, cfg, request.cf && request.cf.colo, true, sniffPayloadKind(firstPayload));
+  const conn = await openOutbound(parsed, cfg, request.cf && request.cf.colo, sniffPayloadKind(firstPayload));
   const writer = conn.writable.getWriter();
   if (firstPayload.byteLength) await writer.write(firstPayload);
 
@@ -2623,7 +2588,7 @@ async function resolvePreferredDomains(domainsStr, limitPerDomain = 100, maxTota
   // 每个条目返回一个有序 IP 数组
   const perItem = await Promise.all(list.map(async (d) => {
     if (d.includes('://')) {
-      // CFBox 复刻增强：sub:// 子订阅前缀——后面跟 base64(订阅URL) 或直接 URL
+      // sub:// 子订阅前缀（与常见订阅转换器 / 优选工具的写法一致）——后面跟 base64(订阅URL) 或直接 URL
       if (d.startsWith('sub://')) {
         let real = d.slice(6);
         if (/^[A-Za-z0-9+/=]+$/.test(real) && real.length % 4 === 0) {
@@ -2660,10 +2625,8 @@ async function resolvePreferredDomains(domainsStr, limitPerDomain = 100, maxTota
         const seen = new Set();
         const counters = {};
         const rec = [];
-        // 中转 IP 放行标记：isTrustedRegionPool 恒为 false，所有来源都按 CF 段过滤（保留以兼容 relay 字段）
-        const relay = isTrustedRegionPool(d);
         // 追加/默认模式强制 CF 段；仅自定义模式（filterCF=false）原样下发
-        const pass = (ip) => !filterCF || isCloudflareIP(ip) || relay;
+        const pass = (ip) => !filterCF || isCloudflareIP(ip);
         // CSV 优选表解析（对齐 edgetunnel 请求优选API）：
         // ① wetest 风格：IP地址,端口,数据中心[,TLS]（TLS 列非 true 跳过，避免明文端口无法转发）
         // ② hostmonit 风格：IP,延迟,下载速度 → 命名「CF优选 {延迟}ms {速度}MB/s」
@@ -2694,14 +2657,14 @@ async function resolvePreferredDomains(domainsStr, limitPerDomain = 100, maxTota
               seen.add(key);
               let nm = remarkIdx !== -1 && cols[remarkIdx] ? cols[remarkIdx] : '';
               if (!nm && delayIdx !== -1 && speedIdx !== -1) nm = 'CF优选 ' + (cols[delayIdx] || '') + 'ms ' + (cols[speedIdx] || '') + 'MB/s';
-              if (nm) { counters[nm] = (counters[nm] || 0) + 1; rec.push({ ip, port, name: nm + '-' + String(counters[nm]).padStart(2, '0'), ...(relay ? { relay: true } : {}) }); }
-              else rec.push({ ip, port, name: '', ...(relay ? { relay: true } : {}) });
+              if (nm) { counters[nm] = (counters[nm] || 0) + 1; rec.push({ ip, port, name: nm + '-' + String(counters[nm]).padStart(2, '0') }); }
+              else rec.push({ ip, port, name: '' });
             }
             await storeUrlCache(ck, rec);
             return rec.slice();
           }
         }
-        // HTML 线路表解析（wetest 等页面，对齐 CFBox）：<td data-label="线路名称">…</td><td data-label="优选地址">IP[:端口]</td>…
+        // HTML 线路表解析（wetest 等页面）：<td data-label="线路名称">…</td><td data-label="优选地址">IP[:端口]</td>…
         if (content.includes('<tr') && content.includes('data-label')) {
           for (const row of content.match(/<tr[\s\S]*?<\/tr>/g) || []) {
             if (rec.length >= limitPerDomain) break;
@@ -2720,8 +2683,8 @@ async function resolvePreferredDomains(domainsStr, limitPerDomain = 100, maxTota
             seen.add(key);
             // 名称保留线路名称/数据中心（含「移动/联通/电信」时面板 isp 筛选生效）
             const nm = (cells['线路名称'] || cells['数据中心'] || '线路').trim();
-            if (nm) { counters[nm] = (counters[nm] || 0) + 1; rec.push({ ip, port, name: nm + '-' + String(counters[nm]).padStart(2, '0'), ...(relay ? { relay: true } : {}) }); }
-            else rec.push({ ip, port, name: '', ...(relay ? { relay: true } : {}) });
+            if (nm) { counters[nm] = (counters[nm] || 0) + 1; rec.push({ ip, port, name: nm + '-' + String(counters[nm]).padStart(2, '0') }); }
+            else rec.push({ ip, port, name: '' });
           }
           await storeUrlCache(ck, rec);
           return rec.slice();
@@ -2740,8 +2703,8 @@ async function resolvePreferredDomains(domainsStr, limitPerDomain = 100, maxTota
           let nm = '';
           const hashIdx = line.indexOf('#');
           if (hashIdx >= 0) { try { nm = decodeURIComponent(line.slice(hashIdx + 1).trim()); } catch (e) { nm = line.slice(hashIdx + 1).trim(); } }
-          if (nm) { counters[nm] = (counters[nm] || 0) + 1; rec.push({ ip: host, port, name: nm + '-' + String(counters[nm]).padStart(2, '0'), ...(relay ? { relay: true } : {}) }); }
-          else rec.push({ ip: host, port, name: '', ...(relay ? { relay: true } : {}) });
+          if (nm) { counters[nm] = (counters[nm] || 0) + 1; rec.push({ ip: host, port, name: nm + '-' + String(counters[nm]).padStart(2, '0') }); }
+          else rec.push({ ip: host, port, name: '' });
         }
         // 纯文本行：IP / IP:端口 / IP:端口#名称（如 bestcf 的 "IP:端口#地区随机 | 香港 HK | HKG | ..."）
         for (const raw of content.split(/\r?\n/)) {
@@ -2758,7 +2721,7 @@ async function resolvePreferredDomains(domainsStr, limitPerDomain = 100, maxTota
           // 【新增】用户自定义名称（不含中文、不含 |）直接保留原样，例如 JP-A-147 / CF-B-163
           const rawName = (m[3] || '').trim();
           if (rawName && !/[\u4e00-\u9fa5]/.test(rawName) && !rawName.includes('|')) {
-            rec.push({ ip, port, name: rawName, ...(relay ? { relay: true } : {}) });
+            rec.push({ ip, port, name: rawName });
             continue;
           }
           let nm = '';
@@ -2779,9 +2742,9 @@ async function resolvePreferredDomains(domainsStr, limitPerDomain = 100, maxTota
               }
             }
           }
-          if (nm) { counters[nm] = (counters[nm] || 0) + 1; rec.push({ ip, port, name: nm + '-' + String(counters[nm]).padStart(2, '0'), ...(relay ? { relay: true } : {}) }); }
+          if (nm) { counters[nm] = (counters[nm] || 0) + 1; rec.push({ ip, port, name: nm + '-' + String(counters[nm]).padStart(2, '0') }); }
           // 提取不到地区的中文名称（如「自有-A」）原样保留（截断 40 字符），不再丢弃成「优选IP-XX」
-          else rec.push({ ip, port, name: rawName.slice(0, 40), ...(relay ? { relay: true } : {}) });
+          else rec.push({ ip, port, name: rawName.slice(0, 40) });
         }
         // 已移除「地区回退生成」：源内无可用 IP 时不再用随机 CF IP 冒充该地区节点
         await storeUrlCache(ck, rec);
@@ -2854,11 +2817,11 @@ async function buildNodes(cfg, cap = NODE_CAP) {
   // 其它模式（默认/追加/随机）入口必须是 CF 段——非 CF IP 无法转发到 Worker（历史 v2rayNG 全 -1 根因）
   const allowNonCF = (mode === 'custom' && !(cfg.optimizer && cfg.optimizer.subIncludeDefault));
   // 节点形态统一按 1.0.6 机制（方案 B）：所有模式端口原样单端口下发（固定 443、不随机 TLS 端口、不追加明文端口变体）
-  const push = (server, port, name, trusted) => {
+  const push = (server, port, name) => {
     if (nodes.length >= cap) return;   // 生成过程限流：避免多协议膨胀超 Worker CPU
     // 入口 IP 硬性要求：非 CF 段 IP 无法转发到 Worker，直接丢弃；
-    // 例外：仅「自定义订阅 · 仅自定义节点」（allowNonCF）按用户填写原样放行；trusted 标记目前不会出现（isTrustedRegionPool 恒为 false）
-    if (isValidIp(server) && !isCloudflareIP(server) && !allowNonCF && !trusted) return;
+    // 例外：仅「自定义订阅 · 仅自定义节点」（allowNonCF）按用户填写原样放行
+    if (isValidIp(server) && !isCloudflareIP(server) && !allowNonCF) return;
     const key = server + ':' + port;   // 按 服务器:端口 去重（单端口机制：同 IP 同端口仅下发一次）
     if (used.has(key)) return;
     used.add(key);
@@ -2872,10 +2835,10 @@ async function buildNodes(cfg, cap = NODE_CAP) {
     if (cfg.enableXhttp && isTls) nodes.push(vlessNode(cfg, server, finalPort, nm.x, { type: 'xhttp' }));  // XHTTP 仅 TLS 端口
   };
   // 按源端口（通常 443）下发；关闭「仅 TLS 端口」时，443 节点另追加一个 80 明文端口节点（名称加「·80」）
-  const multiPort = (server, port, name, trusted) => {
+  const multiPort = (server, port, name) => {
     port = Number(port) || 443;
-    push(server, port, name, trusted);
-    if (!cfg.tlsOnly && port === 443) push(server, 80, name + '·80', trusted);
+    push(server, port, name);
+    if (!cfg.tlsOnly && port === 443) push(server, 80, name + '·80');
   };
   if (mode === 'random') {
     // 生成数量以面板「随机优选数量」为准；节点上限（cap）只做封顶
@@ -2922,7 +2885,7 @@ async function buildNodes(cfg, cap = NODE_CAP) {
     prefIPs = mixed;
   }
   prefIPs.forEach((x, i) => {
-    multiPort(x.ip, x.port || 443, x.name || '优选IP-' + String(i + 1).padStart(2, '0'), x.relay === true);
+    multiPort(x.ip, x.port || 443, x.name || '优选IP-' + String(i + 1).padStart(2, '0'));
   });
   // 已移除 CF CIDR 随机补足（随机任播 IP 大量不可达，客户端测速 -1）：节点数量由实际来源决定，旧 KV 中的 fillCount 被忽略
   return nodes;
@@ -3403,19 +3366,15 @@ final, 🐟 漏网之鱼
 `;
 }
 
-// ★ 测活总开关（见 DEFAULT_CONFIG.probeAlive / 面板「节点测活」）：关闭时所有测活函数直接返回 true（不剔除任何节点）
-// 注意：由于 Cloudflare 运行时禁止 connect() 到 CF IP 段，对 CF 段 IP 的探测恒失败（抛
-// "proxy request failed, cannot connect to the specified address"），故测活仅在「第三方中转（非 CF 段）」
-// 场景有真实信息量；对 CF 段 IP 关闭测活 = 避免把最优来源整体判死。
+// 测活总开关（面板「节点测活」/ 环境变量 PROBE_ALIVE）：关闭时所有测活函数直接返回 true，不剔除任何节点。
+// 目前只用于默认模式下「优选域名」的预检（filterAliveDomains）。Cloudflare 运行时禁止 connect() 到 CF IP 段，
+// 对 CF 段 IP 的 TCP 探测恒失败，因此 testProxyAlive 对 CF 段直接视为可用，实际检查的是「域名能否解析到 CF 段 IP」
 let PROBE_ALIVE_ENABLED = false;
 function setProbeAlive(v) { PROBE_ALIVE_ENABLED = (v === true || v === 'true' || v === '1' || v === 1); }
 
-// ★ 探测并发闸（见下面的 probeLimit）
-// 为什么必须有：Cloudflare Workers 每次调用**同时等待响应头的连接数上限是 6**（Free/Paid 相同，官方 limits 文档
-// "Simultaneous open connections"）。第 7 个连接不会报错，而是**排队**；而各测活函数用的是
-// Promise.race(conn.opened, 超时)，计时器在 connect() 调用那一刻就开始跑 ——
-// 于是排队的探测会「还没轮到建连就超时」→ 被误判为死节点（假死）。
-// 这里用信号量把并发压到 SAFE 以下，超时计时器改为「拿到令牌后才启动」，排队不再计入超时。
+// 探测并发闸：Cloudflare Workers 每次调用同时等待响应头的连接数上限是 6，第 7 个连接会排队而不是报错；
+// 探测函数的超时计时器从 connect() 调用时就开始，排队的探测会在轮到建连前超时并被误判为死节点。
+// 用信号量把并发压到上限以下，并让超时计时器在拿到令牌后才启动
 const PROBE_CONCURRENCY = 4;              // 留 2 个名额给 DoH fetch / KV / D1 等其它出网调用
 let probeRunning = 0;
 const probeWaiters = [];
@@ -3460,28 +3419,6 @@ async function testProxyAlive(server, port, timeoutMs) {
   } catch (e) { return false; }
 }
 
-// relay IP 双重测活：TCP 连通 + HTTP GET 返回 200/204 才算活（纯 TCP 通但 HTTP 不通的假活节点剔除）
-async function testRelayAlive(server, port, timeoutMs) {
-  if (!PROBE_ALIVE_ENABLED) return true;   // 测活关闭：不剔除
-  return testRelayAliveRaw(server, port, timeoutMs);
-}
-async function testRelayAliveRaw(server, port, timeoutMs) {
-  const ms = timeoutMs || 2500;
-  try {
-    const conn = connect({ hostname: server, port: port });
-    await Promise.race([conn.opened, new Promise((_, rej) => setTimeout(() => rej(new Error('tcp timeout')), ms))]);
-    // TCP 通后发 HTTP GET /，期望 200/204（反代服务应返回任意 HTTP 响应）
-    const writer = conn.writable.getWriter();
-    const reader = conn.readable.getReader();
-    await writer.write(new TextEncoder().encode('GET / HTTP/1.1\r\nHost: ' + server + '\r\nUser-Agent: Mozilla/5.0\r\nConnection: close\r\n\r\n'));
-    const chunk = await Promise.race([reader.read(), new Promise((_, rej) => setTimeout(() => rej(new Error('http timeout')), ms))]);
-    try { conn.close(); } catch (e) {}
-    const head = new TextDecoder().decode(chunk.value || new Uint8Array(0));
-    return /^HTTP\/1\.[01] (200|204)/.test(head);
-  } catch (e) { return false; }
-}
-
-
 // 域名可用性预检：DoH 解析首个 CF IP → TCP 测活，剔除死域名（NXDOMAIN / 解析到死 IP，客户端测速 -1 主因）。
 // 活域名仍按域名形式下发（保留客户端动态 DNS 解析拿最优边缘的优势）；结果 10 分钟缓存，避免每次订阅重测
 async function dohFirstCF(domain) {
@@ -3514,13 +3451,12 @@ async function filterAliveDomains(domainText) {
 }
 
 
-// 兜底入口节点（代码独立实现）：
-// 兜底入口节点（代码独立实现）：
+// 兜底入口节点：
 // 原生地址（当前访问域名）仅在面板「原生地址」开关（src.native）开启后追加——默认关闭不追加，
 // 与「地址来源」面板控制保持一致；
 // 内置地区反代（proxyip.*.cmliussss.net）不再自动下发为订阅节点
 // （需要反代时请通过「出站代理」或「反代/落地 IP」填写自己的中继服务）
-function appendFallbackNodes(nodes, rc, cap, colo) {
+function appendFallbackNodes(nodes, rc, cap) {
   if (nodes.length >= cap) return;
   const used = new Set();
   for (const n of nodes) {
@@ -3547,7 +3483,7 @@ function appendFallbackNodes(nodes, rc, cap, colo) {
 const NODE_CAP = 500;
 
 // 根据 UA 或指定格式生成订阅
-async function generateSubscription(cfg, requestUrl, format, ua, colo) {
+async function generateSubscription(cfg, requestUrl, format, ua) {
   // 兜底：path 为空或为 "/" 时一律回退 UUID（兼容 KV 残留旧值；Worker WS/xhttp 代理仅在 panelPath=cfg.path 处理）
   if (!cfg.path || cfg.path === '/' || cfg.path === '') cfg.path = cfg.uuid;
   // 筛选含 IPv6 时刷新官方 v6 网段（ips-v6，6 小时缓存节流；失败沿用内置/上次成功段）
@@ -3582,8 +3518,6 @@ async function generateSubscription(cfg, requestUrl, format, ua, colo) {
       const def = await resolvePreferredDomains(DEFAULT_PREFERRED_DOMAINS, 40, 240, false, true, wantV6);
       const seen = new Set(def.map(x => x.ip));
       resolved = [...def, ...resolved.filter(x => !seen.has(x.ip))];
-      if (!rc.optimizer) rc.optimizer = {};
-      rc.optimizer.fillCount = 0;   // 已移除随机补足：追加模式只合并真实来源节点
     }
   } else if (mode === '') {
     // 关闭（使用面板默认）：节点池由「地址来源」三项组装——
@@ -3664,7 +3598,7 @@ async function generateSubscription(cfg, requestUrl, format, ua, colo) {
   // 兜底入口节点：自定义订阅严格模式（仅下发框内节点）不追加，其余模式追加原生地址与地区反代入口；
   // 仅勾选 IPv6 时跳过（原生地址/反代均为 IPv4 域名，混入会破坏「只下发 IPv6」语义）
   const strictCustom = (mode === 'custom' && !(cfg.optimizer && cfg.optimizer.subIncludeDefault));
-  if (!strictCustom && !onlyV6) appendFallbackNodes(nodes, rc, cap, colo);
+  if (!strictCustom && !onlyV6) appendFallbackNodes(nodes, rc, cap);
   // 所有来源都没有产出节点时（如在线来源全部失败、自定义列表为空），用官方域名节点兜底，保证订阅不为空
   // （客户端不会收到「无效订阅」）；域名节点由客户端自行解析，IPv4 / IPv6 均可
   if (!nodes.length) {
@@ -4170,7 +4104,7 @@ pre.code{background:var(--bg2);border:1px solid var(--border);border-radius:8px;
       </div>
       <div class="card">
         <h3><span class="tick"></span>备份与恢复</h3>
-        <p class="hint" style="margin-top:0;margin-bottom:12px">以 JSON 格式导出全部面板设置（含协议、优选、筛选），可保存到本地或迁移到其他部署；导入后请点右下角「保存全部」生效。</p>
+        <p class="hint" style="margin-top:0;margin-bottom:12px">以 JSON 格式导出全部面板设置（含协议、优选、筛选），可保存到本地或迁移到其他部署；导入后请点右下角「保存全部」生效。<b>备份文件包含 UUID（节点身份，知道它即可使用你的节点），请妥善保管、不要分享；管理密码与 Trojan 密码不会导出。</b></p>
         <div class="inrow">
           <button class="btn" onclick="exportConfig()">导出配置</button>
           <button class="btn" onclick="$('importFile').click()">导入配置</button>
@@ -4186,7 +4120,7 @@ pre.code{background:var(--bg2);border:1px solid var(--border);border-radius:8px;
         <h3><span class="tick"></span>运行信息</h3>
         <div class="kv"><span class="k">面板版本</span><span class="v" id="aVer">—</span></div>
         <div class="kv"><span class="k">KV 持久化</span><span class="v" id="aKv">—</span></div>
-        <div class="kv"><span class="k">构建日期</span><span class="v">2026-09-30</span></div>
+        <div class="kv"><span class="k">构建日期</span><span class="v">2026-10-02</span></div>
       </div>
       <div class="danger-zone">
         <h3 style="margin-bottom:8px;color:var(--err)">危险操作</h3>
@@ -4939,7 +4873,7 @@ function testIpSource(src){
 }
 // 测试结果按「仅 TLS 端口」当前状态（含未保存的修改）展示实际会下发的节点，规则与服务端 buildNodes 一致：
 // 开启（或开启 ECH）时跳过明文端口；关闭时 443 节点另追加「名称·80」的 80 明文节点
-var HTTP_PORTS = [80, 8080, 8880, 2052, 2082, 2086, 2095];
+var HTTP_PORTS = /*@CFNEXT_HTTP_PORTS@*/null || [80, 8080, 8880, 2052, 2082, 2086, 2095];   // 服务端下发同一份明文端口表，这里的默认值仅作兜底
 var LAST_IPTEST = null;
 function tlsOnlyNow(){ return $('tls-only').checked || $('ech-on').checked; }
 function rerenderIpTest(){ if (LAST_IPTEST) renderIpTest(LAST_IPTEST.src, LAST_IPTEST.r); }
@@ -5190,7 +5124,7 @@ async function makeAuthToken(cfg) {
 async function requireAuth(request, cfg) {
   if (!cfg.admin) return false;
   const cookies = request.headers.get('Cookie') || '';
-  const m = cookies.match(/(?:^|;\s*)luma_auth=([^;]+)/);
+  const m = cookies.match(/(?:^|;\s*)cfnext_auth=([^;]+)/);
   if (!m) return false;
   const [exp, sig] = m[1].split('.');
   if (!exp || !sig || !/^\d+$/.test(exp) || Number(exp) < Date.now()) return false;
@@ -5240,7 +5174,7 @@ function safeNext(next, panelPath) {
   return (/^\/[^\/\\]/.test(next)) ? next : ('/' + panelPath);
 }
 function authCookie(token) {
-  return `luma_auth=${token}; Path=/; Max-Age=86400; HttpOnly; Secure; SameSite=Lax`;
+  return `cfnext_auth=${token}; Path=/; Max-Age=86400; HttpOnly; Secure; SameSite=Lax`;
 }
 // 返回给面板的配置：只含字段表登记的配置项，不下发管理密码明文；附带面板需要的派生信息
 function publicConfig(cfg, env) {
@@ -5265,7 +5199,7 @@ function formatConfigErrors(errors) {
 // 生成订阅：/sub 与面板预览共用同一流程，保证预览与客户端实际拿到的一致
 async function serveSubscription(request, env, cfg, fmt) {
   const UA = request.headers.get('User-Agent') || '';
-  return generateSubscription(Object.assign({}, cfg), request.url, fmt, UA, request.cf && request.cf.colo);
+  return generateSubscription(Object.assign({}, cfg), request.url, fmt, UA);
 }
 
 // 面板页面：注入字段表与共用校验函数（每个 isolate 只组装一次）。
@@ -5274,7 +5208,8 @@ function panelPage() {
   if (!PANEL_PAGE) {
     PANEL_PAGE = PANEL_HTML
       .replace('/*@CFNEXT_SCHEMA@*/null', () => JSON.stringify(clientSchema()).replace(/</g, '\\u003c'))
-      .replace('/*@CFNEXT_CHECK@*/null', () => '(' + checkFieldValue.toString() + ')');
+      .replace('/*@CFNEXT_CHECK@*/null', () => '(' + checkFieldValue.toString() + ')')
+      .replace('/*@CFNEXT_HTTP_PORTS@*/null', () => JSON.stringify([...HTTP_PORTS]));
   }
   return PANEL_PAGE;
 }
@@ -5357,7 +5292,7 @@ async function handleRequest(request, env) {
   }
 
   // ---------- 订阅 ----------
-  if (isSubRoot && (segs[1] === 'sub' || (segs.length === 1 && !isBrowserUA(UA) && !UA.startsWith('luma')))) {
+  if (isSubRoot && (segs[1] === 'sub' || (segs.length === 1 && !isBrowserUA(UA)))) {
     const fmt = segs.length >= 3 ? segs[2] : '';
     try {
       const sub = await serveSubscription(request, env, cfg, fmt);
@@ -5428,7 +5363,7 @@ async function handleRequest(request, env) {
       if (request.method !== 'POST') return json({ ok: false, msg: '仅支持 POST' }, 405);
       // 会话令牌是无状态的签名令牌，无法在服务端单独吊销：这里清除浏览器中的 Cookie。
       // 要让已签发的令牌全部失效，修改管理密码或 UUID 即可（签名密钥随之变化）
-      return json({ ok: true, msg: '已退出登录' }, 200, { 'Set-Cookie': 'luma_auth=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax' });
+      return json({ ok: true, msg: '已退出登录' }, 200, { 'Set-Cookie': 'cfnext_auth=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax' });
     }
 
     if (apiName === 'reset') {
@@ -5513,7 +5448,7 @@ function withSecurityHeaders(res) {
 }
 
 export default {
-  async fetch(request, env, ctx) {
-    return withSecurityHeaders(await handleRequest(request, Object.assign({}, env, { _ctx: ctx })));
+  async fetch(request, env) {
+    return withSecurityHeaders(await handleRequest(request, env));
   }
 };

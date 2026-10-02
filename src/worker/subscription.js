@@ -1,16 +1,12 @@
-// ★ 测活总开关（见 DEFAULT_CONFIG.probeAlive / 面板「节点测活」）：关闭时所有测活函数直接返回 true（不剔除任何节点）
-// 注意：由于 Cloudflare 运行时禁止 connect() 到 CF IP 段，对 CF 段 IP 的探测恒失败（抛
-// "proxy request failed, cannot connect to the specified address"），故测活仅在「第三方中转（非 CF 段）」
-// 场景有真实信息量；对 CF 段 IP 关闭测活 = 避免把最优来源整体判死。
+// 测活总开关（面板「节点测活」/ 环境变量 PROBE_ALIVE）：关闭时所有测活函数直接返回 true，不剔除任何节点。
+// 目前只用于默认模式下「优选域名」的预检（filterAliveDomains）。Cloudflare 运行时禁止 connect() 到 CF IP 段，
+// 对 CF 段 IP 的 TCP 探测恒失败，因此 testProxyAlive 对 CF 段直接视为可用，实际检查的是「域名能否解析到 CF 段 IP」
 let PROBE_ALIVE_ENABLED = false;
 function setProbeAlive(v) { PROBE_ALIVE_ENABLED = (v === true || v === 'true' || v === '1' || v === 1); }
 
-// ★ 探测并发闸（见下面的 probeLimit）
-// 为什么必须有：Cloudflare Workers 每次调用**同时等待响应头的连接数上限是 6**（Free/Paid 相同，官方 limits 文档
-// "Simultaneous open connections"）。第 7 个连接不会报错，而是**排队**；而各测活函数用的是
-// Promise.race(conn.opened, 超时)，计时器在 connect() 调用那一刻就开始跑 ——
-// 于是排队的探测会「还没轮到建连就超时」→ 被误判为死节点（假死）。
-// 这里用信号量把并发压到 SAFE 以下，超时计时器改为「拿到令牌后才启动」，排队不再计入超时。
+// 探测并发闸：Cloudflare Workers 每次调用同时等待响应头的连接数上限是 6，第 7 个连接会排队而不是报错；
+// 探测函数的超时计时器从 connect() 调用时就开始，排队的探测会在轮到建连前超时并被误判为死节点。
+// 用信号量把并发压到上限以下，并让超时计时器在拿到令牌后才启动
 const PROBE_CONCURRENCY = 4;              // 留 2 个名额给 DoH fetch / KV / D1 等其它出网调用
 let probeRunning = 0;
 const probeWaiters = [];
@@ -55,28 +51,6 @@ async function testProxyAlive(server, port, timeoutMs) {
   } catch (e) { return false; }
 }
 
-// relay IP 双重测活：TCP 连通 + HTTP GET 返回 200/204 才算活（纯 TCP 通但 HTTP 不通的假活节点剔除）
-async function testRelayAlive(server, port, timeoutMs) {
-  if (!PROBE_ALIVE_ENABLED) return true;   // 测活关闭：不剔除
-  return testRelayAliveRaw(server, port, timeoutMs);
-}
-async function testRelayAliveRaw(server, port, timeoutMs) {
-  const ms = timeoutMs || 2500;
-  try {
-    const conn = connect({ hostname: server, port: port });
-    await Promise.race([conn.opened, new Promise((_, rej) => setTimeout(() => rej(new Error('tcp timeout')), ms))]);
-    // TCP 通后发 HTTP GET /，期望 200/204（反代服务应返回任意 HTTP 响应）
-    const writer = conn.writable.getWriter();
-    const reader = conn.readable.getReader();
-    await writer.write(new TextEncoder().encode('GET / HTTP/1.1\r\nHost: ' + server + '\r\nUser-Agent: Mozilla/5.0\r\nConnection: close\r\n\r\n'));
-    const chunk = await Promise.race([reader.read(), new Promise((_, rej) => setTimeout(() => rej(new Error('http timeout')), ms))]);
-    try { conn.close(); } catch (e) {}
-    const head = new TextDecoder().decode(chunk.value || new Uint8Array(0));
-    return /^HTTP\/1\.[01] (200|204)/.test(head);
-  } catch (e) { return false; }
-}
-
-
 // 域名可用性预检：DoH 解析首个 CF IP → TCP 测活，剔除死域名（NXDOMAIN / 解析到死 IP，客户端测速 -1 主因）。
 // 活域名仍按域名形式下发（保留客户端动态 DNS 解析拿最优边缘的优势）；结果 10 分钟缓存，避免每次订阅重测
 async function dohFirstCF(domain) {
@@ -109,13 +83,12 @@ async function filterAliveDomains(domainText) {
 }
 
 
-// 兜底入口节点（代码独立实现）：
-// 兜底入口节点（代码独立实现）：
+// 兜底入口节点：
 // 原生地址（当前访问域名）仅在面板「原生地址」开关（src.native）开启后追加——默认关闭不追加，
 // 与「地址来源」面板控制保持一致；
 // 内置地区反代（proxyip.*.cmliussss.net）不再自动下发为订阅节点
 // （需要反代时请通过「出站代理」或「反代/落地 IP」填写自己的中继服务）
-function appendFallbackNodes(nodes, rc, cap, colo) {
+function appendFallbackNodes(nodes, rc, cap) {
   if (nodes.length >= cap) return;
   const used = new Set();
   for (const n of nodes) {
@@ -142,7 +115,7 @@ function appendFallbackNodes(nodes, rc, cap, colo) {
 const NODE_CAP = 500;
 
 // 根据 UA 或指定格式生成订阅
-async function generateSubscription(cfg, requestUrl, format, ua, colo) {
+async function generateSubscription(cfg, requestUrl, format, ua) {
   // 兜底：path 为空或为 "/" 时一律回退 UUID（兼容 KV 残留旧值；Worker WS/xhttp 代理仅在 panelPath=cfg.path 处理）
   if (!cfg.path || cfg.path === '/' || cfg.path === '') cfg.path = cfg.uuid;
   // 筛选含 IPv6 时刷新官方 v6 网段（ips-v6，6 小时缓存节流；失败沿用内置/上次成功段）
@@ -177,8 +150,6 @@ async function generateSubscription(cfg, requestUrl, format, ua, colo) {
       const def = await resolvePreferredDomains(DEFAULT_PREFERRED_DOMAINS, 40, 240, false, true, wantV6);
       const seen = new Set(def.map(x => x.ip));
       resolved = [...def, ...resolved.filter(x => !seen.has(x.ip))];
-      if (!rc.optimizer) rc.optimizer = {};
-      rc.optimizer.fillCount = 0;   // 已移除随机补足：追加模式只合并真实来源节点
     }
   } else if (mode === '') {
     // 关闭（使用面板默认）：节点池由「地址来源」三项组装——
@@ -259,7 +230,7 @@ async function generateSubscription(cfg, requestUrl, format, ua, colo) {
   // 兜底入口节点：自定义订阅严格模式（仅下发框内节点）不追加，其余模式追加原生地址与地区反代入口；
   // 仅勾选 IPv6 时跳过（原生地址/反代均为 IPv4 域名，混入会破坏「只下发 IPv6」语义）
   const strictCustom = (mode === 'custom' && !(cfg.optimizer && cfg.optimizer.subIncludeDefault));
-  if (!strictCustom && !onlyV6) appendFallbackNodes(nodes, rc, cap, colo);
+  if (!strictCustom && !onlyV6) appendFallbackNodes(nodes, rc, cap);
   // 所有来源都没有产出节点时（如在线来源全部失败、自定义列表为空），用官方域名节点兜底，保证订阅不为空
   // （客户端不会收到「无效订阅」）；域名节点由客户端自行解析，IPv4 / IPv6 均可
   if (!nodes.length) {

@@ -20,10 +20,6 @@ const CLOUDFLARE_CIDRS_V6 = [
   '2400:cb00::/32', '2606:4700::/32', '2803:f800::/32', '2405:b500::/32',
   '2405:8100::/32', '2a06:98c0::/29', '2c0f:f248::/32'
 ];
-// IPv6 随机补足/随机优选专用段（筛选含 IPv6 时使用，与 IPv4 补足同一可达性原则）
-const REACHABLE_CIDRS_V6 = [
-  '2606:4700::/32', '2400:cb00::/32', '2803:f800::/32', '2a06:98c0::/29', '2c0f:f248::/32'
-];
 // Cloudflare 官方公开 IPv6 网段（https://www.cloudflare.com/ips-v6/ 动态拉取，6 小时缓存；
 // 失败回退内置段；实测官方段随机地址 TCP+TLS 全端口可用，与 IPv4 补足同机制）
 let OFFICIAL_V6_CIDRS = CLOUDFLARE_CIDRS_V6.slice();
@@ -86,9 +82,3 @@ const REGION_CN = {
 
 // IPv4+IPv6 混合时只对前 N 个优选域名查询 AAAA（控制子请求数，见 generateSubscription 默认模式）
 const V6_DOMAIN_LIMIT = 12;
-// 优选 API / 地区池中的非 CF 段 IP（如 bestcf 地区池，全部为第三方中转服务器）一律按 CF 段过滤丢弃：
-// 第三方中转可获知部署域名与连接元数据，安全起见不再信任（仅「自定义订阅 · 仅自定义节点」模式原样下发，用户自担）
-function isTrustedRegionPool(url) {
-  return false;
-}
-

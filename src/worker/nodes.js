@@ -143,7 +143,7 @@ async function resolvePreferredDomains(domainsStr, limitPerDomain = 100, maxTota
   // 每个条目返回一个有序 IP 数组
   const perItem = await Promise.all(list.map(async (d) => {
     if (d.includes('://')) {
-      // CFBox 复刻增强：sub:// 子订阅前缀——后面跟 base64(订阅URL) 或直接 URL
+      // sub:// 子订阅前缀（与常见订阅转换器 / 优选工具的写法一致）——后面跟 base64(订阅URL) 或直接 URL
       if (d.startsWith('sub://')) {
         let real = d.slice(6);
         if (/^[A-Za-z0-9+/=]+$/.test(real) && real.length % 4 === 0) {
@@ -180,10 +180,8 @@ async function resolvePreferredDomains(domainsStr, limitPerDomain = 100, maxTota
         const seen = new Set();
         const counters = {};
         const rec = [];
-        // 中转 IP 放行标记：isTrustedRegionPool 恒为 false，所有来源都按 CF 段过滤（保留以兼容 relay 字段）
-        const relay = isTrustedRegionPool(d);
         // 追加/默认模式强制 CF 段；仅自定义模式（filterCF=false）原样下发
-        const pass = (ip) => !filterCF || isCloudflareIP(ip) || relay;
+        const pass = (ip) => !filterCF || isCloudflareIP(ip);
         // CSV 优选表解析（对齐 edgetunnel 请求优选API）：
         // ① wetest 风格：IP地址,端口,数据中心[,TLS]（TLS 列非 true 跳过，避免明文端口无法转发）
         // ② hostmonit 风格：IP,延迟,下载速度 → 命名「CF优选 {延迟}ms {速度}MB/s」
@@ -214,14 +212,14 @@ async function resolvePreferredDomains(domainsStr, limitPerDomain = 100, maxTota
               seen.add(key);
               let nm = remarkIdx !== -1 && cols[remarkIdx] ? cols[remarkIdx] : '';
               if (!nm && delayIdx !== -1 && speedIdx !== -1) nm = 'CF优选 ' + (cols[delayIdx] || '') + 'ms ' + (cols[speedIdx] || '') + 'MB/s';
-              if (nm) { counters[nm] = (counters[nm] || 0) + 1; rec.push({ ip, port, name: nm + '-' + String(counters[nm]).padStart(2, '0'), ...(relay ? { relay: true } : {}) }); }
-              else rec.push({ ip, port, name: '', ...(relay ? { relay: true } : {}) });
+              if (nm) { counters[nm] = (counters[nm] || 0) + 1; rec.push({ ip, port, name: nm + '-' + String(counters[nm]).padStart(2, '0') }); }
+              else rec.push({ ip, port, name: '' });
             }
             await storeUrlCache(ck, rec);
             return rec.slice();
           }
         }
-        // HTML 线路表解析（wetest 等页面，对齐 CFBox）：<td data-label="线路名称">…</td><td data-label="优选地址">IP[:端口]</td>…
+        // HTML 线路表解析（wetest 等页面）：<td data-label="线路名称">…</td><td data-label="优选地址">IP[:端口]</td>…
         if (content.includes('<tr') && content.includes('data-label')) {
           for (const row of content.match(/<tr[\s\S]*?<\/tr>/g) || []) {
             if (rec.length >= limitPerDomain) break;
@@ -240,8 +238,8 @@ async function resolvePreferredDomains(domainsStr, limitPerDomain = 100, maxTota
             seen.add(key);
             // 名称保留线路名称/数据中心（含「移动/联通/电信」时面板 isp 筛选生效）
             const nm = (cells['线路名称'] || cells['数据中心'] || '线路').trim();
-            if (nm) { counters[nm] = (counters[nm] || 0) + 1; rec.push({ ip, port, name: nm + '-' + String(counters[nm]).padStart(2, '0'), ...(relay ? { relay: true } : {}) }); }
-            else rec.push({ ip, port, name: '', ...(relay ? { relay: true } : {}) });
+            if (nm) { counters[nm] = (counters[nm] || 0) + 1; rec.push({ ip, port, name: nm + '-' + String(counters[nm]).padStart(2, '0') }); }
+            else rec.push({ ip, port, name: '' });
           }
           await storeUrlCache(ck, rec);
           return rec.slice();
@@ -260,8 +258,8 @@ async function resolvePreferredDomains(domainsStr, limitPerDomain = 100, maxTota
           let nm = '';
           const hashIdx = line.indexOf('#');
           if (hashIdx >= 0) { try { nm = decodeURIComponent(line.slice(hashIdx + 1).trim()); } catch (e) { nm = line.slice(hashIdx + 1).trim(); } }
-          if (nm) { counters[nm] = (counters[nm] || 0) + 1; rec.push({ ip: host, port, name: nm + '-' + String(counters[nm]).padStart(2, '0'), ...(relay ? { relay: true } : {}) }); }
-          else rec.push({ ip: host, port, name: '', ...(relay ? { relay: true } : {}) });
+          if (nm) { counters[nm] = (counters[nm] || 0) + 1; rec.push({ ip: host, port, name: nm + '-' + String(counters[nm]).padStart(2, '0') }); }
+          else rec.push({ ip: host, port, name: '' });
         }
         // 纯文本行：IP / IP:端口 / IP:端口#名称（如 bestcf 的 "IP:端口#地区随机 | 香港 HK | HKG | ..."）
         for (const raw of content.split(/\r?\n/)) {
@@ -278,7 +276,7 @@ async function resolvePreferredDomains(domainsStr, limitPerDomain = 100, maxTota
           // 【新增】用户自定义名称（不含中文、不含 |）直接保留原样，例如 JP-A-147 / CF-B-163
           const rawName = (m[3] || '').trim();
           if (rawName && !/[\u4e00-\u9fa5]/.test(rawName) && !rawName.includes('|')) {
-            rec.push({ ip, port, name: rawName, ...(relay ? { relay: true } : {}) });
+            rec.push({ ip, port, name: rawName });
             continue;
           }
           let nm = '';
@@ -299,9 +297,9 @@ async function resolvePreferredDomains(domainsStr, limitPerDomain = 100, maxTota
               }
             }
           }
-          if (nm) { counters[nm] = (counters[nm] || 0) + 1; rec.push({ ip, port, name: nm + '-' + String(counters[nm]).padStart(2, '0'), ...(relay ? { relay: true } : {}) }); }
+          if (nm) { counters[nm] = (counters[nm] || 0) + 1; rec.push({ ip, port, name: nm + '-' + String(counters[nm]).padStart(2, '0') }); }
           // 提取不到地区的中文名称（如「自有-A」）原样保留（截断 40 字符），不再丢弃成「优选IP-XX」
-          else rec.push({ ip, port, name: rawName.slice(0, 40), ...(relay ? { relay: true } : {}) });
+          else rec.push({ ip, port, name: rawName.slice(0, 40) });
         }
         // 已移除「地区回退生成」：源内无可用 IP 时不再用随机 CF IP 冒充该地区节点
         await storeUrlCache(ck, rec);
@@ -374,11 +372,11 @@ async function buildNodes(cfg, cap = NODE_CAP) {
   // 其它模式（默认/追加/随机）入口必须是 CF 段——非 CF IP 无法转发到 Worker（历史 v2rayNG 全 -1 根因）
   const allowNonCF = (mode === 'custom' && !(cfg.optimizer && cfg.optimizer.subIncludeDefault));
   // 节点形态统一按 1.0.6 机制（方案 B）：所有模式端口原样单端口下发（固定 443、不随机 TLS 端口、不追加明文端口变体）
-  const push = (server, port, name, trusted) => {
+  const push = (server, port, name) => {
     if (nodes.length >= cap) return;   // 生成过程限流：避免多协议膨胀超 Worker CPU
     // 入口 IP 硬性要求：非 CF 段 IP 无法转发到 Worker，直接丢弃；
-    // 例外：仅「自定义订阅 · 仅自定义节点」（allowNonCF）按用户填写原样放行；trusted 标记目前不会出现（isTrustedRegionPool 恒为 false）
-    if (isValidIp(server) && !isCloudflareIP(server) && !allowNonCF && !trusted) return;
+    // 例外：仅「自定义订阅 · 仅自定义节点」（allowNonCF）按用户填写原样放行
+    if (isValidIp(server) && !isCloudflareIP(server) && !allowNonCF) return;
     const key = server + ':' + port;   // 按 服务器:端口 去重（单端口机制：同 IP 同端口仅下发一次）
     if (used.has(key)) return;
     used.add(key);
@@ -392,10 +390,10 @@ async function buildNodes(cfg, cap = NODE_CAP) {
     if (cfg.enableXhttp && isTls) nodes.push(vlessNode(cfg, server, finalPort, nm.x, { type: 'xhttp' }));  // XHTTP 仅 TLS 端口
   };
   // 按源端口（通常 443）下发；关闭「仅 TLS 端口」时，443 节点另追加一个 80 明文端口节点（名称加「·80」）
-  const multiPort = (server, port, name, trusted) => {
+  const multiPort = (server, port, name) => {
     port = Number(port) || 443;
-    push(server, port, name, trusted);
-    if (!cfg.tlsOnly && port === 443) push(server, 80, name + '·80', trusted);
+    push(server, port, name);
+    if (!cfg.tlsOnly && port === 443) push(server, 80, name + '·80');
   };
   if (mode === 'random') {
     // 生成数量以面板「随机优选数量」为准；节点上限（cap）只做封顶
@@ -442,7 +440,7 @@ async function buildNodes(cfg, cap = NODE_CAP) {
     prefIPs = mixed;
   }
   prefIPs.forEach((x, i) => {
-    multiPort(x.ip, x.port || 443, x.name || '优选IP-' + String(i + 1).padStart(2, '0'), x.relay === true);
+    multiPort(x.ip, x.port || 443, x.name || '优选IP-' + String(i + 1).padStart(2, '0'));
   });
   // 已移除 CF CIDR 随机补足（随机任播 IP 大量不可达，客户端测速 -1）：节点数量由实际来源决定，旧 KV 中的 fillCount 被忽略
   return nodes;

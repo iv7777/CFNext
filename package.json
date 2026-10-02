@@ -6,6 +6,7 @@
   "scripts": {
     "build": "node build.mjs",
     "check": "node build.mjs --check && node --check CFNext.js",
-    "test": "node build.mjs --check && node --test"
+    "test": "node build.mjs --check && node --test",
+    "lint": "npx --yes eslint@10.1.0 -c eslint.config.mjs CFNext.js src/panel/panel.js"
   }
 }

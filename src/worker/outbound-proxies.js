@@ -125,7 +125,7 @@ function ssCipherAlgo(method) {
 // CF Workers 的 crypto.subtle 官方支持矩阵不含 CHACHA20-POLY1305（SS 最常用的 chacha20-ietf-poly1305
 // 用 WebCrypto 会抛 NotSupportedError → 出站全超时），故 chacha20-poly1305（RFC 8439）与
 // HKDF-SHA1 用纯 JS 实现，不依赖 WebCrypto；AES-GCM 保留 WebCrypto（CF 明确支持、性能好）。
-// （rotl32 复用文件已有的 MD5 实现 737 行 function rotl32）
+// （rotl32 复用 utils.js 中 MD5 实现的同名函数）
 
 // SHA-1（FIPS 180-4）
 function sha1Bytes(data) {
@@ -370,18 +370,6 @@ async function connectViaShadowsocks(proxy, target) {
 }
 
 
-async function readN(reader, n) {
-  const out = new Uint8Array(n);
-  let got = 0;
-  while (got < n) {
-    const { done, value } = await reader.read();
-    if (done) throw new Error('连接被关闭');
-    const need = n - got;
-    out.set(value.subarray(0, Math.min(need, value.length)), got);
-    got += Math.min(need, value.length);
-  }
-  return out;
-}
 async function readUntilCRLFCRLF(reader) {
   let buf = new Uint8Array(0);
   while (buf.length < 65536) {

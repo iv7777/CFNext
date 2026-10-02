@@ -6,6 +6,39 @@
 
 ---
 
+# 更新日志 _V2.0.13
+
+### 🐛 BUG 处理
+
+1. 修复「仅 TLS 端口」关闭后，明文端口（80 等）的 Trojan 节点在 Clash / sing-box / Surge / Loon / QuanX 中被错误地启用 TLS 而无法连接
+2. 修复 Surfboard 订阅把 VLESS 节点改写成「密码 = UUID」的 Trojan、与服务端实际密码不符且未启用 Trojan 时全部失效的问题：现在只输出真实的 Trojan TLS 节点，未启用 Trojan 时给出明确提示
+3. 修复只启用 XHTTP 时 sing-box 配置包含空选择器、无法加载的问题（改为明确报错）
+4. 修复出站代理密码含未编码 `@` 时主机名被截断；SOCKS5 / HTTP CONNECT 现在能正确处理 IPv6 目标
+5. 协议头解析加入边界检查：数据不足时等待后续分片，不再按截断的地址建连；XHTTP 首个请求体块过短时累积后再解析；Trojan UDP、VLESS MUX 命令被明确拒绝；面板关闭 VLESS 后服务端也不再接受 VLESS 连接
+6. 修复含中文的长错误信息超过 WebSocket 关闭原因 123 字节上限、导致连接不被关闭的问题
+7. KV 读取失败或配置损坏时不再当作「没有配置」：此前未设置环境变量 `U` 会每次请求随机生成 UUID，且保存会用默认值覆盖真实配置；现在保存 / 重置被拒绝，没有有效 UUID 时返回 503
+
+### 🔒 安全
+
+- Clash 模板不再使用公开的默认凭据：SS 监听密码、`authentication`、控制接口 `secret` 按 UUID 为每个部署派生；`external-controller-cors` 不再是 `*`；DNS 仅监听 `127.0.0.1:1053`
+- 管理密码在 KV 中保存为加盐 PBKDF2-SHA256 摘要（旧版明文在下次保存时自动升级）；Trojan 密码不再写入导出的备份文件
+- `/login`、`/version` 只对知道面板路径的人可用（面板入口跳转自带 `?next=`），直接访问返回 404；IPv6 登录失败按 /64 计数；限速表满时不再整表清空
+- 面板与登录页加入 CSP、`X-Frame-Options`、`nosniff`、`Referrer-Policy`；二维码脚本带 SRI 校验；新增「退出登录」，登录 Cookie 更名为 `cfnext_auth`（升级后需重新登录一次）
+- 保存配置时，与环境变量相同的值不再写入 KV（此前一次保存就会把 `PROXYIP`、`TROJAN_PASSWORD`、`ALPN` 等固化进 KV，之后修改环境变量被静默忽略）
+
+### ⚡ 性能与稳定
+
+- DoH 查询改为 Cloudflare 优先、失败才换下一个端点（超过 0.7 秒未返回时提前并发下一个）；反代 / 落地域名解析并发合并、失败缓存 30 秒，冷解析从 6 个子请求降到 2 个
+- HostMonit / uouin / 自定义优选 API 的结果在同一机房内通过 Cache API 共享 10 分钟；缓存表限制大小
+- 官方 IPv6 网段拉取失败后 5 分钟内不再重试
+
+### 🧹 代码与工程
+
+- `src/worker.js` 拆分为 `src/worker/*.js`（构建产物不变）；清理无用代码与过期注释；面板的明文端口表改由服务端注入
+- 新增 MD5 / SHA-224 / HKDF / ChaCha20-Poly1305 等已知答案测试与协议头模糊测试（测试 32 → 57 项）；CI 增加 eslint 静态检查并收紧权限
+
+---
+
 # 更新日志 _V2.0.12
 
 ### ✨ 更新内容
@@ -268,7 +301,7 @@
 | 项 | 内容 |
 |---|---|
 | 项目名称 | **CFNext 订阅管理器** |
-| 当前版本 | v2.0.12 |
+| 当前版本 | v2.0.13 |
 | 运行环境 | Cloudflare Workers / Pages |
 | 部署形态 | 单文件 Worker/Pages（`CFNext.js`，由 `src/` 构建生成，见「九、开发与构建」） |
 | 数据存储 | Cloudflare KV（绑定变量 **K**）；未绑定时面板无法保存，仅环境变量生效 |
@@ -464,20 +497,23 @@
 
 | 路径 | 内容 |
 |---|---|
-| `src/worker.js` | Worker 全部服务端逻辑：代理、订阅生成、配置字段表 `CONFIG_SCHEMA`、路由与管理 API |
+| `src/worker.js` | 入口：环境变量说明与 `// @include worker/xxx.js` 清单，构建时按顺序拼接 |
+| `src/worker/*.js` | 服务端逻辑，按主题拆分：`config-schema`（字段表 `CONFIG_SCHEMA`）、`config`（加载 / 保存）、`protocol`（VLESS / Trojan 头、DoH）、`outbound-proxies` / `relay`（出站与反代）、`proxy`（WS / XHTTP）、`ip-sources` / `nodes`（优选来源与节点生成）、`formats`（各客户端格式）、`subscription`、`router`（鉴权、路由、管理 API）等 |
 | `src/panel/panel.html` | 管理面板页面结构（`@include` 引入样式与脚本） |
 | `src/panel/panel.css` | 面板样式（日间 / 夜间主题） |
 | `src/panel/panel.js` | 面板前端脚本（由字段表驱动的表单回填、收集、校验与错误提示） |
 | `src/panel/login.html` | 登录页 |
-| `build.mjs` | 零依赖构建脚本：把面板内联进 `src/worker.js`，输出 `CFNext.js` |
+| `build.mjs` | 零依赖构建脚本：拼接 `src/worker/*.js`、内联面板页面，输出 `CFNext.js` |
+| `eslint.config.mjs` | 静态检查配置（`npm run lint`，CI 中运行） |
 | `test/` | `node:test` 测试（模拟 KV 与 Workers 运行时，无需安装依赖） |
 
 ```bash
 node build.mjs          # 修改 src/ 后重新生成 CFNext.js（需 Node.js 18+）
 npm test                # 校验 CFNext.js 与 src/ 同步，并运行测试
+npm run lint            # eslint 静态检查（通过 npx 获取，仓库本身仍无依赖）
 ```
 
-**新增一个面板配置项**：在 `src/worker.js` 的 `CONFIG_SCHEMA` 中加一行（字段路径、类型、默认值、面板控件 id、校验规则），再在 `src/panel/panel.html` 放一个同 id 的控件即可——默认值、KV 读写白名单、保存校验、面板回填 / 收集 / 未保存标记 / 字段级错误提示都会自动生效；服务端通过 `cfg.<字段>` 读取。
+**新增一个面板配置项**：在 `src/worker/config-schema.js` 的 `CONFIG_SCHEMA` 中加一行（字段路径、类型、默认值、面板控件 id、校验规则），再在 `src/panel/panel.html` 放一个同 id 的控件即可——默认值、KV 读写白名单、保存校验、面板回填 / 收集 / 未保存标记 / 字段级错误提示都会自动生效；服务端通过 `cfg.<字段>` 读取。
 
 > 请勿直接编辑 `CFNext.js`：CI 会检查它是否与 `src/` 同步。
 
