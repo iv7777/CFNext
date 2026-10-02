@@ -1014,7 +1014,9 @@ function parseProxyAddress(addr) {
   if (type === 'ss') return parseSsProxy(rest);
   let user = '', pass = '';
   if (rest.includes('@')) {
-    const [u, h] = rest.split('@');
+    // 以最后一个 @ 分隔凭据与主机：密码中未编码的 @ 不会把主机名截断
+    const at = rest.lastIndexOf('@');
+    const u = rest.slice(0, at), h = rest.slice(at + 1);
     // 修复：用户名/密码可能经 URL 编码（密码含 %40/@、%28/() 等特殊字符时），解码后再用于认证，
     // 否则 socks5 用户名密码 / HTTP Basic 认证会失败
     const dec = (s) => { try { return decodeURIComponent(s); } catch (e) { return s; } };
@@ -1157,15 +1159,21 @@ async function saveConfig(env, cfg) {
 // VLESS / Trojan 请求头解析
 // ---------------------------------------------------------------------------
 function readAddress(data, view, offset, atyp) {
+  // 数据不足一律抛「头部过短」：WS / XHTTP 据此继续等待后续分片，而不是因越界异常直接断开连接
+  const need = (n) => { if (offset + n > data.byteLength) throw new Error('VLESS 头部过短'); };
   if (atyp === 1) { // IPv4
+    need(4);
     return { addr: `${view.getUint8(offset)}.${view.getUint8(offset + 1)}.${view.getUint8(offset + 2)}.${view.getUint8(offset + 3)}`, len: 4 };
   }
   if (atyp === 2) { // 域名
+    need(1);
     const len = view.getUint8(offset);
+    need(1 + len);
     const bytes = data.subarray(offset + 1, offset + 1 + len);
     return { addr: TD.decode(bytes), len: 1 + len };
   }
   if (atyp === 3) { // IPv6
+    need(16);
     const bytes = data.subarray(offset, offset + 16);
     return { addr: formatIPv6(bytes), len: 16 };
   }
@@ -1199,7 +1207,7 @@ function parseVlessHeader(data, cfg) {
   if (offset >= data.byteLength) throw new Error('VLESS 头部过短');
   const addonsLen = view.getUint8(offset); offset += 1;
   offset += addonsLen;
-  if (offset + 3 > data.byteLength) throw new Error('VLESS 头部过短');
+  if (offset + 4 > data.byteLength) throw new Error('VLESS 头部过短');   // 命令(1) + 端口(2) + 地址类型(1)
   const command = view.getUint8(offset); offset += 1;
   const port = view.getUint16(offset); offset += 2;
   const atyp = view.getUint8(offset); offset += 1;
@@ -1220,20 +1228,26 @@ function parseTrojanHeader(data) {
   const command = view.getUint8(offset); offset += 1;   // CMD
   const atyp = view.getUint8(offset); offset += 1;      // ATYP（Trojan 用 SOCKS5 编码：1=IPv4, 3=域名, 4=IPv6）
   let addr, len;
+  const need = (n) => { if (offset + n > data.byteLength) throw new Error('Trojan 头部过短'); };
   if (atyp === 1) {
+    need(4);
     addr = `${view.getUint8(offset)}.${view.getUint8(offset + 1)}.${view.getUint8(offset + 2)}.${view.getUint8(offset + 3)}`;
     len = 4;
   } else if (atyp === 3) {
+    need(1);
     const l = view.getUint8(offset);
+    need(1 + l);
     addr = TD.decode(data.subarray(offset + 1, offset + 1 + l));
     len = 1 + l;
   } else if (atyp === 4) {
+    need(16);
     addr = formatIPv6(data.subarray(offset, offset + 16));
     len = 16;
   } else {
     throw new Error('无法识别的地址类型');
   }
   offset += len;
+  need(4);                                              // DST.PORT(2) + 尾部 CRLF(2)
   const port = view.getUint16(offset); offset += 2;     // DST.PORT
   offset += 2;                                    // 尾部 CRLF
   return { command, port, addr, password: TD.decode(data.subarray(0, 56)), headerLength: offset };
@@ -1449,6 +1463,9 @@ async function connectViaSocks5(proxy, target) {
   let connReq;
   if (/^\d+\.\d+\.\d+\.\d+$/.test(target.hostname)) {
     connReq = new Uint8Array([5, 1, 0, 1, ...target.hostname.split('.').map(Number), (target.port >> 8) & 255, target.port & 255]);
+  } else if (target.hostname.indexOf(':') >= 0 && isValidIp(target.hostname)) {
+    // IPv6 字面量用 ATYP=4（16 字节），不能当域名发送
+    connReq = new Uint8Array([5, 1, 0, 4, ...ipv6ToBytes(target.hostname), (target.port >> 8) & 255, target.port & 255]);
   } else {
     // 域名模式
     connReq = new Uint8Array([5, 1, 0, 3, addrBytes.length, ...addrBytes, (target.port >> 8) & 255, target.port & 255]);
@@ -1476,7 +1493,8 @@ async function connectViaHttpProxy(proxy, target) {
   const reader = socket.readable.getReader();
   let authHeader = '';
   if (proxy.user) authHeader = 'Proxy-Authorization: Basic ' + b64FromBytes(TE.encode(`${proxy.user}:${proxy.pass}`)) + '\r\n';
-  const connectReq = `CONNECT ${target.hostname}:${target.port} HTTP/1.1\r\nHost: ${target.hostname}:${target.port}\r\n${authHeader}\r\n`;
+  const authority = (target.hostname.indexOf(':') >= 0 ? '[' + target.hostname + ']' : target.hostname) + ':' + target.port;   // IPv6 须加方括号
+  const connectReq = `CONNECT ${authority} HTTP/1.1\r\nHost: ${authority}\r\n${authHeader}\r\n`;
   await writer.write(TE.encode(connectReq));
   // 读取响应头直到空行；空行后同包多读的字节（目标端早期数据）一并保留
   const { head, leftover } = await readUntilCRLFCRLF(reader);
@@ -2071,6 +2089,18 @@ function decodeEarlyData(header, cfg) {
   return detectTrojan(bytes, cfg) ? bytes : null;
 }
 
+// WebSocket 关闭原因上限 123 字节（UTF-8）：按字节截断且不拆开多字节字符，
+// 否则含中文的长错误信息会让 close() 抛异常，连接因此不会被关闭
+function closeReason(msg) {
+  let out = '', bytes = 0;
+  for (const ch of String(msg)) {
+    const n = TE.encode(ch).length;
+    if (bytes + n > 120) break;
+    out += ch; bytes += n;
+  }
+  return out;
+}
+
 async function handleWebSocketProxy(request, cfg) {
   const pair = new WebSocketPair();
   const [client, server] = Object.values(pair);
@@ -2080,7 +2110,7 @@ async function handleWebSocketProxy(request, cfg) {
   let socket = null, writer = null, headerSent = false, pending = null, protoWait = null, respSent = false;
 
   const send = (data) => { try { server.send(data); } catch (e) { /* 忽略 */ } };
-  const fail = (err) => { try { server.close(1011, String(err && err.message || err).slice(0, 120)); } catch (e) { /* 忽略 */ } };
+  const fail = (err) => { try { server.close(1011, closeReason(err && err.message || err)); } catch (e) { /* 忽略 */ } };
 
   // 首包处理：WS 数据帧与 0-RTT 早数据共用。headerSent 在任何 await 之前置位，
   // 解析期间到达的后续帧走下方「暂存 / 直写」分支，不会重复解析
@@ -2098,10 +2128,17 @@ async function handleWebSocketProxy(request, cfg) {
       // 此时 pending[0] 为 hex 字符（非 0）且不足 58 字节，不能按 VLESS 解析（会报版本错误而关闭连接），应等待后续分片
       if (!isTrojan && pending[0] !== 0 && pending.byteLength < 58) return;
       isVless = !isTrojan;
+      // 面板关闭 VLESS 后服务端也不再接受 VLESS 连接（XHTTP 走独立入口，由 enableXhttp 控制）
+      if (isVless && cfg.enableVless === false) throw new Error('VLESS 协议未启用');
       parsed = isTrojan ? parseTrojanHeader(pending) : parseVlessHeader(pending, cfg);
     } catch (err) {
       if (/头部过短/.test(err.message || '')) return;   // 等下一个分片
       throw err;
+    }
+    // 仅支持 TCP（VLESS 0x01 / Trojan 0x01）与 VLESS UDP-DNS（0x02）；Trojan UDP ASSOCIATE、VLESS MUX 等
+    // 此前会被当成 TCP 连接目标地址，现在明确拒绝，客户端据此回退
+    if (isVless ? (parsed.command !== 1 && parsed.command !== 2) : parsed.command !== 1) {
+      throw new Error('不支持的命令 ' + parsed.command);
     }
     // 头部解析成功立即回 VLESS 响应头（version=0 + addonsLen=0），早于首包判定与出站建连：
     // 部分客户端（mihomo 等）收到这 2 字节才发送首个数据包，晚发会与服务端互相等待
@@ -2165,13 +2202,23 @@ async function handleWebSocketProxy(request, cfg) {
 // xhttp 代理（stream-one 模式：请求体即 VLESS 流）
 async function handleXhttpProxy(request, cfg) {
   const bodyReader = request.body.getReader();
-  const first = await bodyReader.read();
-  if (first.done) return new Response('empty', { status: 400 });
-  const parsed = parseVlessHeader(first.value, cfg);
-  const conn = await openOutbound(parsed, cfg, request.cf && request.cf.colo, true,
-    sniffPayloadKind(first.value.subarray(parsed.headerLength)));
+  // 首个数据块可能短于 VLESS 头部（分块到达）：累积到能完整解析为止（上限 64KB，与 WS 路径一致）
+  let buf = new Uint8Array(0), parsed = null;
+  while (!parsed) {
+    const chunk = await bodyReader.read();
+    if (chunk.done) return new Response('empty', { status: 400 });
+    buf = buf.byteLength ? concatBytes(buf, chunk.value) : chunk.value;
+    try { parsed = parseVlessHeader(buf, cfg); }
+    catch (err) {
+      if (!/头部过短/.test(err.message || '')) throw err;
+      if (buf.byteLength > 65536) throw new Error('握手头超过 64KB');
+    }
+  }
+  if (parsed.command !== 1) throw new Error('XHTTP 仅支持 TCP 命令');
+  const firstPayload = buf.subarray(parsed.headerLength);
+  const conn = await openOutbound(parsed, cfg, request.cf && request.cf.colo, true, sniffPayloadKind(firstPayload));
   const writer = conn.writable.getWriter();
-  await writer.write(first.value.subarray(parsed.headerLength));
+  if (firstPayload.byteLength) await writer.write(firstPayload);
 
   (async () => {
     try {
@@ -2839,7 +2886,8 @@ function parseShareNode(n, i) {
     try { user = decodeURIComponent(n.slice(start, at)); } catch (e) { user = n.slice(start, at); }
   }
   const isTrojan = n.startsWith('trojan://');
-  const tls = isTrojan || (getParam(n, 'security') || 'tls') === 'tls';
+  // 明文端口节点（security=none）无论 VLESS 还是 Trojan 都不启用 TLS
+  const tls = (getParam(n, 'security') || 'tls') === 'tls';
   return { srv, prt, name, user, isTrojan, tls };
 }
 
@@ -3032,16 +3080,14 @@ ${CLASH_TEMPLATE}
 }
 
 // Surfboard（Surge 兼容格式，不支持 VLESS/XHTTP，Trojan 必须 TLS）：
-// 将 VLESS TLS 节点转换为 Trojan（密码=UUID，TLS/WS 参数一致），XHTTP 与明文端口节点过滤，
-// 输出 Surge 风格配置（[General]/[Proxy]/[Proxy Group]/[Rule]），Surfboard 直接导入
+// 只下发 Trojan TLS 节点（密码与服务端一致，见 trojanNode）。不再把 VLESS 节点改写成「密码=UUID」的 Trojan：
+// 服务端仅在启用 Trojan 时才接受 Trojan 连接，且密码可能与 UUID 不同，改写出的节点连不上。
+// 未启用 Trojan 时无节点可用，直接报错提示，而不是输出一份全部失效的配置。
 function generateSurfboard(cfg, nodes) {
   const host = cfg.host, path = '/' + cfg.path;
-  const sb = [];
-  for (const n of nodes) {
-    if (n.startsWith('trojan://') && n.indexOf('security=none') < 0) sb.push(n);
-    else if (n.startsWith('vless://') && n.indexOf('type=xhttp') < 0 && n.indexOf('security=none') < 0)
-      sb.push(n.replace(/^vless:\/\//, 'trojan://').replace('encryption=none&', ''));
-  }
+  if (!cfg.enableTrojan) throw new Error('Surfboard 只支持 Trojan 节点：请先在「节点配置」中启用 Trojan 协议');
+  const sb = nodes.filter(n => n.startsWith('trojan://') && n.indexOf('security=none') < 0);
+  if (!sb.length) throw new Error('没有可用于 Surfboard 的 Trojan TLS 节点（明文端口节点已被过滤）');
   const lines = sb.map((n, i) => {
     const { user, srv, prt, name } = parseShareNode(n, i);
     return `${name} = trojan, ${srv}, ${prt}, password=${user}, ws=true, ws-path=${path}, ws-headers=Host:${host}, tls=true, skip-cert-verify=false, sni=${host}`;
@@ -3105,6 +3151,7 @@ function generateSingbox(cfg, nodes) {
     return { type: 'vless', tag: name, server: srv, server_port: prt, uuid: user, packet_encoding: 'xudp', tls: tlsObj, transport };
   });
   const tags = outbounds.map(o => o.tag);
+  if (!tags.length) throw new Error('sing-box 官方内核不支持 XHTTP，没有可用节点：请同时启用 VLESS 或 Trojan 协议');
   const config = {
     log: { level: 'info' },
     // DNS：国内域名走直连 DNS（真实 IP），其余 A/AAAA 走 fakeip，兜底远程 DoH
@@ -3225,11 +3272,12 @@ function generateQuanX(cfg, nodes) {
   // QuanX 的 ip:port 格式中 IPv6 必须带方括号（裸 v6 与端口冒号歧义）
   const qxHost = (srv) => srv.indexOf(':') >= 0 ? '[' + srv + ']' : srv;
   const servers = nodes.map((n, i) => {
-    const { user, srv, prt, name } = parseShareNode(n, i);
+    const { user, srv, prt, name, tls } = parseShareNode(n, i);
     if (n.startsWith('trojan://')) {
-      return `trojan=${qxHost(srv)}:${prt}, password=${user}, over-tls=true, tls-host=${host}, obfs=wss, obfs-host=${host}, obfs-uri=${path}, tls-verification=true, tag=${name}`;
+      return tls
+        ? `trojan=${qxHost(srv)}:${prt}, password=${user}, over-tls=true, tls-host=${host}, obfs=wss, obfs-host=${host}, obfs-uri=${path}, tls-verification=true, tag=${name}`
+        : `trojan=${qxHost(srv)}:${prt}, password=${user}, over-tls=false, obfs=ws, obfs-host=${host}, obfs-uri=${path}, tag=${name}`;
     }
-    const tls = (getParam(n, 'security') || 'tls') === 'tls';
     return `vless=${qxHost(srv)}:${prt}, method=none, password=${user}, obfs=${tls ? 'wss' : 'ws'}, obfs-host=${host}, obfs-uri=${path}${tls ? ', tls-verification=true, tls13=true' : ''}, tag=${name}`;
   });
   const names = nodes.map((n, i) => {
@@ -3383,9 +3431,10 @@ function appendFallbackNodes(nodes, rc, cap, colo) {
     if (nodes.length >= cap) return;
     if (used.has(server)) return;
     used.add(server);
-    if (rc.enableVless) nodes.push(vlessNode(rc, server, 443, name));
-    if (rc.enableTrojan) nodes.push(trojanNode(rc, server, 443, name));
-    if (rc.enableXhttp) nodes.push(vlessNode(rc, server, 443, name, { type: 'xhttp' }));
+    const nm = protoNames(name, rc.enableVless, rc.enableTrojan, rc.enableXhttp);   // 与其它节点一致：Trojan 加 .T、XHTTP 加 .X
+    if (rc.enableVless) nodes.push(vlessNode(rc, server, 443, nm.v));
+    if (rc.enableTrojan) nodes.push(trojanNode(rc, server, 443, nm.t));
+    if (rc.enableXhttp) nodes.push(vlessNode(rc, server, 443, nm.x, { type: 'xhttp' }));
   };
   // 原生地址：仅面板「原生地址」开关（src.native）开启时下发；默认关闭不下发
   if (rc.src && rc.src.native === true) {

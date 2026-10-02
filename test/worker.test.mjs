@@ -703,3 +703,156 @@ test('订阅：TLS ws 节点带 ed=2048、ALPN 随面板下发；多协议时 Tr
   assert.ok(!sb.outbounds.some(o => o.type === 'dns' || o.type === 'block'), '不含已移除的 dns / block 出站');
   assert.ok(!JSON.stringify(sb.route.rules).includes('"geoip"'), '不含已移除的 geoip 规则');
 });
+
+// ---------------- 批次 1 修复：多格式订阅 / 出站代理解析 / 协议头处理 ----------------
+const subOf = (env, fmt, ua = 'x') => withFetch(notFound, async () => call(env, `/${UUID}/sub/${fmt}`, { ua }));
+const customCfg = (extra) => ({ cfgRev: 2, optimizer: { subMode: 'custom' }, preferredDomains: '104.16.9.1:443#a', filter: { ipType: ['IPv4'] }, ...extra });
+
+test('明文端口 Trojan 节点在 Clash / sing-box / QuanX / Surge 中不启用 TLS（security=none）', async () => {
+  const env = baseEnv({ K: kv({ config: customCfg({ enableVless: false, enableTrojan: true, tlsOnly: false }) }) });
+  const clash = await (await subOf(env, 'clash')).text();
+  const block = clash.split('\n  - name:').find(b => b.includes('a·80'));
+  assert.ok(block && /port: 80\n/.test(block));
+  assert.ok(!/tls: true/.test(block), 'Clash 明文节点无 tls: true');
+  assert.match(block, /ws-opts:\n {6}path: "?\/[0-9a-f-]+"?\n/, '明文节点 path 不带 ed');
+  const sb = JSON.parse(await (await subOf(env, 'singbox')).text());
+  assert.equal(sb.outbounds.find(o => o.server_port === 80).tls.enabled, false);
+  assert.equal(sb.outbounds.find(o => o.server_port === 443).tls.enabled, true);
+  const qx = await (await subOf(env, 'quanx')).text();
+  assert.match(qx, /trojan=104\.16\.9\.1:80, password=[^,]+, over-tls=false, obfs=ws,/);
+  assert.match(qx, /trojan=104\.16\.9\.1:443, password=[^,]+, over-tls=true,/);
+  const surge = await (await subOf(env, 'surge')).text();
+  assert.match(surge, /a·80 = trojan, 104\.16\.9\.1, 80, .*tls=false/);
+});
+
+test('Surfboard：只输出 Trojan TLS 节点并使用服务端的 Trojan 密码；未启用 Trojan 时明确报错', async () => {
+  const on = baseEnv({ K: kv({ config: customCfg({ enableVless: true, enableTrojan: true, trojanPassword: 'tp-secret' }) }) });
+  const body = await (await subOf(on, 'surfboard')).text();
+  const proxies = body.split('[Proxy]\n')[1].split('\n\n')[0].split('\n');
+  assert.equal(proxies.length, 1, '不再把 VLESS 节点改写成 Trojan 重复下发');
+  assert.match(proxies[0], /^a\.T = trojan, 104\.16\.9\.1, 443, password=tp-secret,/);
+  const off = baseEnv({ K: kv({ config: customCfg({ enableTrojan: false }) }) });
+  const res = await subOf(off, 'surfboard');
+  assert.equal(res.status, 500);
+  assert.match(await res.text(), /Surfboard 只支持 Trojan/);
+});
+
+test('sing-box：仅启用 XHTTP（无可用节点）时报错，而不是输出空 selector 的无效配置', async () => {
+  const env = baseEnv({ K: kv({ config: customCfg({ enableVless: false, enableTrojan: false, enableXhttp: true }) }) });
+  const res = await subOf(env, 'singbox');
+  assert.equal(res.status, 500);
+  assert.match(await res.text(), /不支持 XHTTP/);
+  // 同时启用 VLESS 时仍正常输出
+  const ok = baseEnv({ K: kv({ config: customCfg({ enableXhttp: true }) }) });
+  const sb = JSON.parse(await (await subOf(ok, 'singbox')).text());
+  assert.ok(sb.outbounds[0].outbounds.length > 0);
+});
+
+test('原生地址兜底节点同样遵循多协议命名（Trojan .T / XHTTP .X）', async () => {
+  const env = baseEnv({ K: kv({ config: { cfgRev: 2, enableTrojan: true, enableXhttp: true, optimizer: { subMode: 'custom', subIncludeDefault: true }, preferredDomains: '104.16.9.1:443#a', src: { native: true }, filter: { ipType: ['IPv4'] } } }) });   // 追加默认节点模式：原生地址由 appendFallbackNodes 兜底追加
+  const links = (await (await subOf(env, 'plain')).text()).split('\n').filter(Boolean);
+  assert.deepEqual(links.filter(l => nameOf(l).startsWith('原生地址')).map(nameOf), ['原生地址', '原生地址.T', '原生地址.X']);
+});
+
+const ipv6Bytes = [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];   // 2001:db8::1
+const vlessReqV6 = (port) => new Uint8Array([0, ...uuidBytes, 0, 1, port >> 8, port & 255, 3, ...ipv6Bytes, ...TLS_HELLO]);
+
+test('出站代理：密码含未编码 @ 时主机名解析正确；SOCKS5 对 IPv6 目标使用 ATYP=4；HTTP CONNECT 给 IPv6 加方括号', async () => {
+  const feed = async (sock, bytes) => { await until(() => sock.push); sock.push(new Uint8Array(bytes)); };
+  // SOCKS5：socks5://us:p@ss@10.0.0.1:1080
+  let log = fakeNet({ '10.0.0.1': { delay: 5 } });
+  let env = baseEnv({ K: kv({ config: { outboundProxy: 'socks5://us:p@ss@10.0.0.1:1080', outboundMode: 'only' } }) });
+  let ws = await openWs(env);
+  ws.emit('message', { data: vlessReqV6(443).buffer });   // 握手需要下面喂数据才会完成：不能 await
+  await until(() => log.length && log[0].written.length);
+  assert.equal(log[0].hostname, '10.0.0.1', '以最后一个 @ 分隔凭据与主机');
+  assert.equal(log[0].port, 1080);
+  await feed(log[0], [5, 2]);                                   // 服务器选择用户名密码认证
+  await until(() => log[0].written.length >= 2);
+  assert.equal(Buffer.from(log[0].written[1]).toString('latin1', 5), 'p@ss', '密码完整');
+  await feed(log[0], [1, 0]);                                   // 认证成功
+  await until(() => log[0].written.length >= 3);
+  const req = [...log[0].written[2]];
+  assert.deepEqual(req.slice(0, 4), [5, 1, 0, 4], 'IPv6 目标用 ATYP=4');
+  assert.deepEqual(req.slice(4, 20), ipv6Bytes);
+  assert.deepEqual(req.slice(20), [1, 187]);
+  // HTTP CONNECT
+  log = fakeNet({ '10.0.0.2': { delay: 5 } });
+  env = baseEnv({ K: kv({ config: { outboundProxy: 'http://10.0.0.2:8080', outboundMode: 'only' } }) });
+  ws = await openWs(env);
+  ws.emit('message', { data: vlessReqV6(443).buffer });
+  await until(() => log.length && log[0].written.length);
+  assert.match(Buffer.from(log[0].written[0]).toString(), /^CONNECT \[2001:db8::1\]:443 HTTP\/1\.1\r\nHost: \[2001:db8::1\]:443\r\n/);
+});
+
+test('协议头：地址被截断时等待后续分片（不按错误地址建连、不断开）；Trojan UDP / VLESS MUX 命令被拒绝', async () => {
+  const log = fakeNet({ 'split.example': { delay: 5 } });
+  await withFetch(relayDoh, async () => {
+    // 域名只到一半：旧实现会把截断的域名当目标
+    const full = vlessReq('split.example', 443, TLS_HELLO);
+    const cut = full.length - TLS_HELLO.length - 5;
+    const ws = await openWs(baseEnv());
+    await ws.emit('message', { data: full.slice(0, cut).buffer });
+    await new Promise(r => setTimeout(r, 30));
+    assert.equal(log.length, 0);
+    assert.equal(ws.closed, null);
+    await ws.emit('message', { data: full.slice(cut).buffer });
+    await until(() => log.some(s => s.written.length));
+    assert.equal(log[0].hostname, 'split.example');
+    // VLESS MUX（cmd=3）
+    const mux = vlessReq('x.example', 443, TLS_HELLO); mux[1 + 16 + 1] = 3;
+    const w2 = await openWs(baseEnv());
+    await w2.emit('message', { data: mux.buffer });
+    assert.equal(w2.closed.code, 1011);
+    assert.match(w2.closed.reason, /不支持的命令/);
+    // Trojan UDP ASSOCIATE（cmd=3）
+    const hex = createHash('sha224').update(UUID).digest('hex');
+    const trojan = (cmd) => new Uint8Array([...Buffer.from(hex + '\r\n'), cmd, 3, 9, ...Buffer.from('x.example'), 1, 187, 13, 10, ...TLS_HELLO]);
+    const envT = baseEnv({ K: kv({ config: { enableTrojan: true } }) });
+    const w3 = await openWs(envT);
+    await w3.emit('message', { data: trojan(3).buffer });
+    assert.equal(w3.closed.code, 1011);
+    const n = log.length;
+    const w4 = await openWs(envT);   // TCP（cmd=1）仍正常
+    await w4.emit('message', { data: trojan(1).buffer });
+    await until(() => log.length > n);
+    assert.equal(log[n].hostname, 'x.example');
+  });
+});
+
+test('面板关闭 VLESS 后服务端不再接受 VLESS WebSocket 连接（Trojan 不受影响）', async () => {
+  const log = fakeNet({ 'x.example': { delay: 5 } });
+  const env = baseEnv({ K: kv({ config: { enableVless: false, enableTrojan: true } }) });
+  const ws = await openWs(env);
+  await ws.emit('message', { data: vlessReq('x.example', 443, TLS_HELLO).buffer });
+  assert.equal(ws.closed.code, 1011);
+  assert.equal(log.length, 0);
+});
+
+test('WebSocket 关闭原因按字节截断（含中文的长错误信息不会让 close() 抛异常）', async () => {
+  globalThis.__connect = () => { throw new Error('出站连接失败：' + '很长的错误信息'.repeat(30)); };
+  const ws = await openWs(baseEnv({ K: kv({ config: { outboundMode: '' } }) }));
+  // 直连与反代均失败 → fail(lastErr)
+  await withFetch(() => new Response('{}'), async () => {
+    await ws.emit('message', { data: vlessReq('x.example', 443, TLS_HELLO).buffer });
+  });
+  assert.ok(ws.closed, '连接已被关闭');
+  assert.ok(Buffer.byteLength(ws.closed.reason) <= 123, `reason ${Buffer.byteLength(ws.closed.reason)} 字节`);
+  assert.ok(!ws.closed.reason.includes('�'));
+});
+
+test('XHTTP：首个请求体块短于 VLESS 头部时累积后再解析', async () => {
+  const log = fakeNet({ 'xh.example': { delay: 5 } });
+  const env = baseEnv({ K: kv({ config: { enableXhttp: true } }) });
+  const full = vlessReq('xh.example', 443, TLS_HELLO);
+  const body = new ReadableStream({ async start(c) {
+    c.enqueue(full.slice(0, 7)); await new Promise(r => setTimeout(r, 10));
+    c.enqueue(full.slice(7, 30)); await new Promise(r => setTimeout(r, 10));
+    c.enqueue(full.slice(30)); c.close();
+  } });
+  const res = await worker.fetch(new Request(`https://node.example.com/${UUID}`, { method: 'POST', body, duplex: 'half', headers: { 'User-Agent': 'x' } }), env, {});
+  assert.equal(res.status, 200);
+  await until(() => log.some(s => s.written.length));
+  assert.equal(log[0].hostname, 'xh.example');
+  assert.deepEqual([...log[0].written[0]], TLS_HELLO);
+});
