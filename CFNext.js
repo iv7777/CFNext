@@ -18,7 +18,7 @@
 // ============================================================================
 import { connect } from 'cloudflare:sockets';
 
-const VERSION = '2.1.3';
+const VERSION = '2.1.4';
 
 // 更新检测：点击版本号后拉取仓库代码比对版本号；有新版本时返回最新代码供面板复制
 // 版本基准为仓库 main 分支根目录的 CFNext.js（由 build.mjs 生成的部署文件）
@@ -3562,7 +3562,9 @@ a:hover{text-decoration:underline}
 /* ===== 主区 ===== */
 .main{flex:1;min-width:0;display:flex;flex-direction:column}
 .topbar{display:flex;align-items:center;gap:14px;padding:14px 26px;border-bottom:1px solid var(--border);background:var(--topbar-bg);-webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px);position:sticky;top:0;z-index:40}
-.topbar-spacer{flex:1;min-width:0}   /* 页面标题只在内容区的标题栏显示一次，顶栏不再重复 */
+.topbar-title{flex:1;min-width:0}   /* 当前页面标题与说明：随顶栏吸顶，滚动时始终可见 */
+.topbar-title h1{font-size:17px;font-weight:700;line-height:1.3;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.topbar-title p{color:var(--dim);font-size:12.5px;margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .pill{display:inline-flex;align-items:center;gap:6px;font-size:12px;padding:4px 10px;border-radius:20px;background:var(--ok-dim);color:var(--ok);white-space:nowrap}
 .pill.off{background:var(--err-dim);color:var(--err)}
 .pill .dot{width:6px;height:6px;border-radius:50%;background:currentColor}
@@ -3576,9 +3578,6 @@ a:hover{text-decoration:underline}
 .view{display:none}
 .view.on{display:block;animation:fade .18s ease}
 @keyframes fade{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
-.view-head{margin-bottom:16px}
-.view-head h2{font-size:20px;font-weight:700}
-.view-head p{color:var(--dim);font-size:13px;margin-top:4px}
 
 /* ===== 卡片 ===== */
 .grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(330px,1fr));gap:16px}
@@ -3700,7 +3699,9 @@ pre.code{background:var(--bg2);border:1px solid var(--border);border-radius:8px;
   .sidebar.open{transform:translateX(0)}
   .hamb{display:flex}
   .content{padding:16px 16px 96px}
-  .topbar{padding:12px 16px}
+  .topbar{padding:10px 16px}
+  .topbar-title h1{font-size:16px}
+  .topbar-title p{font-size:12px}
   .grid2,.grid3{grid-template-columns:1fr}
 }
 @media (max-width:560px){
@@ -3728,7 +3729,7 @@ pre.code{background:var(--bg2);border:1px solid var(--border);border-radius:8px;
 <div class="main">
   <div class="topbar">
     <button class="icon-btn hamb" id="hamb" title="菜单"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
-    <div class="topbar-spacer"></div>
+    <div class="topbar-title"><h1 id="pageTitle"></h1><p id="pageSub"></p></div>
     <span class="pill" id="connPill"><span class="dot"></span><span id="connText">连接中</span></span>
     <button class="icon-btn" id="themeBtn" title="切换日间 / 夜间"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path id="themeIcon" d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg></button>
   </div>
@@ -3736,8 +3737,7 @@ pre.code{background:var(--bg2);border:1px solid var(--border);border-radius:8px;
 
   <div class="content">
     <!-- ===== 视图：仪表盘 ===== -->
-    <section class="view" data-view="dashboard">
-      <div class="view-head"><h2>仪表盘</h2><p>快速开始、订阅管理与运行状态</p></div>
+    <section class="view" data-view="dashboard" data-title="仪表盘" data-sub="快速开始、订阅管理与运行状态">
       <div class="card">
         <h3><span class="tick"></span>快速开始</h3>
         <ol class="steps">
@@ -3832,8 +3832,7 @@ pre.code{background:var(--bg2);border:1px solid var(--border);border-radius:8px;
     </section>
 
     <!-- ===== 视图：节点配置（协议 / TLS / ECH / 落地出站） ===== -->
-    <section class="view" data-view="nodes">
-      <div class="view-head"><h2>节点配置</h2><p>代理协议、TLS/ECH 与落地出站（保存后立即生效）</p></div>
+    <section class="view" data-view="nodes" data-title="节点配置" data-sub="代理协议、TLS/ECH 与落地出站（保存后立即生效）">
       <div class="grid3">
         <div class="card">
           <h3><span class="tick"></span>协议开关</h3>
@@ -3901,8 +3900,7 @@ pre.code{background:var(--bg2);border:1px solid var(--border);border-radius:8px;
     </section>
 
     <!-- ===== 视图：优选配置 ===== -->
-    <section class="view" data-view="optimizer">
-      <div class="view-head"><h2>优选配置</h2><p>优选域名与优选 IP 来源</p></div>
+    <section class="view" data-view="optimizer" data-title="优选配置" data-sub="优选域名与优选 IP 来源">
       <div class="card">
         <h3><span class="tick"></span>优选域名</h3>
         <div class="field"><label>优选域名列表（每行一个纯主机名；留空 = 使用内置列表）</label>
@@ -3933,8 +3931,7 @@ pre.code{background:var(--bg2);border:1px solid var(--border);border-radius:8px;
     </section>
 
     <!-- ===== 视图：面板设置 ===== -->
-    <section class="view" data-view="account">
-      <div class="view-head"><h2>面板设置</h2><p>部署基础信息：UUID、面板路径、管理密码与绑定域名</p></div>
+    <section class="view" data-view="account" data-title="面板设置" data-sub="部署基础信息：UUID、面板路径、管理用户名与密码、绑定域名">
       <div class="card">
         <h3><span class="tick"></span>基础配置</h3>
         <div class="field"><label>UUID（订阅节点身份）</label>
@@ -3977,8 +3974,7 @@ pre.code{background:var(--bg2);border:1px solid var(--border);border-radius:8px;
     </section>
 
     <!-- ===== 视图：关于 ===== -->
-    <section class="view" data-view="about">
-      <div class="view-head"><h2>关于项目</h2><p>CFNext — Cloudflare 代理订阅面板（独立界面 + 独立实现）</p></div>
+    <section class="view" data-view="about" data-title="关于项目" data-sub="CFNext — Cloudflare 代理订阅面板（独立界面 + 独立实现）">
       <div class="card">
         <h3><span class="tick"></span>相关链接</h3>
         <p style="font-size:13px;color:var(--dim)">YouTube @数字派：<a href="https://www.youtube.com/@PAI_CN" target="_blank" rel="noopener">youtube.com/@PAI_CN</a></p>
@@ -4102,7 +4098,12 @@ function switchView(id){
     b.classList.toggle('on', b.getAttribute('data-v') === id);
   });
   document.querySelectorAll('.view').forEach(function(x){
-    x.classList.toggle('on', x.getAttribute('data-view') === id);
+    var on = x.getAttribute('data-view') === id;
+    x.classList.toggle('on', on);
+    if (on){
+      $('pageTitle').textContent = x.getAttribute('data-title') || '';
+      $('pageSub').textContent = $('pageSub').title = x.getAttribute('data-sub') || '';
+    }
   });
   $('sidebar').classList.remove('open');
 }

@@ -66,7 +66,12 @@ function switchView(id){
     b.classList.toggle('on', b.getAttribute('data-v') === id);
   });
   document.querySelectorAll('.view').forEach(function(x){
-    x.classList.toggle('on', x.getAttribute('data-view') === id);
+    var on = x.getAttribute('data-view') === id;
+    x.classList.toggle('on', on);
+    if (on){
+      $('pageTitle').textContent = x.getAttribute('data-title') || '';
+      $('pageSub').textContent = $('pageSub').title = x.getAttribute('data-sub') || '';
+    }
   });
   $('sidebar').classList.remove('open');
 }
