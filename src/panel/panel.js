@@ -207,7 +207,7 @@ function renderStatus(d){
     ? '当前为 *.workers.dev 域名：Cloudflare 可能限制该域名直连，若客户端更新订阅失败（提示无效订阅），请在客户端开启系统代理或「更新订阅使用代理」后重试；节点连接不受影响（直连优选 IP）。'
     : '';
   var kv = d.kv;
-  var kvTxt = kv ? '已绑定（配置持久化）' : '未绑定（配置仅内存）';
+  var kvTxt = kv ? '已绑定（配置持久化）' : '未绑定（无法保存配置，仅环境变量生效）';
   $('stKv').textContent = kvTxt;
   $('stKv').className = 'v ' + (kv ? 'ok' : 'bad');
   $('aKv').textContent = kvTxt;
@@ -429,7 +429,7 @@ function logout(){
     .catch(function(){ toast('退出失败：无法连接服务器', 'err'); });
 }
 function resetAll(){
-  if (!confirm('确定重置？将清空 KV 中全部面板配置与节点记录，面板还原为初始部署状态。此操作不可恢复！')) return;
+  if (!confirm('确定重置？将清空 KV 中保存的全部面板配置，面板还原为初始部署状态。此操作不可恢复！')) return;
   var btn = $('resetBtn');
   btn.disabled = true;
   api('reset', { method: 'POST' })

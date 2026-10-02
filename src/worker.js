@@ -5,7 +5,7 @@
 //    U            VLESS UUID（必填，同时用作面板访问路径，除非设置了 D）
 //    D / PATH     自定义面板路径（可选）
 //    ADMIN        面板管理密码（必填：未设置时面板与管理 API 一律禁用）
-//    HOST         自定义 SNI/Host（可选，默认使用 Worker 域名）
+//    HOST         自定义 SNI/Host（可选，默认使用访问所用的域名）
 //    PROXYIP      自定义反代/落地 IP（可选，填写后作为固定出口优先使用；留空则直连失败时由地区反代兜底（面板可配置），格式 host 或 host:port）
 //    S / OUTBOUND 出站代理（可选，socks5:// / http:// / ss:// 或 host:port）
 //    ECH          设为 true/1 开启 ECH 加密（可选）
