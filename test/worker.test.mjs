@@ -540,7 +540,7 @@ globalThis.WebSocketPair = function () { const client = new FakeWS(), server = n
 const NodeResponse = globalThis.Response;
 globalThis.Response = class extends NodeResponse {
   constructor(body, init) {
-    if (init && init.status === 101) { super(null, { status: 200 }); Object.defineProperty(this, 'status', { value: 101 }); this.webSocket = init.webSocket; }
+    if (init && init.status === 101) { super(null, { status: 200, headers: init.headers }); Object.defineProperty(this, 'status', { value: 101 }); this.webSocket = init.webSocket; }
     else super(body, init);
   }
 };
@@ -556,7 +556,7 @@ function fakeNet(net) {
       : new Promise(r => setTimeout(r, b.delay));
     sock.opened.catch(() => {});
     sock.writable = new WritableStream({ write(c) { sock.written.push(new Uint8Array(c)); } });
-    sock.readable = new ReadableStream({ start(c) { sock.push = (d) => c.enqueue(d); } });
+    sock.readable = new ReadableStream({ start(c) { sock.push = (d) => c.enqueue(d); sock.end = () => c.close(); } });
     sock.close = () => { sock.closedByUs = true; };
     return sock;
   };
@@ -615,6 +615,40 @@ test('出站竞速：直连较慢（600ms）但能通时仍用直连，不被反
     await until(() => log.some(s => s.written.length));
     assert.equal(log.find(s => s.written.length).hostname, 'slow.example', '慢直连不应被反代取代');
   });
+});
+
+test('WS 下行：已到达的小块合并成一条消息（最多 64KB），字节顺序完整；之后到达的数据单独发出；目标结束后关闭 WS', async () => {
+  const log = fakeNet({ 'batch.example': { delay: 5 } });
+  await withFetch(relayDoh, async () => {
+    const ws = await openWs(baseEnv());
+    await ws.emit('message', { data: vlessReq('batch.example', 443, TLS_HELLO).buffer });
+    await until(() => log.some(s => s.written.length));
+    const sock = log.find(s => s.written.length);
+    const n0 = ws.sent.length;   // VLESS 响应头
+    // 同一时刻到达 100 个 4KB 块（400KB）：应合并为约 7 条 ≤64KB 的消息
+    const blocks = Array.from({ length: 100 }, (_, i) => new Uint8Array(4096).fill(i));
+    for (const b of blocks) sock.push(b);
+    await until(() => ws.sent.slice(n0).reduce((a, x) => a + x.byteLength, 0) >= 409600);
+    const msgs = ws.sent.slice(n0);
+    assert.ok(msgs.length <= 10, `合并后 ${msgs.length} 条消息`);
+    assert.ok(msgs.every(m => m.byteLength <= 64 * 1024 + 4096), '单条不超过 64KB（+ 最后一块）');
+    const all = Buffer.concat(msgs.map(m => Buffer.from(m)));
+    assert.ok(all.equals(Buffer.concat(blocks.map(b => Buffer.from(b)))), '字节顺序完整');
+    // 稍后单独到达的小块：不等待凑满，直接发出
+    sock.push(new Uint8Array([1, 2, 3]));
+    await until(() => ws.sent.length === n0 + msgs.length + 1);
+    assert.deepEqual([...ws.sent.at(-1)], [1, 2, 3]);
+    sock.end();
+    await until(() => ws.closed);
+    assert.equal(ws.closed.code, 1000);
+  });
+});
+
+test('WebSocket 不协商压缩：101 响应给出不含 permessage-deflate 的扩展值（运行时据此不启用压缩）', async () => {
+  fakeNet({});
+  const res = await worker.fetch(new Request(`https://node.example.com/${UUID}`, { headers: { Upgrade: 'websocket', 'Sec-WebSocket-Extensions': 'permessage-deflate; client_max_window_bits' } }), baseEnv(), {});
+  assert.equal(res.status, 101);
+  assert.ok(!/permessage-deflate/i.test(res.headers.get('Sec-WebSocket-Extensions') || ''));
 });
 
 test('非 TLS 首包（如 Telegram MTProto）只走直连，不送进 SNI 型反代', async () => {
@@ -1260,8 +1294,9 @@ for (const method of Object.keys(ssMethods)) {
       const enc = ssRefStream(method, password, serverSalt);
       const chunk = (pt) => Buffer.concat([enc.seal(Buffer.from([pt.length >> 8, pt.length & 255])), enc.seal(Buffer.from(pt))]);
       log[0].push(Buffer.concat([serverSalt, chunk([9, 9, 9]), chunk([7, 7])]));
-      await until(() => ws.sent.length >= 3);
-      assert.deepEqual(ws.sent.slice(1).map(x => [...x]), [[9, 9, 9], [7, 7]]);
+      const down = () => ws.sent.slice(1).flatMap(x => [...x]);   // 下行小块可能被合并成一条消息：按字节比较
+      await until(() => down().length >= 5);
+      assert.deepEqual(down(), [9, 9, 9, 7, 7]);
     }
   });
 }

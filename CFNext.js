@@ -17,7 +17,7 @@
 // ============================================================================
 import { connect } from 'cloudflare:sockets';
 
-const VERSION = '2.0.24';
+const VERSION = '2.0.25';
 
 // 更新检测：点击版本号后拉取仓库代码比对版本号；有新版本时返回最新代码供面板复制
 // 版本基准为仓库 main 分支根目录的 CFNext.js（由 build.mjs 生成的部署文件）
@@ -2072,18 +2072,47 @@ async function openOutbound(parsed, cfg, colo, payloadKind) {
   return fail();
 }
 
-// 双向管道：socket 可读 → send 回调；结束调用 onDone
+// 下行管道（WebSocket）：socket 可读 → send 回调；结束调用 onDone。
+// 合并小块：运行时的 socket 读取每次只给约 4KB，逐块 send 时 1MB 就是约 256 条 WS 消息，每条都有固定 CPU 开销
+// （免费版每个请求只有 10ms CPU）。读到一块后，把「已经到达」的后续数据（同一轮 I/O 内、不额外等待网络）
+// 合并成最多 64KB 一条消息再发：本地 workerd 实测每 MB CPU 约 13ms → 8ms，消息数减少约 16 倍。
+// 只在读满时合并：一次读到不足 4KB 说明缓冲已读空（交互流量），直接发出，不等待；
+// 读满 4KB 时才用 0ms 定时器探测后续数据是否已到达（读取先于定时器完成 = 已在缓冲中），否则立即发出已攒的
+// （定时器粒度约 1ms，若对每块都等会让交互往返多约 1ms）
+const WS_BATCH_MAX = 64 * 1024, WS_FULL_READ = 4096;
 async function pumpToReader(reader, send, onDone) {
+  let timer = null;
+  const tick = () => new Promise((r) => { timer = setTimeout(() => r(null), 0); });
+  const read = () => { const p = reader.read(); p.catch(() => {}); return p; };
   try {
+    let next = read();
     while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      send(value);
+      const first = await next;
+      if (first.done) break;
+      next = read();
+      let parts = null, size = first.value.byteLength, ended = false, last = size;
+      while (last >= WS_FULL_READ && size < WS_BATCH_MAX) {
+        const r = await Promise.race([next, tick()]);
+        clearTimeout(timer);   // 定时器必须清掉：运行时限制同时存在的定时器数量（超限会抛 QuotaExceededError）
+        if (!r) break;                               // 暂无更多数据：发出已攒的
+        if (r.done) { ended = true; break; }
+        (parts || (parts = [first.value])).push(r.value);
+        size += r.value.byteLength;
+        last = r.value.byteLength;
+        next = read();
+      }
+      if (!parts) send(first.value);
+      else {
+        const out = new Uint8Array(size);
+        let off = 0;
+        for (const p of parts) { out.set(p, off); off += p.byteLength; }
+        send(out);
+      }
+      if (ended) break;
     }
   } catch (e) { /* 忽略 */ }
   try { if (onDone) onDone(); } catch (e) { /* 忽略 */ }
 }
-
 // ---------------------------------------------------------------------------
 // WebSocket 代理（VLESS / Trojan）
 // ---------------------------------------------------------------------------
@@ -2228,7 +2257,10 @@ async function handleWebSocketProxy(request, cfg) {
   }
   server.addEventListener('close', cleanup);
   server.addEventListener('error', cleanup);
-  return new Response(null, { status: 101, webSocket: client });
+  // 拒绝 WebSocket 压缩（permessage-deflate）：客户端请求时运行时会自动协商，对视频等已压缩数据毫无收益，
+  // 实测每 MB CPU 约 12ms → 49ms（免费版每个请求只有 10ms CPU）。响应里给出不含 permessage-deflate 的扩展值，
+  // 运行时即不启用压缩并从响应中去掉该头；旧兼容日期的运行时本就不压缩，同样会去掉该头（均已在 workerd 实测）
+  return new Response(null, { status: 101, webSocket: client, headers: { 'Sec-WebSocket-Extensions': 'identity' } });
 }
 
 // xhttp 代理（stream-one 模式：请求体即 VLESS 流）

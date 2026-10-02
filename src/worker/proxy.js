@@ -142,7 +142,10 @@ async function handleWebSocketProxy(request, cfg) {
   }
   server.addEventListener('close', cleanup);
   server.addEventListener('error', cleanup);
-  return new Response(null, { status: 101, webSocket: client });
+  // 拒绝 WebSocket 压缩（permessage-deflate）：客户端请求时运行时会自动协商，对视频等已压缩数据毫无收益，
+  // 实测每 MB CPU 约 12ms → 49ms（免费版每个请求只有 10ms CPU）。响应里给出不含 permessage-deflate 的扩展值，
+  // 运行时即不启用压缩并从响应中去掉该头；旧兼容日期的运行时本就不压缩，同样会去掉该头（均已在 workerd 实测）
+  return new Response(null, { status: 101, webSocket: client, headers: { 'Sec-WebSocket-Extensions': 'identity' } });
 }
 
 // xhttp 代理（stream-one 模式：请求体即 VLESS 流）
