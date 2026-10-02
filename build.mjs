@@ -5,7 +5,8 @@
 //   node build.mjs --check  仅校验 CFNext.js 是否与 src/ 同步（CI 使用，不同步时退出码 1）
 //
 // 合并规则（无第三方依赖）：
-//   - src/worker.js 中形如  const X = /* @inline panel/panel.html */ '';  的语句，
+//   - src/worker.js 中独占一行的  // @include worker/xxx.js  替换为该文件内容（源码按功能拆分在 src/worker/ 下）
+//   - 合并后的代码中形如  const X = /* @inline panel/panel.html */ '';  的语句，
 //     替换为  const X = String.raw`<文件内容>`;
 //   - 被内联的 HTML 文件中独占一行的  @include 文件名  替换为同目录下该文件的内容
 //   - 输出统一使用 CRLF 换行（与仓库历史版本保持一致，便于网页端对比）
@@ -33,8 +34,21 @@ function expandIncludes(file) {
   });
 }
 
+// 把 src/worker.js 中独占一行的  // @include worker/xxx.js  替换为对应文件内容（可嵌套）。
+// 各文件按在 worker.js 中出现的顺序原样拼接，等价于一个文件：模块级 const 的先后顺序与原来完全一致
+function expandJsIncludes(text, file) {
+  const dir = dirname(file);
+  return text.replace(/^\/\/ @include[ \t]+(\S+)[ \t]*\n/gm, (_, name) => {
+    const inc = join(dir, name);
+    if (!existsSync(inc)) throw new Error(`${file}: @include 的文件不存在：${name}`);
+    const t = expandJsIncludes(read(inc), inc);
+    return t.endsWith('\n') ? t : t + '\n';
+  });
+}
+
 export function build() {
-  const worker = read(join(SRC, 'worker.js'));
+  const entry = join(SRC, 'worker.js');
+  const worker = expandJsIncludes(read(entry), entry);
   const out = worker.replace(/\/\*\s*@inline\s+(\S+)\s*\*\/\s*''/g, (_, name) => {
     const file = join(SRC, name);
     const text = expandIncludes(file);
