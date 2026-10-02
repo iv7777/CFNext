@@ -6,6 +6,18 @@
 
 ---
 
+# 更新日志 _V2.1.0
+
+版本号升至 2.1：近期累积了较多重要变化，功能与 V2.0.26 相同。从 2.0.x 早期版本升级时请留意：
+
+- **登录需要用户名**（V2.0.26）：默认 `admin`，密码不变；可在面板或用 `ADMIN_USER` 修改
+- **XHTTP 与 WebSocket 大幅降低 CPU 占用**（V2.0.24 / V2.0.25）：XHTTP 数据改由运行时原生管道转发，修复看视频时 `Worker exceeded CPU time limit` 导致的极慢；WebSocket 下行合并小块并拒绝压缩
+- **出站更偏向直连**（V2.0.24）：直连优先窗口 1.5s，并识别 Cloudflare 托管目标
+- **可配置的优选域名与内置地区反代**；移除「优选节点」卡片（自定义 / 随机模式、`YX`）与「节点测活」（`PROBE_ALIVE`）
+- **协议修复**：Shadowsocks 出站按规范重写；XHTTP 下行背压、显式 `alpn=h2`；VLESS WebSocket 断开时释放连接；Sing-box 不再指定 xudp；Stash 订阅改为输出 Clash 格式
+
+---
+
 # 更新日志 _V2.0.26
 
 ### ✨ 新功能
@@ -433,7 +445,7 @@
 | 项 | 内容 |
 |---|---|
 | 项目名称 | **CFNext 订阅管理器** |
-| 当前版本 | v2.0.26 |
+| 当前版本 | v2.1.0 |
 | 运行环境 | Cloudflare Workers / Pages |
 | 部署形态 | 单文件 Worker/Pages（`CFNext.js`，由 `src/` 构建生成，见「九、开发与构建」） |
 | 数据存储 | Cloudflare KV（绑定变量 **K**）；未绑定时面板无法保存，仅环境变量生效 |
