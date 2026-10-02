@@ -247,6 +247,7 @@
         </div>
         <div class="field"><label>面板路径（访问入口，留空用 UUID）</label><input type="text" id="a-path" placeholder="留空自动使用 UUID" autocomplete="off"><div class="hint">修改面板路径或 UUID 并保存后，面板会自动跳转到新地址；节点的 WebSocket 路径随之改变，客户端需重新更新订阅。</div></div>
         <div class="field"><label>自定义订阅路径（只填 UUID/别名段，如 AAZ；留空用面板路径）</label><input type="text" id="a-suburl" placeholder="AAZ" autocomplete="off"></div>
+        <div class="field"><label>管理用户名（登录时需要；留空为 admin，区分大小写）</label><input type="text" id="a-adminuser" placeholder="admin" autocomplete="off" autocapitalize="off" spellcheck="false"></div>
         <div class="field"><label>管理密码（留空保持不变；未设置时面板禁用）</label><input type="password" id="a-admin" placeholder="设置后访问面板需登录" autocomplete="new-password"></div>
         <div class="field" style="margin-bottom:0"><label>绑定域名（留空使用当前访问的域名）</label><input type="text" id="a-host" placeholder="node.example.com" autocomplete="off"></div>
         <p class="hint" style="margin-top:10px">「绑定域名」仅用于订阅节点主机名（XHTTP 协议要求绑定自定义域名），不负责域名解析。自定义域名访问面板需先在 Cloudflare 面板 → Workers 与 Pages → 该 Worker → Domains &amp; Routes 添加自定义域名（DNS 由 Cloudflare 托管，证书自动签发），此字段留空即使用你访问面板 / 订阅时的域名。未绑定 KV（变量名 K）时无法保存面板配置，只有环境变量生效。</p>
@@ -262,7 +263,7 @@
       </div>
       <div class="card">
         <h3><span class="tick"></span>登录会话</h3>
-        <p class="hint" style="margin-top:0;margin-bottom:12px">登录状态保存在浏览器 Cookie 中，24 小时后自动失效。退出只清除当前浏览器的登录状态；要让所有已签发的登录状态立即失效，请修改管理密码或 UUID。</p>
+        <p class="hint" style="margin-top:0;margin-bottom:12px">登录状态保存在浏览器 Cookie 中，24 小时后自动失效。退出只清除当前浏览器的登录状态；要让所有已签发的登录状态立即失效，请修改管理密码、管理用户名或 UUID。</p>
         <button class="btn" onclick="logout()">退出登录</button>
       </div>
       <div class="card">

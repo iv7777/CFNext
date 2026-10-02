@@ -6,6 +6,7 @@
 //    U            VLESS UUID（必填，同时用作面板访问路径，除非设置了 D）
 //    D / PATH     自定义面板路径（可选）
 //    ADMIN        面板管理密码（必填：未设置时面板与管理 API 一律禁用）
+//    ADMIN_USER   面板管理用户名（可选，默认 admin；登录时与密码一起校验）
 //    HOST         自定义 SNI/Host（可选，默认使用访问所用的域名）
 //    PROXYIP      自定义反代/落地 IP（可选，填写后作为固定出口优先使用；留空则直连失败时由地区反代兜底（面板可配置），格式 host 或 host:port）
 //    S / OUTBOUND 出站代理（可选，socks5:// / http:// / ss:// 或 host:port）
@@ -17,7 +18,7 @@
 // ============================================================================
 import { connect } from 'cloudflare:sockets';
 
-const VERSION = '2.0.25';
+const VERSION = '2.0.26';
 
 // 更新检测：点击版本号后拉取仓库代码比对版本号；有新版本时返回最新代码供面板复制
 // 版本基准为仓库 main 分支根目录的 CFNext.js（由 build.mjs 生成的部署文件）
@@ -507,6 +508,9 @@ const CONFIG_SCHEMA = [
   // 自定义订阅路径别名：/<别名>/sub 同样输出订阅（不开放面板与管理接口）
   { key: 'subUrl', type: 'string', def: '', el: 'a-suburl', label: '自定义订阅路径', maxLen: 128, strip: ['^/+', '/+$', '/sub$', '/+$'],
     pattern: PATH_SEG_PATTERN, hint: '只填一段别名，如 AAZ（字母、数字及 . _ ~ -）', reserved: RESERVED_PATHS },
+  // 管理用户名：登录时与管理密码一起校验（区分大小写）；留空取默认 admin
+  { key: 'adminUser', type: 'string', def: 'admin', el: 'a-adminuser', label: '管理用户名', maxLen: 64, fillDefault: true,
+    pattern: '^[^\\s\\x00-\\x1f\\x7f]+$', hint: '不能包含空格或控制字符', envLock: ['ADMIN_USER'] },
   { key: 'admin', type: 'secret', def: '', el: 'a-admin', label: '管理密码', trim: false, maxLen: 256, envLock: ['ADMIN', 'admin'], check: 'adminPass' },
   // 绑定域名：节点 SNI / Host，留空使用访问域名
   { key: 'host', type: 'string', def: '', el: 'a-host', label: '绑定域名', maxLen: 253, strip: ['^https?://', '[/?#].*$'],
@@ -3962,6 +3966,7 @@ pre.code{background:var(--bg2);border:1px solid var(--border);border-radius:8px;
         </div>
         <div class="field"><label>面板路径（访问入口，留空用 UUID）</label><input type="text" id="a-path" placeholder="留空自动使用 UUID" autocomplete="off"><div class="hint">修改面板路径或 UUID 并保存后，面板会自动跳转到新地址；节点的 WebSocket 路径随之改变，客户端需重新更新订阅。</div></div>
         <div class="field"><label>自定义订阅路径（只填 UUID/别名段，如 AAZ；留空用面板路径）</label><input type="text" id="a-suburl" placeholder="AAZ" autocomplete="off"></div>
+        <div class="field"><label>管理用户名（登录时需要；留空为 admin，区分大小写）</label><input type="text" id="a-adminuser" placeholder="admin" autocomplete="off" autocapitalize="off" spellcheck="false"></div>
         <div class="field"><label>管理密码（留空保持不变；未设置时面板禁用）</label><input type="password" id="a-admin" placeholder="设置后访问面板需登录" autocomplete="new-password"></div>
         <div class="field" style="margin-bottom:0"><label>绑定域名（留空使用当前访问的域名）</label><input type="text" id="a-host" placeholder="node.example.com" autocomplete="off"></div>
         <p class="hint" style="margin-top:10px">「绑定域名」仅用于订阅节点主机名（XHTTP 协议要求绑定自定义域名），不负责域名解析。自定义域名访问面板需先在 Cloudflare 面板 → Workers 与 Pages → 该 Worker → Domains &amp; Routes 添加自定义域名（DNS 由 Cloudflare 托管，证书自动签发），此字段留空即使用你访问面板 / 订阅时的域名。未绑定 KV（变量名 K）时无法保存面板配置，只有环境变量生效。</p>
@@ -3977,7 +3982,7 @@ pre.code{background:var(--bg2);border:1px solid var(--border);border-radius:8px;
       </div>
       <div class="card">
         <h3><span class="tick"></span>登录会话</h3>
-        <p class="hint" style="margin-top:0;margin-bottom:12px">登录状态保存在浏览器 Cookie 中，24 小时后自动失效。退出只清除当前浏览器的登录状态；要让所有已签发的登录状态立即失效，请修改管理密码或 UUID。</p>
+        <p class="hint" style="margin-top:0;margin-bottom:12px">登录状态保存在浏览器 Cookie 中，24 小时后自动失效。退出只清除当前浏览器的登录状态；要让所有已签发的登录状态立即失效，请修改管理密码、管理用户名或 UUID。</p>
         <button class="btn" onclick="logout()">退出登录</button>
       </div>
       <div class="card">
@@ -4852,10 +4857,11 @@ button:disabled{opacity:.6;cursor:not-allowed}
     <div class="bt"><b>CFNext</b><span>Cloudflare 全新代理管理面板</span></div>
   </div>
   <h1>登录</h1>
-  <p>请输入管理密码以继续</p>
-  <div class="msg" id="msg">密码错误，请重试</div>
+  <p>请输入管理用户名与密码以继续</p>
+  <div class="msg" id="msg">用户名或密码错误，请重试</div>
   <form id="form">
-    <input type="password" id="pwd" placeholder="管理密码" autofocus autocomplete="current-password">
+    <input type="text" id="user" placeholder="用户名" autofocus autocomplete="username" autocapitalize="off" spellcheck="false">
+    <input type="password" id="pwd" placeholder="管理密码" autocomplete="current-password">
     <button type="submit" id="btn">登录</button>
   </form>
   <div class="foot">配置保存在 Cloudflare KV 中，登录状态 24 小时后自动失效</div>
@@ -4874,11 +4880,11 @@ button:disabled{opacity:.6;cursor:not-allowed}
     var btn = document.getElementById('btn');
     var msg = document.getElementById('msg');
     btn.disabled = true; msg.style.display = 'none';
-    fetch('/login', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'password=' + encodeURIComponent(document.getElementById('pwd').value) + '&next=' + encodeURIComponent(next) })
+    fetch('/login', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'username=' + encodeURIComponent(document.getElementById('user').value) + '&password=' + encodeURIComponent(document.getElementById('pwd').value) + '&next=' + encodeURIComponent(next) })
       .then(function(r){ return r.json(); })
       .then(function(r){
         if (r && r.ok){ location.href = r.next || '/'; }
-        else { msg.style.display = 'block'; btn.disabled = false; }
+        else { msg.textContent = (r && r.msg) || '用户名或密码错误，请重试'; msg.style.display = 'block'; btn.disabled = false; }
       })
       .catch(function(){ msg.textContent = '网络错误，请重试'; msg.style.display = 'block'; btn.disabled = false; });
   });
@@ -4940,7 +4946,10 @@ async function verifyAdminPassword(stored, password) {
   return timingSafeEqual(await pbkdf2Hex(password, fromHex(parts[1]), iter), parts[2]);
 }
 const AUTH_TTL_MS = 24 * 60 * 60 * 1000;
-function authKey(cfg) { return 'cfnext-auth|' + String(cfg.admin) + '|' + String(cfg.uuid); }
+// 当前生效的管理用户名（KV 中为空等异常情况回落默认 admin）
+function adminUserOf(cfg) { return String(cfg.adminUser || '') || 'admin'; }
+// 会话签名密钥含用户名：修改用户名与修改密码一样，使其它浏览器的登录态失效
+function authKey(cfg) { return 'cfnext-auth|' + String(cfg.admin) + '|' + String(cfg.uuid) + '|' + adminUserOf(cfg); }
 async function makeAuthToken(cfg) {
   const exp = Date.now() + AUTH_TTL_MS;
   return exp + '.' + await hmacHex(authKey(cfg), String(exp));
@@ -5074,7 +5083,10 @@ async function handleRequest(request, env) {
       const params = new URLSearchParams(body);
       if (!loginNextOk(params.get('next'), panelPath)) return new Response('Not Found', { status: 404 });
       if (loginBlocked(clientIp)) return json({ ok: false, msg: '尝试次数过多，请 15 分钟后再试' }, 429);
-      if (await verifyAdminPassword(cfg.admin, params.get('password') || '')) {
+      // 用户名与密码都校验完再判定（密码校验总会执行，不因用户名错误提前返回），错误提示不区分是哪一项
+      const userOk = timingSafeEqual(params.get('username') || '', adminUserOf(cfg));
+      const passOk = await verifyAdminPassword(cfg.admin, params.get('password') || '');
+      if (userOk && passOk) {
         loginSuccess(clientIp);
         const token = await makeAuthToken(cfg);
         return new Response(JSON.stringify({ ok: true, next: safeNext(params.get('next'), panelPath) }), {
@@ -5086,7 +5098,7 @@ async function handleRequest(request, env) {
         });
       }
       loginFail(clientIp);
-      return json({ ok: false, msg: '密码错误' }, 403);
+      return json({ ok: false, msg: '用户名或密码错误' }, 403);
     }
     if (!loginNextOk(url.searchParams.get('next'), panelPath)) return new Response('Not Found', { status: 404 });
     return new Response(loginHTML, { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8' } });
@@ -5175,7 +5187,7 @@ async function handleRequest(request, env) {
           const stored = await saveConfig(env, merged);
           // 直接用刚写入的数据组装新配置（不回读 KV：边缘缓存可能仍是旧值）
           const fresh = buildConfig(env, stored);
-          // 修复：UUID / 管理密码变更会使登录态签名失效——当前会话已通过鉴权，直接签发新令牌，面板无需重新登录
+          // 修复：UUID / 管理密码 / 管理用户名变更会使登录态签名失效——当前会话已通过鉴权，直接签发新令牌，面板无需重新登录
           const headers = {};
           if (fresh.admin && authKey(fresh) !== authKey(cfg)) headers['Set-Cookie'] = authCookie(await makeAuthToken(fresh));
           return json({ ok: true, data: publicConfig(fresh, env), ignored, msg: '已保存：本地区立即生效，其他地区约 1 分钟内同步' }, 200, headers);
@@ -5187,7 +5199,7 @@ async function handleRequest(request, env) {
     if (apiName === 'logout') {
       if (request.method !== 'POST') return json({ ok: false, msg: '仅支持 POST' }, 405);
       // 会话令牌是无状态的签名令牌，无法在服务端单独吊销：这里清除浏览器中的 Cookie。
-      // 要让已签发的令牌全部失效，修改管理密码或 UUID 即可（签名密钥随之变化）
+      // 要让已签发的令牌全部失效，修改管理密码、管理用户名或 UUID 即可（签名密钥随之变化）
       return json({ ok: true, msg: '已退出登录' }, 200, { 'Set-Cookie': 'cfnext_auth=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax' });
     }
 

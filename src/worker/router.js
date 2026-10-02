@@ -49,7 +49,10 @@ async function verifyAdminPassword(stored, password) {
   return timingSafeEqual(await pbkdf2Hex(password, fromHex(parts[1]), iter), parts[2]);
 }
 const AUTH_TTL_MS = 24 * 60 * 60 * 1000;
-function authKey(cfg) { return 'cfnext-auth|' + String(cfg.admin) + '|' + String(cfg.uuid); }
+// 当前生效的管理用户名（KV 中为空等异常情况回落默认 admin）
+function adminUserOf(cfg) { return String(cfg.adminUser || '') || 'admin'; }
+// 会话签名密钥含用户名：修改用户名与修改密码一样，使其它浏览器的登录态失效
+function authKey(cfg) { return 'cfnext-auth|' + String(cfg.admin) + '|' + String(cfg.uuid) + '|' + adminUserOf(cfg); }
 async function makeAuthToken(cfg) {
   const exp = Date.now() + AUTH_TTL_MS;
   return exp + '.' + await hmacHex(authKey(cfg), String(exp));
@@ -183,7 +186,10 @@ async function handleRequest(request, env) {
       const params = new URLSearchParams(body);
       if (!loginNextOk(params.get('next'), panelPath)) return new Response('Not Found', { status: 404 });
       if (loginBlocked(clientIp)) return json({ ok: false, msg: '尝试次数过多，请 15 分钟后再试' }, 429);
-      if (await verifyAdminPassword(cfg.admin, params.get('password') || '')) {
+      // 用户名与密码都校验完再判定（密码校验总会执行，不因用户名错误提前返回），错误提示不区分是哪一项
+      const userOk = timingSafeEqual(params.get('username') || '', adminUserOf(cfg));
+      const passOk = await verifyAdminPassword(cfg.admin, params.get('password') || '');
+      if (userOk && passOk) {
         loginSuccess(clientIp);
         const token = await makeAuthToken(cfg);
         return new Response(JSON.stringify({ ok: true, next: safeNext(params.get('next'), panelPath) }), {
@@ -195,7 +201,7 @@ async function handleRequest(request, env) {
         });
       }
       loginFail(clientIp);
-      return json({ ok: false, msg: '密码错误' }, 403);
+      return json({ ok: false, msg: '用户名或密码错误' }, 403);
     }
     if (!loginNextOk(url.searchParams.get('next'), panelPath)) return new Response('Not Found', { status: 404 });
     return new Response(loginHTML, { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8' } });
@@ -284,7 +290,7 @@ async function handleRequest(request, env) {
           const stored = await saveConfig(env, merged);
           // 直接用刚写入的数据组装新配置（不回读 KV：边缘缓存可能仍是旧值）
           const fresh = buildConfig(env, stored);
-          // 修复：UUID / 管理密码变更会使登录态签名失效——当前会话已通过鉴权，直接签发新令牌，面板无需重新登录
+          // 修复：UUID / 管理密码 / 管理用户名变更会使登录态签名失效——当前会话已通过鉴权，直接签发新令牌，面板无需重新登录
           const headers = {};
           if (fresh.admin && authKey(fresh) !== authKey(cfg)) headers['Set-Cookie'] = authCookie(await makeAuthToken(fresh));
           return json({ ok: true, data: publicConfig(fresh, env), ignored, msg: '已保存：本地区立即生效，其他地区约 1 分钟内同步' }, 200, headers);
@@ -296,7 +302,7 @@ async function handleRequest(request, env) {
     if (apiName === 'logout') {
       if (request.method !== 'POST') return json({ ok: false, msg: '仅支持 POST' }, 405);
       // 会话令牌是无状态的签名令牌，无法在服务端单独吊销：这里清除浏览器中的 Cookie。
-      // 要让已签发的令牌全部失效，修改管理密码或 UUID 即可（签名密钥随之变化）
+      // 要让已签发的令牌全部失效，修改管理密码、管理用户名或 UUID 即可（签名密钥随之变化）
       return json({ ok: true, msg: '已退出登录' }, 200, { 'Set-Cookie': 'cfnext_auth=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax' });
     }
 

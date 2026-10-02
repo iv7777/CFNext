@@ -40,9 +40,9 @@ async function call(env, path, { method = 'GET', body, cookie, ua = BROWSER, hea
   if (body !== undefined && typeof body !== 'string') { h['Content-Type'] = 'application/json'; body = JSON.stringify(body); }
   return worker.fetch(new Request('https://node.example.com' + path, { method, headers: h, body, redirect: 'manual' }), env, {});
 }
-async function login(env, password = 'pw', panelPath = UUID) {
+async function login(env, password = 'pw', panelPath = UUID, username = 'admin') {
   const res = await call(env, '/login', {
-    method: 'POST', body: 'password=' + encodeURIComponent(password) + '&next=' + encodeURIComponent('/' + panelPath),
+    method: 'POST', body: 'username=' + encodeURIComponent(username) + '&password=' + encodeURIComponent(password) + '&next=' + encodeURIComponent('/' + panelPath),
     headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'CF-Connecting-IP': '203.0.113.' + Math.floor(Math.random() * 250) },
   });
   assert.equal(res.status, 200, 'login should succeed');
@@ -921,10 +921,51 @@ test('管理密码：面板设置的密码以加盐摘要存入 KV；旧版明�
   assert.notEqual(stored(env).admin, h);
   assert.ok(!JSON.stringify(stored(env)).includes('brand-new'));
   await login(env, 'brand-new');
-  const bad = await call(env, '/login', { method: 'POST', body: 'password=legacy-pw&next=' + encodeURIComponent('/' + UUID), headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'CF-Connecting-IP': '198.51.100.77' } });
+  const bad = await call(env, '/login', { method: 'POST', body: 'username=admin&password=legacy-pw&next=' + encodeURIComponent('/' + UUID), headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'CF-Connecting-IP': '198.51.100.77' } });
   assert.equal(bad.status, 403);
   const rej = await call(env, `/${UUID}/api/config`, { method: 'POST', cookie: await login(env, 'brand-new'), body: { admin: 'cfnext-pbkdf2$x' } });
   assert.equal(rej.status, 400);
+});
+
+test('管理用户名：默认 admin；用户名或密码任一错误都拒绝且提示相同；改用户名后旧会话失效、当前会话续签；区分大小写', async () => {
+  const env = baseEnv();
+  const ip = () => '198.18.' + Math.floor(Math.random() * 250) + '.' + Math.floor(Math.random() * 250);
+  const post = (u, pw) => call(env, '/login', { method: 'POST', body: `username=${encodeURIComponent(u)}&password=${pw}&next=${encodeURIComponent('/' + UUID)}`,
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'CF-Connecting-IP': ip() } });
+  const noUser = await call(env, '/login', { method: 'POST', body: `password=pw&next=${encodeURIComponent('/' + UUID)}`,
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'CF-Connecting-IP': ip() } });
+  assert.equal(noUser.status, 403, '不带用户名不能登录');
+  const wrongUser = await post('root', 'pw'), wrongPw = await post('admin', 'bad');
+  assert.equal(wrongUser.status, 403); assert.equal(wrongPw.status, 403);
+  assert.equal((await wrongUser.json()).msg, (await wrongPw.json()).msg, '错误提示不区分是哪一项');
+  const oldCookie = await login(env);   // 默认用户名 admin
+  // 面板修改用户名：当前会话续签，旧 Cookie 失效
+  const save = await call(env, `/${UUID}/api/config`, { method: 'POST', cookie: oldCookie, body: { adminUser: 'Boss' } });
+  const r = await save.json();
+  assert.equal(r.ok, true); assert.equal(r.data.adminUser, 'Boss');
+  const renewed = save.headers.get('Set-Cookie').split(';')[0];
+  assert.equal((await call(env, `/${UUID}/api/config`, { cookie: renewed })).status, 200, '当前会话续签');
+  assert.equal((await call(env, `/${UUID}/api/config`, { cookie: oldCookie })).status, 403, '旧会话失效');
+  assert.equal((await post('admin', 'pw')).status, 403, '旧用户名不能再登录');
+  assert.equal((await post('boss', 'pw')).status, 403, '区分大小写');
+  await login(env, 'pw', UUID, 'Boss');
+  // 校验：空格 / 控制字符拒绝；留空恢复默认 admin
+  const bad = await call(env, `/${UUID}/api/config`, { method: 'POST', cookie: renewed, body: { adminUser: 'a b' } });
+  assert.equal(bad.status, 400);
+  const reset = await (await call(env, `/${UUID}/api/config`, { method: 'POST', cookie: renewed, body: { adminUser: '' } })).json();
+  assert.equal(reset.data.adminUser, 'admin');
+  await login(env, 'pw', UUID, 'admin');
+});
+
+test('管理用户名：环境变量 ADMIN_USER 优先且面板只读（保存时忽略、不写入 KV）', async () => {
+  const env = baseEnv({ ADMIN_USER: 'ops' });
+  const cookie = await login(env, 'pw', UUID, 'ops');
+  const cfg = (await (await call(env, `/${UUID}/api/config`, { cookie })).json()).data;
+  assert.equal(cfg.adminUser, 'ops'); assert.equal(cfg.envLocked.adminUser, 'ADMIN_USER');
+  const r = await (await call(env, `/${UUID}/api/config`, { method: 'POST', cookie, body: { adminUser: 'other', tlsOnly: false } })).json();
+  assert.equal(r.ok, true);
+  assert.equal(JSON.parse(env.K.m.get('config')).adminUser, undefined, 'ADMIN_USER 不写入 KV');
+  await login(env, 'pw', UUID, 'ops');
 });
 
 test('登录加固：/login 与 /version 对不知道面板路径的人返回 404；IPv6 按 /64 计数；限速表满时不会被清零', async () => {
@@ -932,7 +973,7 @@ test('登录加固：/login 与 /version 对不知道面板路径的人返回 40
   assert.equal((await call(env, '/login')).status, 404);
   assert.equal((await call(env, '/login?next=/wrong')).status, 404);
   assert.equal((await call(env, '/login' + nextQs(UUID))).status, 200);
-  const post = (pw, ip, path = UUID) => call(env, '/login', { method: 'POST', body: `password=${pw}&next=${encodeURIComponent('/' + path)}`,
+  const post = (pw, ip, path = UUID) => call(env, '/login', { method: 'POST', body: `username=admin&password=${pw}&next=${encodeURIComponent('/' + path)}`,
     headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'CF-Connecting-IP': ip } });
   assert.equal((await post('pw', '203.0.113.1', 'wrong')).status, 404, 'next 不指向面板路径：不处理、不计数');
   assert.equal((await call(env, '/version')).status, 404);
