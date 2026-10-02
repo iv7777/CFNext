@@ -12,7 +12,6 @@
 //    TROJAN       设为 true/1 开启 Trojan 协议（可选）
 //    TROJAN_PASSWORD  Trojan 密码（可选，留空则使用 UUID）
 //    ALPN         自定义 ALPN 协商（可选）
-//    YX           自定义优选 IP 列表（可选，格式 IP:port#名称，逗号分隔）
 //    K            已绑定 KV 命名空间时读取图形化配置
 // ============================================================================
 import { connect } from 'cloudflare:sockets';

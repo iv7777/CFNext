@@ -115,12 +115,10 @@ function fetchTimeout(url, opts, ms) {
   });
 }
 // 解析优选域名/优选API为 IP：URL 数据源与域名并发拉取（避免串行拖垮订阅墙钟）；按输入顺序均衡截断 maxTotal，保证各地区节点都有
-// allowRegionFallback：仅「自定义订阅 + 追加内置及默认节点」开启时允许地区回退生成——
-// 数据源能确定地区（路径含地区码）但无可解析 IP 时，用 CF 段随机生成该地区节点；
-// filterCF：仅自定义模式（关闭追加）传 false，输入框内容原样下发（用户自担可用性）；追加/默认模式保持 CF 段过滤保证可达
+// filterCF：true（订阅生成）只保留 Cloudflare 段 IP，保证可达；false 仅用于面板「测试」按钮，需要看到被丢弃的非 CF 段地址
 // v6：默认 IPv4 模式跳过 AAAA 查询（省一半 DNS 子请求）；仅筛选含 IPv6 时传 true
 // opts.fresh：不读缓存、失败不回退旧缓存（面板「测试」按钮用）；opts.onRaw(url, status, text)：回传优选 API 的原始响应
-async function resolvePreferredDomains(domainsStr, limitPerDomain = 100, maxTotal = 300, allowRegionFallback = false, filterCF = true, v6 = false, opts = {}) {
+async function resolvePreferredDomains(domainsStr, limitPerDomain = 100, maxTotal = 300, filterCF = true, v6 = false, opts = {}) {
   const list = String(domainsStr || '').split(/[\n,;]+/).map(s => s.trim().replace(/^\*\./, '')).filter(Boolean);
   const now = Date.now();
   // DoH 降级链：CF 官方 1.1.1.1 优先（Worker 与 1.1.1.1 同机房，内网时延 <5ms），仅当请求本身失败（网络错误 / 非 200）
@@ -152,7 +150,7 @@ async function resolvePreferredDomains(domainsStr, limitPerDomain = 100, maxTota
         if (!/^https?:\/\//i.test(real)) real = 'https://' + real;
         d = real;
       }
-      const ck = 'url:' + d + (allowRegionFallback ? '|rf' : '') + (filterCF ? '' : '|raw');
+      const ck = 'url:' + d + (filterCF ? '' : '|raw');
       const cHit = DNH_CACHE.get(ck);
       if (!opts.fresh && cHit && now - cHit.t < 10 * 60 * 1000) return cHit.ips.slice(0, limitPerDomain);
       if (!opts.fresh) {
@@ -311,21 +309,6 @@ async function resolvePreferredDomains(domainsStr, limitPerDomain = 100, maxTota
         return [];   // 无历史缓存才返回空
       }
     }
-    // 用户自定义条目（IP / IP:端口 / 域名:端口 / 带#名称）：
-    // 修复：原先纯 IP 与带端口/名称的条目不匹配下方域名正则被整体丢弃 → 自定义订阅模式节点全部丢失、名称被忽略
-    if (!d.includes('://') && !/^[a-z0-9.-]+\.[a-z]{2,}$/i.test(d)) {
-      const cm = d.match(/^(\[?[0-9a-fA-F:]+\]?|\d{1,3}(?:\.\d{1,3}){3}|[a-z0-9.-]+\.[a-z]{2,})(?::(\d{1,5}))?(?:#([^\r\n]*))?$/i);
-      if (!cm) return [];
-      const host = cm[1].replace(/^\[|\]$/g, '');
-      const port = cm[2] ? parseInt(cm[2]) : 443;
-      const rawName = (cm[3] || '').trim();
-      const isIp = isValidIp(host);
-      if (!isIp && !/^[a-z0-9.-]+\.[a-z]{2,}$/i.test(host)) return [];
-      if (filterCF && isIp && !isCloudflareIP(host)) return [];
-      if (rawName) return [{ ip: host, port, name: rawName }];   // 带名称原样下发（域名保留让客户端动态解析，名称不被重写）
-      if (isIp) return [{ ip: host, port, name: '' }];
-      // 无名称的域名：落入下方 DoH 解析分支（与原先一致）
-    }
     // 缓存键包含记录类型（修复：原先 A 与 A+AAAA 共用同一键，IPv6 查询可能命中只含 IPv4 的缓存）
     const dk = d + '|' + family;
     const hit = DNH_CACHE.get(dk);
@@ -333,7 +316,7 @@ async function resolvePreferredDomains(domainsStr, limitPerDomain = 100, maxTota
     // 按需解析：默认仅查 A（IPv4），筛选含 IPv6 时才查 AAAA，节省 DNS 子请求
     const aRec = family === 'v6' ? [] : await qry(d, 'A', 1);
     const aaaaRec = family === 'v4' ? [] : await qry(d, 'AAAA', 28);
-    // 严格自定义模式（filterCF=false）：域名解析结果原样下发，不做 CF 段过滤（用户自担可用性）
+    // filterCF=false（仅面板测试）：域名解析结果原样返回，不做 CF 段过滤
     let ips = [...new Set(aRec.concat(aaaaRec))].filter(ip => filterCF ? isCloudflareIP(ip) : true);
     ips = ips.slice(0, limitPerDomain);
     if (!ips.length) {
@@ -361,28 +344,21 @@ async function resolvePreferredDomains(domainsStr, limitPerDomain = 100, maxTota
 async function buildNodes(cfg, cap = NODE_CAP) {
   const nodes = [];
   const used = new Set();
-  // 订阅模式：random 随机优选（CF CIDR 随机生成指定数量，不经域名解析）
-  const mode = (cfg.optimizer && cfg.optimizer.subMode) || '';
-  // 筛选含 IPv6 时随机生成/补足混合 v4+v6 段；仅勾选 IPv6 时全走官方 v6 网段（ips-v6 拉取，实测可用）
+  // 筛选含 IPv6 时才需要交替排列 v4 / v6（见下方 preferredIPs 重排）
   const ipT = (cfg.filter && cfg.filter.ipType) || [];
   const wantV6 = ipT.includes('IPv6');
   const onlyV6 = ipT.length === 1 && ipT[0] === 'IPv6';
-  const RAND_CIDRS = onlyV6 ? OFFICIAL_V6_CIDRS : (wantV6 ? [...REACHABLE_CIDRS, ...OFFICIAL_V6_CIDRS] : REACHABLE_CIDRS);
-  // 仅自定义模式（custom + 关闭追加）：严格按「优选节点」输入框内容下发，放行非 CF 段 IP（用户自担可用性）；
-  // 其它模式（默认/追加/随机）入口必须是 CF 段——非 CF IP 无法转发到 Worker（历史 v2rayNG 全 -1 根因）
-  const allowNonCF = (mode === 'custom' && !(cfg.optimizer && cfg.optimizer.subIncludeDefault));
-  // 节点形态统一按 1.0.6 机制（方案 B）：所有模式端口原样单端口下发（固定 443、不随机 TLS 端口、不追加明文端口变体）
+  // 节点形态：端口原样单端口下发（固定 443、不随机 TLS 端口、不追加明文端口变体）。
+  // 入口 IP 必须是 CF 段——非 CF IP 无法转发到 Worker（历史 v2rayNG 全 -1 根因），直接丢弃；域名节点由客户端解析，不在此限制
   const push = (server, port, name) => {
     if (nodes.length >= cap) return;   // 生成过程限流：避免多协议膨胀超 Worker CPU
-    // 入口 IP 硬性要求：非 CF 段 IP 无法转发到 Worker，直接丢弃；
-    // 例外：仅「自定义订阅 · 仅自定义节点」（allowNonCF）按用户填写原样放行
-    if (isValidIp(server) && !isCloudflareIP(server) && !allowNonCF) return;
+    if (isValidIp(server) && !isCloudflareIP(server)) return;
     const key = server + ':' + port;   // 按 服务器:端口 去重（单端口机制：同 IP 同端口仅下发一次）
     if (used.has(key)) return;
     used.add(key);
     const isTls = !HTTP_PORTS.has(Number(port));
     if (cfg.tlsOnly && !isTls) return;   // TLS 控制：仅下发 TLS 端口节点，明文端口跳过
-    // 节点端口按源端口原样下发（默认/自定义/随机优选通常是 443），不做 TLS 端口随机（443 全域可达性最佳）
+    // 节点端口按源端口原样下发（通常是 443），不做 TLS 端口随机（443 全域可达性最佳）
     const finalPort = Number(port);
     const nm = protoNames(name, cfg.enableVless, cfg.enableTrojan, cfg.enableXhttp && isTls);
     if (cfg.enableVless) nodes.push(vlessNode(cfg, server, finalPort, nm.v));
@@ -395,33 +371,13 @@ async function buildNodes(cfg, cap = NODE_CAP) {
     push(server, port, name);
     if (!cfg.tlsOnly && port === 443) push(server, 80, name + '·80');
   };
-  if (mode === 'random') {
-    // 生成数量以面板「随机优选数量」为准；节点上限（cap）只做封顶
-    const n = Math.min(Math.max(parseInt(cfg.optimizer.subRandomCount) || 16, 1), Math.min(99, cap));
-    // 数量 = 下发节点总数（含启用的所有协议），而非 IP 数：每个 IP 生成一条后计数，达 n 即止
-    const protoCount = (cfg.enableVless ? 1 : 0) + (cfg.enableTrojan ? 1 : 0) + (cfg.enableXhttp ? 1 : 0) || 1;
-    let made = 0;
-    // 生成 3 倍候选（随机碰撞去重后仍足够），按数量截取
-    const randIPs = randomIPsFromCidrs(RAND_CIDRS, Math.ceil(n / protoCount) * 3);
-    for (const ip of randIPs) {
-      if (made >= n) break;
-      // 随机优选模式：按 1.0.6 机制——每个 IP 每协议仅固定 443 单端口下发，不随机 TLS 端口、不追加明文端口变体
-      if (cfg.enableVless) { nodes.push(vlessNode(cfg, ip, 443, '优选IP-' + String(made + 1).padStart(2, '0'))); made++; }
-      if (made >= n) break;
-      if (cfg.enableTrojan) { nodes.push(trojanNode(cfg, ip, 443, '优选IP-' + String(made + 1).padStart(2, '0'))); made++; }
-      if (made >= n) break;
-      if (cfg.enableXhttp) { nodes.push(vlessNode(cfg, ip, 443, '优选IP-' + String(made + 1).padStart(2, '0'), { type: 'xhttp' })); made++; }
-    }
-    return nodes;
-  }
   const domains = String(cfg.preferredDomains || '').split(/[\n,;]+/).map(s => s.trim()).filter(s => s && !s.includes('://'));  // URL 数据源由 resolvePreferredDomains 解析，不作为服务器地址
   domains.forEach((d, i) => {
-    // 支持 "IP:端口#名称" 格式：剥离 #名称 后再解析地址，名称用于节点命名（无名称时用“优选IP-XX”兜底）
+    // 内部条目格式 "主机[:端口]#名称"（原生地址 / 官方域名兜底带名称）：剥离 #名称 后再解析地址，无名称时用“优选IP-XX”兜底
     const hash = d.indexOf('#');
     const addr = (hash >= 0 ? d.slice(0, hash) : d).trim();
     const nm = (hash >= 0 ? d.slice(hash + 1) : '').trim();
     const p = parseHostPort(addr, 443);
-    if (p.host.startsWith('*.')) return;   // 通配符域名无法作为服务器地址，其 IP 由 resolvePreferredDomains 解析下发
     multiPort(p.host, p.port, nm || '优选IP-' + String(i + 1).padStart(2, '0'));
   });
   // 双选（IPv4+IPv6）时把 preferredIPs 重排为 v4/v6 交替：各来源 v4 天然排前，
@@ -442,7 +398,6 @@ async function buildNodes(cfg, cap = NODE_CAP) {
   prefIPs.forEach((x, i) => {
     multiPort(x.ip, x.port || 443, x.name || '优选IP-' + String(i + 1).padStart(2, '0'));
   });
-  // 已移除 CF CIDR 随机补足（随机任播 IP 大量不可达，客户端测速 -1）：节点数量由实际来源决定，旧 KV 中的 fillCount 被忽略
   return nodes;
 }
 

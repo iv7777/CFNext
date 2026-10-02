@@ -152,7 +152,7 @@ async function fetchUouinIPs(wantV4, wantV6) {
 async function customApiFetch(url) {
   const r = { status: 0, raw: '', items: [], dropped: [], error: '' };
   let seenRaw = false;
-  const all = await resolvePreferredDomains(url, 200, 300, false, false, false, {
+  const all = await resolvePreferredDomains(url, 200, 300, false, false, {
     fresh: true,
     onRaw: (u, status, text) => { seenRaw = true; r.status = status; r.raw = text; },
   }).catch(() => []);

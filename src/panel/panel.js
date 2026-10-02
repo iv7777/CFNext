@@ -230,44 +230,6 @@ function renderAll(){
   $('stProto').textContent = protoText();
   rerenderIpTest();
 }
-function parseIps(t){
-  var out = [];
-  String(t || '').split(/[\n,;]+/).map(function(s){ return s.trim(); }).filter(Boolean).forEach(function(s){
-    var name = '';
-    if (s.indexOf('#') >= 0){ var a = s.split('#'); s = a[0]; name = a[1]; }
-    var m;
-    if ((m = s.match(/^\[([0-9a-fA-F:]+)\](?::(\d+))?$/))){ out.push({ ip: m[1], port: parseInt(m[2]) || 443, name: name }); return; }
-    if ((m = s.match(/^(\d+\.\d+\.\d+\.\d+)(?::(\d+))?$/))){ out.push({ ip: m[1], port: parseInt(m[2]) || 443, name: name }); }
-  });
-  return out;
-}
-function renderPreferred(){
-  if (!CFG) return;
-  var lines = [];
-  String(CFG.preferredDomains || '').split(/[\n,;]+/).map(function(s){ return s.trim(); }).filter(Boolean).forEach(function(s){ lines.push(s); });
-  (CFG.preferredIPs || []).forEach(function(x){
-    lines.push((String(x.ip).indexOf(':') >= 0 ? '[' + x.ip + ']' : x.ip) + ':' + (x.port || 443) + (x.name ? ('#' + x.name) : ''));
-  });
-  $('f-preferred').value = lines.join('\n');
-}
-// 「优选节点」输入框同时承载 preferredDomains 与 preferredIPs：合法 IP 行归入 preferredIPs（按 IP:端口 去重），其余归入 preferredDomains
-function collectPreferred(){
-  var ipLines = [], domLines = [];
-  String($('f-preferred').value).split(/[\n,;]+/).map(function(s){ return s.trim(); }).filter(Boolean).forEach(function(s){
-    if (parseIps(s).length) ipLines.push(s); else domLines.push(s);
-  });
-  var ips = [], seen = {};
-  ipLines.forEach(function(s){
-    var p = parseIps(s);
-    if (!p.length) return;
-    var k = p[0].ip + ':' + (p[0].port || 443);
-    if (seen[k]) return;
-    seen[k] = 1;
-    ips.push(p[0]);
-  });
-  return { domains: domLines.join('\n'), ips: ips };
-}
-
 /* ===== 配置表单：由服务端字段表 SCHEMA 驱动 =====
  * SCHEMA（字段表）与 sharedCheck（字段校验函数）由服务端下发页面时注入，与服务端保存接口使用同一份定义与校验代码。
  * 新增配置项：在 worker 的 CONFIG_SCHEMA 加一行，并在本页面放置 id 与该行 el 对应的控件即可，
@@ -361,8 +323,6 @@ function fillForm(){
   if (!CFG) return;
   clearFieldErrors();
   SCHEMA.forEach(function(d){ fillField(d, getPath(CFG, d.key)); applyEnvLock(d); });
-  renderPreferred();
-  onSubMode();
   onRelayMode();
   updatePdCount();
 }
@@ -375,9 +335,6 @@ function collectForm(){
     var v = readField(d);
     if (v !== undefined) setPath(body, d.key, v);
   });
-  var pref = collectPreferred();
-  body.preferredDomains = pref.domains;
-  body.preferredIPs = pref.ips;
   return body;
 }
 // 前端预校验（与服务端同一个校验函数）：就地规范化 body，返回字段级错误列表
@@ -783,56 +740,6 @@ function loadBuiltinDomains(){
 }
 $('o-prefdomains').addEventListener('input', updatePdCount);
 
-/* ===== 优选配置 ===== */
-function onSubMode(){
-  var m = $('o-submode').value;
-  $('sm-custom').style.display = (m === 'custom') ? '' : 'none';
-  $('sm-random').style.display = (m === 'random') ? '' : 'none';
-  // 「追加默认优选域名」仅在自定义订阅 / 随机优选模式下可选；
-  // 订阅模式关闭（使用面板默认节点池）时强制为关闭并禁用，避免默认模式下误开追加导致行为不符
-  if (m === '') {
-    $('o-subinc').value = '0';
-    $('o-subinc').disabled = true;
-  } else {
-    $('o-subinc').disabled = false;
-  }
-  // 订阅模式与仪表盘「地址来源」胶囊互斥同步（三态全部明确跟随）：
-  // custom → 自定义优选开、随机优选关；random → 随机优选开、自定义优选关；关闭 → 两个胶囊都关
-  if (m === 'custom') {
-    $('fl-custom-pref').checked = true;
-    $('fl-random-pref').checked = false;
-  } else if (m === 'random') {
-    $('fl-custom-pref').checked = false;
-    $('fl-random-pref').checked = true;
-  } else {
-    $('fl-custom-pref').checked = false;
-    $('fl-random-pref').checked = false;
-  }
-}
-// 仪表盘「地址来源 → 自定义优选」与优选配置「订阅模式」联动：
-// 勾选 → 订阅模式切为「自定义订阅（支持汇聚）」并关闭随机优选；取消 → 订阅模式关闭（使用面板默认节点池）
-$('fl-custom-pref').addEventListener('change', function(){
-  if (this.checked) {
-    $('fl-random-pref').checked = false;   // 与随机优选互斥
-    $('o-submode').value = 'custom';
-  } else {
-    if ($('o-submode').value === 'custom') $('o-submode').value = '';
-  }
-  onSubMode();
-  markDirty();
-});
-// 仪表盘「地址来源 → 随机优选」与优选配置「订阅模式 → 随机优选模式（官方接口）」联动：
-// 勾选 → 订阅模式切为 random 并关闭自定义优选；取消 → 订阅模式关闭（若当前为 random）
-$('fl-random-pref').addEventListener('change', function(){
-  if (this.checked) {
-    $('fl-custom-pref').checked = false;   // 与自定义优选互斥
-    $('o-submode').value = 'random';
-  } else {
-    if ($('o-submode').value === 'random') $('o-submode').value = '';
-  }
-  onSubMode();
-  markDirty();
-});
 // 切换「仅 TLS 端口」/ ECH 时，已显示的测试结果随之更新
 $('tls-only').addEventListener('change', rerenderIpTest);
 $('ech-on').addEventListener('change', rerenderIpTest);

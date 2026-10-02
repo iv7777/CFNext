@@ -9,7 +9,7 @@
 //
 // 字段属性：
 //   key       配置路径（支持 a.b 形式的嵌套）
-//   type      bool | int | enum | list（多选胶囊）| string | secret（只写不回显）| text（多行）| ipList
+//   type      bool | int | enum | list（多选胶囊）| string | secret（只写不回显）| text（多行）
 //   def       默认值
 //   el / els  面板控件 id；list 类型用 els：{ 选项值: 控件 id }；无 el 表示面板不展示
 //   label     错误提示中的字段名
@@ -69,19 +69,6 @@ const CONFIG_SCHEMA = [
   { key: 'outboundProxy', type: 'string', def: '', el: 's-outbound', label: '出站代理', maxLen: 1024,
     pattern: '^\\S+$', hint: '出站代理不能包含空格', check: 'proxy' },
   { key: 'outboundMode', type: 'enum', def: '', el: 's-outmode', label: '出站方式', options: ['', 'no', 'only'] },
-  // ---- 优选节点（保存后随订阅下发到客户端；面板中与 preferredIPs 共用一个输入框） ----
-  // 自定义订阅模式下使用的地址（域名 / 优选 API，每行一个）；默认为空（原默认的 6 条 bestcf 地区池全部为第三方中转 IP，已移除）
-  { key: 'preferredDomains', type: 'text', def: '',
-    el: 'f-preferred', custom: true, label: '优选节点', maxLen: 65536 },
-  // [{ ip, port, name }]
-  { key: 'preferredIPs', type: 'ipList', def: [], el: 'f-preferred', custom: true, label: '优选节点', check: 'ipList' },
-  // ---- 订阅模式参数 ----
-  // 订阅模式：'' 关闭（使用面板默认）/ custom 自定义订阅（支持汇聚）/ random 随机优选
-  { key: 'optimizer.subMode', type: 'enum', def: '', el: 'o-submode', label: '订阅模式', options: ['', 'custom', 'random'] },
-  // random 模式随机优选数量
-  { key: 'optimizer.subRandomCount', type: 'int', def: 16, el: 'o-rand', label: '随机优选数量', min: 1, max: 99 },
-  // 自定义订阅模式下是否同时下发内置及默认地区节点（false 仅自定义）
-  { key: 'optimizer.subIncludeDefault', type: 'bool', def: false, el: 'o-subinc', label: '追加默认节点' },
   // ---- 优选域名：留空使用内置列表；填写后整体替换内置列表（每行一个纯主机名，最多 30 个） ----
   { key: 'prefDomains', type: 'text', def: '', el: 'o-prefdomains', label: '优选域名', maxLen: 4096, check: 'domainList' },
   // ---- 内置地区反代：builtin 内置（默认，按机房自动选地区）/ custom 仅用自定义反代列表 / off 不使用地区反代 ----
@@ -99,7 +86,7 @@ const CONFIG_SCHEMA = [
   // 勾选的运营商集合（全选 = 不过滤）
   { key: 'filter.isp', type: 'list', def: ['移动', '联通', '电信'], label: '运营商偏好', options: ['移动', '联通', '电信'],
     els: { '移动': 'fl-isp-m', '联通': 'fl-isp-c', '电信': 'fl-isp-t' } },
-  // ---- 默认模式地址来源（仅订阅模式「关闭」时生效；自定义 / 随机优选由订阅模式本身决定） ----
+  // ---- 地址来源（订阅节点池由这三项组装） ----
   { key: 'src.native', type: 'bool', def: false, el: 'fl-native', label: '原生地址' },
   { key: 'src.prefDomain', type: 'bool', def: true, el: 'fl-pref-domain', label: '优选域名' },
   { key: 'src.prefIp', type: 'bool', def: true, el: 'fl-pref-ip', label: '优选 IP' },
@@ -164,7 +151,7 @@ function checkFieldValue(def, v) {
     if (def.reserved && def.reserved.indexOf(v.toLowerCase()) >= 0) return { error: '「' + v + '」为保留路径，请换一个' };
     return { value: v };
   }
-  return { value: v };   // 其余类型（ipList）仅由服务端 SERVER_CHECKS 校验
+  return { value: v };   // 其余类型仅由服务端 SERVER_CHECKS 校验
 }
 
 // 仅服务端执行的附加校验：返回错误信息字符串或 { value } 规范化结果
@@ -181,7 +168,7 @@ const SERVER_CHECKS = {
     for (const raw of String(v || '').split(/[\n,;\s]+/).filter(Boolean)) {
       const d = raw.toLowerCase();
       if (!PREF_DOMAIN_RE.test(d) || /^[0-9]+$/.test(d.slice(d.lastIndexOf('.') + 1))) {
-        return '「' + raw.slice(0, 60) + '」不是有效的域名：只填主机名（如 cf.example.com），不含 http://、端口、路径或通配符，IP 地址请填到「优选节点」';
+        return '「' + raw.slice(0, 60) + '」不是有效的域名：只填主机名（如 cf.example.com），不含 http://、端口、路径或通配符，IP 地址不能作为优选域名';
       }
       if (!seen.has(d)) { seen.add(d); out.push(d); }
     }
@@ -220,22 +207,6 @@ const SERVER_CHECKS = {
       if (!ssCipherAlgo(p.method)) return 'SS 加密方式仅支持 ' + SS_METHODS.join(' / ');
       if (!p.password) return 'SS 缺少密码';
     }
-  },
-  ipList(v) {
-    if (v == null) return { value: [] };
-    if (!Array.isArray(v)) return '必须为 IP 列表';
-    if (v.length > 5000) return '最多 5000 条';
-    const out = [];
-    for (const x of v) {
-      const ip = x && String(x.ip || '').trim().replace(/^\[|\]$/g, '');
-      if (!ip || !isValidIp(ip)) return '无效的 IP：' + (x && x.ip);
-      const port = x.port == null || x.port === '' ? 443 : Number(x.port);
-      if (!Number.isInteger(port) || port < 1 || port > 65535) return ip + ' 的端口须为 1 - 65535';
-      const name = String(x.name || '').trim();
-      if (name.length > 64) return ip + ' 的名称过长（最多 64 字符）';
-      out.push({ ip, port, name });
-    }
-    return { value: out };
   },
 };
 

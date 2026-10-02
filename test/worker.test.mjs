@@ -49,6 +49,14 @@ async function login(env, password = 'pw', panelPath = UUID) {
   return res.headers.get('Set-Cookie').split(';')[0];
 }
 const baseEnv = (extra = {}) => ({ U: UUID, ADMIN: 'pw', K: kv(), ...extra });
+// 固定节点列表：把若干 `IP:端口#名称` 行托管为「自定义优选 API 1」的响应（默认模式下唯一的节点来源），测试里用它精确控制节点
+const NODE_LISTS = new Map();
+const fixedNodes = (lines, extra = {}) => {
+  const url = 'https://nodes.test/' + createHash('md5').update(lines).digest('hex') + '.txt';
+  NODE_LISTS.set(url, lines);
+  return { cfgRev: 2, src: { prefDomain: false }, ipsrc: { hostmonit: false, uouin: false, api1: true, api1Url: url }, filter: { ipType: ['IPv4'] }, ...extra };
+};
+const nodesFetch = (u) => NODE_LISTS.has(u) ? new Response(NODE_LISTS.get(u)) : new Response('Not Found', { status: 404 });
 
 test('GET /api/config 返回字段表默认值（与旧 DEFAULT_CONFIG 一致）及派生信息', async () => {
   const env = baseEnv();
@@ -60,13 +68,12 @@ test('GET /api/config 返回字段表默认值（与旧 DEFAULT_CONFIG 一致）
   const legacy = {
     host: '', enableVless: true, enableTrojan: false, trojanPassword: '', enableXhttp: false,
     alpn: '', ech: false, echHost: 'cloudflare-ech.com', echDns: '', tlsOnly: true,
-    probeAlive: false, proxyIP: '', outboundProxy: '', outboundMode: '', preferredIPs: [],
-    optimizer: { subMode: '', subRandomCount: 16, subIncludeDefault: false },
+    probeAlive: false, proxyIP: '', outboundProxy: '', outboundMode: '',
     filter: { region: ['all'], ipType: ['IPv4', 'IPv6'], isp: ['移动', '联通', '电信'] },
     src: { native: false, prefDomain: true, prefIp: true },
   };
   for (const [k, v] of Object.entries(legacy)) assert.deepEqual(d[k], v, k);
-  assert.equal(d.preferredDomains, '', '默认不再预置 bestcf 第三方中转地址');
+  for (const k of ['optimizer', 'preferredDomains', 'preferredIPs']) assert.equal(k in d, false, `已移除的自定义订阅 / 随机优选配置 ${k}`);
   assert.equal(d.uuid, UUID);
   assert.equal(d.path, '', '面板路径跟随 UUID 时返回空');
   assert.equal(d.panelPath, UUID);
@@ -102,14 +109,12 @@ test('字段校验：范围、枚举、格式、全部协议关闭', async () =>
   const env = baseEnv();
   const cookie = await login(env);
   const cases = [
-    [{ optimizer: { subRandomCount: 500 } }, 'optimizer.subRandomCount'],
-    [{ optimizer: { subMode: 'bogus' } }, 'optimizer.subMode'],
     [{ path: 'a/b' }, 'path'],
     [{ path: 'login' }, 'path'],
     [{ subUrl: 'version' }, 'subUrl'],
     [{ host: 'bad host' }, 'host'],
     [{ outboundProxy: 'ss://rc4:pw@1.2.3.4:8388' }, 'outboundProxy'],
-    [{ preferredIPs: [{ ip: '999.1.1.1', port: 443 }] }, 'preferredIPs'],
+    [{ prefDomains: 'a.example.com:443' }, 'prefDomains'],
     [{ filter: { region: ['XX'] } }, 'filter.region'],
     [{ enableVless: false, enableTrojan: false, enableXhttp: false }, 'enableVless'],
   ];
@@ -128,8 +133,8 @@ test('保存只写入字段表登记的配置项，规范化取值，忽略未�
     method: 'POST', cookie,
     body: {
       admin: 'new-secret', _quotaCap: 1, version: '9.9.9', fragment: 'x', src: { customPref: true, native: true },
-      optimizer: { subRandomCount: '30' }, nodeLimitCount: 300, subUrl: '/AAZ/sub', host: 'https://Node.Example.com/path', filter: { region: ['all', 'HK'] },
-      preferredIPs: [{ ip: '[2606:4700::1]', port: '8443', name: ' 香港 ' }],
+      optimizer: { subRandomCount: '30', subMode: 'random' }, nodeLimitCount: 300, subUrl: '/AAZ/sub', host: 'https://Node.Example.com/path', filter: { region: ['all', 'HK'] },
+      preferredIPs: [{ ip: '[2606:4700::1]', port: '8443', name: ' 香港 ' }], preferredDomains: 'x.example.com',
     },
   });
   const r = await res.json();
@@ -139,14 +144,14 @@ test('保存只写入字段表登记的配置项，规范化取值，忽略未�
   for (const k of ['_quotaCap', 'version', 'fragment']) assert.equal(k in s, false, k);
   assert.equal('customPref' in s.src, false);
   assert.equal(s.src.native, true);
-  assert.equal(s.optimizer.subRandomCount, 30);
+  for (const k of ['optimizer', 'preferredIPs', 'preferredDomains']) assert.equal(k in s, false, `${k}（已移除的自定义订阅 / 随机优选配置）不写入`);
   assert.equal('nodeLimitCount' in s, false, '已移除的字段不写入');
   assert.equal(s.subUrl, 'AAZ');
   assert.equal(s.host, 'Node.Example.com');
   assert.deepEqual(s.filter.region, ['all']);
-  assert.deepEqual(s.preferredIPs, [{ ip: '2606:4700::1', port: 8443, name: '香港' }]);
   assert.ok(r.ignored.includes('admin') && r.ignored.includes('_quotaCap') && r.ignored.includes('src.customPref') && r.ignored.includes('nodeLimitCount'));
-  assert.equal(r.data.optimizer.subRandomCount, 30, '响应直接反映刚保存的配置');
+  assert.ok(r.ignored.includes('optimizer') && r.ignored.includes('preferredIPs') && r.ignored.includes('preferredDomains'));
+  assert.equal(r.data.src.native, true, '响应直接反映刚保存的配置');
 });
 
 test('未绑定 KV 时保存返回明确错误（问题 10）', async () => {
@@ -186,7 +191,7 @@ test('环境变量锁定的字段在面板只读、保存时忽略（问题 3）
 });
 
 test('订阅别名只输出订阅，不开放面板 / 管理接口（问题 6）', async () => {
-  const env = baseEnv({ K: kv({ config: { subUrl: 'AAZ', optimizer: { subMode: 'random' }, filter: { ipType: ['IPv4'] } } }) });
+  const env = baseEnv({ K: kv({ config: { subUrl: 'AAZ', filter: { ipType: ['IPv4'] } } }) });
   const cookie = await login(env);
   const sub = await call(env, '/AAZ/sub', { ua: 'v2rayN/7.0' });
   assert.equal(sub.status, 200);
@@ -197,14 +202,17 @@ test('订阅别名只输出订阅，不开放面板 / 管理接口（问题 6）
 });
 
 test('预览与订阅同一流程：返回节点数，订阅不写 KV（问题 7）', async () => {
-  const env = baseEnv({ K: kv({ config: { optimizer: { subMode: 'random', subRandomCount: 10 }, filter: { ipType: ['IPv4'] } } }) });
+  const lines = Array.from({ length: 10 }, (_, i) => `104.16.1.${i + 1}:443#n${i + 1}`).join('\n');
+  const env = baseEnv({ K: kv({ config: fixedNodes(lines) }) });
   const cookie = await login(env);
-  const r = await (await call(env, `/${UUID}/api/sub?fmt=v2ray`, { cookie })).json();
-  assert.equal(r.ok, true);
-  assert.equal(r.count, 10);
-  assert.equal(r.body.trim().split('\n').length, 10);
-  const sub = await call(env, `/${UUID}/sub`, { ua: 'v2rayN/7.0' });
-  assert.equal((await sub.text()).trim().split('\n').length, 10);
+  await withFetch(nodesFetch, async () => {
+    const r = await (await call(env, `/${UUID}/api/sub?fmt=v2ray`, { cookie })).json();
+    assert.equal(r.ok, true);
+    assert.equal(r.count, 10);
+    assert.equal(r.body.trim().split('\n').length, 10);
+    const sub = await call(env, `/${UUID}/sub`, { ua: 'v2rayN/7.0' });
+    assert.equal((await sub.text()).trim().split('\n').length, 10);
+  });
   assert.deepEqual([...env.K.m.keys()], ['config'], '订阅不再写入轮询窗口（issued）');
 });
 
@@ -224,7 +232,8 @@ test('面板页面注入字段表与共用校验函数', async () => {
   const src = html.match(/var sharedCheck = (\(function checkFieldValue[\s\S]*?\n\}\));/);
   assert.ok(src, '校验函数已注入');
   const check = new Function('return ' + src[1])();
-  assert.deepEqual(check(schema.find(d => d.key === 'optimizer.subRandomCount'), '42'), { value: 42 });
+  assert.deepEqual(check({ type: 'int', min: 1, max: 99 }, '42'), { value: 42 });
+  assert.ok(check({ type: 'int', min: 1, max: 99 }, '500').error);
   assert.ok(check(schema.find(d => d.key === 'uuid'), 'x').error);
   // 页面中的每个字段控件都存在
   for (const d of schema) {
@@ -281,24 +290,6 @@ test('单次订阅最多下发 500 个节点，每次下发相同（不再轮询
     assert.deepEqual(b, a, '两次更新下发相同节点');
   } finally { globalThis.fetch = offline; }
   assert.equal(env.K.m.has('issued'), false);
-});
-
-test('默认模式不下发「优选配置」中的自定义域名与 IP', async () => {
-  const env = baseEnv({ K: kv({ config: {
-    preferredDomains: 'my.custom.example\nhttps://api.example.com/ips.txt',
-    preferredIPs: [{ ip: '104.16.0.9', port: 443, name: 'MINE' }],
-    filter: { ipType: ['IPv4'] },
-  } }) });
-  const links = await subLinks(env);
-  assert.ok(links.length > 0);
-  assert.ok(!links.some(l => hostOf(l) === 'my.custom.example' || nameOf(l) === 'MINE'));
-});
-
-test('随机优选数量按面板设定下发', async () => {
-  const env = baseEnv({ K: kv({ config: { optimizer: { subMode: 'random', subRandomCount: 16 }, filter: { ipType: ['IPv4'] } } }) });
-  const links = await subLinks(env);
-  assert.equal(links.filter(l => /^优选IP-\d+$/.test(nameOf(l))).length, 16);
-  assert.equal(links.length, 16, '只下发随机 16 个（不再追加内置保底节点）');
 });
 
 test('选择具体地区时仍保留不带地区的通用节点（优选域名节点）', async () => {
@@ -504,9 +495,6 @@ test('不再内置静态 IP 池；所有来源都没有产出时用官方域名�
   // 默认模式（优选域名开启、在线来源离线）：只有优选域名节点，没有任何 IP 节点
   const b = await subLinks(baseEnv({ K: kv({ config: { filter: { ipType: ['IPv4'] }, ipsrc: { hostmonit: false, uouin: false } } }) }));
   assert.ok(b.length > 0 && b.every(l => !/^\d+\.\d+\.\d+\.\d+$/.test(hostOf(l))), '无内置静态 IP');
-  // 严格自定义模式且列表为空 → 同样兜底
-  const c = await subLinks(baseEnv({ K: kv({ config: { optimizer: { subMode: 'custom' }, preferredDomains: '' } }) }));
-  assert.ok(c.some(l => hostOf(l) === 'cloudflare.com'));
 });
 
 test('仅 TLS 端口：默认开启；关闭后 443 节点追加 80 明文节点，自定义域名同样生效；ECH 强制仅 TLS；旧版 KV 迁移为开启', async () => {
@@ -674,12 +662,11 @@ test('明文端口 WebSocket（http://）不再被重定向到 https；普通 ht
 });
 
 test('订阅：TLS ws 节点带 ed=2048、ALPN 随面板下发；多协议时 Trojan / XHTTP 名称加 .T / .X，节点名全局唯一', async () => {
-  // 自定义订阅中两条地址同名（名称按填写原样使用）
-  const env = baseEnv({ K: kv({ config: { enableTrojan: true, enableXhttp: true, alpn: 'h2, http/1.1', cfgRev: 2,
-    optimizer: { subMode: 'custom' }, preferredDomains: '104.16.9.1:443#同名\n104.16.9.2:443#同名', filter: { ipType: ['IPv4'] } } }) });
-  const get = (fmt) => withFetch(notFound, async () => (await call(env, `/${UUID}/sub/${fmt}`, { ua: 'x' })).text());
+  // 优选 API 返回的两条地址dup（名称按来源原样使用）
+  const env = baseEnv({ K: kv({ config: fixedNodes('104.16.9.1:443#dup\n104.16.9.2:443#dup', { enableTrojan: true, enableXhttp: true, alpn: 'h2, http/1.1' }) }) });
+  const get = (fmt) => withFetch(nodesFetch, async () => (await call(env, `/${UUID}/sub/${fmt}`, { ua: 'x' })).text());
   const links = (await get('plain')).split('\n').filter(Boolean);
-  assert.deepEqual(links.map(nameOf), ['同名', '同名.T', '同名.X', '同名·2', '同名.T·2', '同名.X·2']);
+  assert.deepEqual(links.map(nameOf), ['dup', 'dup.T', 'dup.X', 'dup·2', 'dup.T·2', 'dup.X·2']);
   const [v, t, x] = links;
   assert.match(v, /path=%2F[0-9a-f-]+%3Fed%3D2048&/, 'VLESS ws 带 ed=2048');
   assert.match(t, /path=%2F[0-9a-f-]+%3Fed%3D2048/, 'Trojan ws 带 ed=2048');
@@ -694,7 +681,7 @@ test('订阅：TLS ws 节点带 ed=2048、ALPN 随面板下发；多协议时 Tr
   // sing-box：tag 唯一、无 xhttp（官方内核不支持）、early data 用字段声明而非 path、二进制规则集
   const sb = JSON.parse(await get('singbox'));
   const nodes = sb.outbounds.filter(o => o.server);
-  assert.deepEqual(nodes.map(o => o.tag), ['同名', '同名.T', '同名·2', '同名.T·2']);
+  assert.deepEqual(nodes.map(o => o.tag), ['dup', 'dup.T', 'dup·2', 'dup.T·2']);
   const tags = sb.outbounds.map(o => o.tag);
   assert.equal(new Set(tags).size, tags.length, 'outbound tag 不重复');
   assert.ok(nodes.every(o => o.transport.type === 'ws' && o.transport.max_early_data === 2048 && !o.transport.path.includes('?')));
@@ -705,8 +692,8 @@ test('订阅：TLS ws 节点带 ed=2048、ALPN 随面板下发；多协议时 Tr
 });
 
 // ---------------- 批次 1 修复：多格式订阅 / 出站代理解析 / 协议头处理 ----------------
-const subOf = (env, fmt, ua = 'x') => withFetch(notFound, async () => call(env, `/${UUID}/sub/${fmt}`, { ua }));
-const customCfg = (extra) => ({ cfgRev: 2, optimizer: { subMode: 'custom' }, preferredDomains: '104.16.9.1:443#a', filter: { ipType: ['IPv4'] }, ...extra });
+const subOf = (env, fmt, ua = 'x') => withFetch(nodesFetch, async () => call(env, `/${UUID}/sub/${fmt}`, { ua }));
+const customCfg = (extra) => fixedNodes('104.16.9.1:443#a', extra);   // 一个固定节点「a」
 
 test('明文端口 Trojan 节点在 Clash / sing-box / QuanX / Surge 中不启用 TLS（security=none）', async () => {
   const env = baseEnv({ K: kv({ config: customCfg({ enableVless: false, enableTrojan: true, tlsOnly: false }) }) });
@@ -748,8 +735,8 @@ test('sing-box：仅启用 XHTTP（无可用节点）时报错，而不是输出
   assert.ok(sb.outbounds[0].outbounds.length > 0);
 });
 
-test('原生地址兜底节点同样遵循多协议命名（Trojan .T / XHTTP .X）', async () => {
-  const env = baseEnv({ K: kv({ config: { cfgRev: 2, enableTrojan: true, enableXhttp: true, optimizer: { subMode: 'custom', subIncludeDefault: true }, preferredDomains: '104.16.9.1:443#a', src: { native: true }, filter: { ipType: ['IPv4'] } } }) });   // 追加默认节点模式：原生地址由 appendFallbackNodes 兜底追加
+test('原生地址节点同样遵循多协议命名（Trojan .T / XHTTP .X）', async () => {
+  const env = baseEnv({ K: kv({ config: { cfgRev: 2, enableTrojan: true, enableXhttp: true, src: { native: true, prefDomain: false, prefIp: false }, filter: { ipType: ['IPv4'] } } }) });
   const links = (await (await subOf(env, 'plain')).text()).split('\n').filter(Boolean);
   assert.deepEqual(links.filter(l => nameOf(l).startsWith('原生地址')).map(nameOf), ['原生地址', '原生地址.T', '原生地址.X']);
 });
@@ -867,7 +854,7 @@ test('Clash 模板不再包含公开的默认凭据：SS 密码 / 认证 / API �
   const d = (purpose, uuid = UUID) => createHash('sha224').update(`cfnext-clash|${purpose}|${uuid}`).digest('hex').slice(0, 20);
   assert.ok(a.includes(`password: "${d('ss')}"`) && a.includes(`- "mihomo:${d('auth')}"`) && a.includes(`secret: "${d('api')}"`), '与 UUID 派生一致（同时校验 SHA-224 实现）');
   assert.equal(await get(baseEnv({ K: kv({ config: customCfg() }) })), a, '同一部署每次订阅结果稳定');
-  const other = await (await withFetch(notFound, () => call(baseEnv({ U: UUID2, K: kv({ config: customCfg() }) }), `/${UUID2}/sub/clash`, { ua: 'x' }))).text();
+  const other = await (await withFetch(nodesFetch, () => call(baseEnv({ U: UUID2, K: kv({ config: customCfg() }) }), `/${UUID2}/sub/clash`, { ua: 'x' }))).text();
   assert.ok(!other.includes(d('api')) && other.includes(`secret: "${d('api', UUID2)}"`), '不同部署密钥不同');
   assert.ok(!/allow-origins:\n\s+- "\*"/.test(a), 'CORS 不是 *');
   assert.match(a, /listen: 127\.0\.0\.1:1053/);
@@ -1081,15 +1068,6 @@ test('UDP DNS（VLESS UDP 53）转 DoH：Cloudflare 优先，失败才换端点'
   const ans = { 'example.com|A': ['93.184.216.34'] };
   assert.deepEqual(await run({ 'cloudflare-dns.com': { answers: ans } }), ['cloudflare-dns.com']);
   assert.deepEqual(await run({ 'dns.google': { answers: ans } }), ['cloudflare-dns.com', 'dns.google']);
-});
-
-test('官方 IPv6 网段拉取失败后 5 分钟内不再重试（不再每次订阅都发一个注定失败的子请求）', async () => {
-  const env = baseEnv({ K: kv({ config: { filter: { ipType: ['IPv6'] }, optimizer: { subMode: 'random' } } }) });
-  const calls = [];
-  await withFetch((url) => { calls.push(url); return new Response('x', { status: 500 }); }, async () => {
-    for (let i = 0; i < 3; i++) await call(env, `/${UUID}/sub`, { ua: 'v2rayN/7' });
-  });
-  assert.ok(calls.filter(u => u.includes('ips-v6')).length <= 1, `ips-v6 请求 ${calls.filter(u => u.includes('ips-v6')).length} 次`);
 });
 
 test('机房共享缓存：优选 API 结果写入 / 读取 Cache API；命中时不再请求对方；Cache API 不可用时照常工作', async () => {
@@ -1317,7 +1295,7 @@ test('优选域名校验：只接受纯主机名；规范化（小写、去重�
   assert.equal(typeof chk(many.split('\n').slice(0, 30).join('\n')), 'object');
 });
 
-test('优选域名：填写后整体替换内置列表（默认模式域名节点、追加默认、IPv6 解析），留空用内置列表', async () => {
+test('优选域名：填写后整体替换内置列表（默认模式域名节点、IPv6 解析），留空用内置列表', async () => {
   const base = { filter: { ipType: ['IPv4'] }, ipsrc: { hostmonit: false, uouin: false } };
   // 默认模式：域名节点的 server 就是配置的域名
   const own = await domainsOfSub({ ...base, prefDomains: 'one.example.com\ntwo.example.org' });
@@ -1329,12 +1307,6 @@ test('优选域名：填写后整体替换内置列表（默认模式域名节�
   for (const dead of ['speed.marisalnc.com', 'freeyx.cloudflare88.eu.org', 'bestcf.top', 'cfip.cfcdn.vip', 'cf.zhetengsha.eu.org', 'cloudflare.9jy.cc', 'cf.zerone-cdn.pp.ua', '115155.xyz', 'cname.xirancdn.us', 'f3058171cad.002404.xyz', '8.889288.xyz']) {
     assert.ok(!builtin.includes(dead), `${dead} 实测失效，不应在内置列表中`);
   }
-  // 「追加默认优选域名」：只对配置的域名做 DoH 解析
-  const log = [];
-  const inc = await domainsOfSub({ ...base, optimizer: { subMode: 'custom', subIncludeDefault: true }, preferredDomains: '104.16.5.5#x', prefDomains: 'one.example.com' },
-    cfDoh({ 'one.example.com': ['104.16.9.9'] }, log));
-  assert.ok(inc.includes('104.16.9.9'));
-  assert.deepEqual([...new Set(log.filter(x => x.type === 'A').map(x => x.name))], ['one.example.com']);
   // 仅 IPv6：只查询配置的域名（+官方域名）的 AAAA
   const log6 = [];
   await domainsOfSub({ ...base, filter: { ipType: ['IPv6'] }, prefDomains: 'one.example.com' }, cfDoh({}, log6));
@@ -1445,4 +1417,22 @@ test('优选域名测试接口：解析输入框中尚未保存的域名，标�
     assert.equal((await test({ source: 'domains', text: '' })).status, 200, '留空测试内置列表');
   });
   assert.equal((await test({ source: 'domains', text: 'good.example.com' }, '')).status, 403);
+});
+
+test('自定义订阅 / 随机优选已移除：旧 KV 中的相关字段与 YX 环境变量被忽略，订阅按默认来源生成，面板不再有对应控件', async () => {
+  const legacy = { cfgRev: 2, filter: { ipType: ['IPv4'] }, ipsrc: { hostmonit: false, uouin: false },
+    optimizer: { subMode: 'custom', subIncludeDefault: true, subRandomCount: 5 }, preferredDomains: 'my.custom.example\n104.16.0.9:443#MINE',
+    preferredIPs: [{ ip: '104.16.0.10', port: 443, name: 'MINE2' }] };
+  const env = baseEnv({ YX: '104.16.0.11:443#ENV', K: kv({ config: legacy }) });
+  const links = (await (await subOf(env, 'plain')).text()).split('\n').filter(Boolean);
+  assert.equal(links.length, 14, '按默认来源（内置 14 个优选域名）生成');
+  assert.ok(!links.some(l => ['my.custom.example', '104.16.0.9', '104.16.0.10', '104.16.0.11'].includes(l.match(/@([^:?]+):/)[1])));
+  assert.ok(!links.some(l => /MINE|ENV/.test(nameOf(l))));
+  const cookie = await login(env);
+  const html = await (await call(env, `/${UUID}`, { cookie })).text();
+  for (const id of ['o-submode', 'o-subinc', 'o-rand', 'f-preferred', 'sm-custom', 'sm-random', 'fl-custom-pref', 'fl-random-pref']) assert.ok(!html.includes(`id="${id}"`), `${id} 已移除`);
+  // 下次保存时旧字段被清掉
+  const res = await call(env, `/${UUID}/api/config`, { method: 'POST', cookie, body: { alpn: 'h2' } });
+  assert.equal(res.status, 200);
+  for (const k of ['optimizer', 'preferredDomains', 'preferredIPs']) assert.equal(k in stored(env), false, `${k} 已从 KV 清除`);
 });

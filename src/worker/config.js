@@ -38,7 +38,6 @@ function buildConfig(env, kvCfg) {
   if (env.TROJAN === 'true' || env.TROJAN === '1') cfg.enableTrojan = true;
   if (env.TROJAN_PASSWORD) cfg.trojanPassword = String(env.TROJAN_PASSWORD);
   if (env.ALPN) cfg.alpn = String(env.ALPN);
-  if (env.YX) cfg.preferredIPs = parseIPList(env.YX);
   // 节点测活：环境变量 PROBE_ALIVE=1/true 强制开启，=0/false 强制关闭（不走面板也能改）
   if (env.PROBE_ALIVE === '1' || env.PROBE_ALIVE === 'true') cfg.probeAlive = true;
   if (env.PROBE_ALIVE === '0' || env.PROBE_ALIVE === 'false') cfg.probeAlive = false;
@@ -69,7 +68,6 @@ function buildConfig(env, kvCfg) {
   if (!isUUID(cfg.uuid)) cfg.uuid = uuidv4();
   // path 为空或为 "/" 时一律回退 UUID（兼容 KV 残留旧值，保证订阅 ws 路径与 Worker 面板路径统一为 /UUID）
   if (!cfg.path || cfg.path === '/') { cfg.path = cfg.uuid; cfg._pathAuto = true; }
-  if (!Array.isArray(cfg.preferredIPs)) cfg.preferredIPs = parseIPList(cfg.preferredIPs);
   return cfg;
 }
 

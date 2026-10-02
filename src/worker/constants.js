@@ -1,7 +1,7 @@
 // ---------------------------------------------------------------------------
 // 常量
 // ---------------------------------------------------------------------------
-// Cloudflare 官方 IPv4 地址段（入口 IP 校验 + 随机生成测速候选）
+// Cloudflare 官方 IPv4 地址段（入口 IP 校验）
 const CLOUDFLARE_CIDRS = [
   '173.245.48.0/20', '103.21.244.0/22', '103.22.200.0/22', '103.31.4.0/22',
   '141.101.64.0/18', '108.162.192.0/18', '190.93.240.0/20', '188.114.96.0/20',
@@ -9,35 +9,11 @@ const CLOUDFLARE_CIDRS = [
   '104.24.0.0/14', '172.64.0.0/13', '131.0.72.0/22'
 ];
 
-// 随机补足/随机优选只用这些新段：CF 老段（103.x/141.101/131.0/173.245 等）在国内大量不可达，
-// 实测 90 个全段随机 IP 仅 5 个可达（5.6%）；新段命中率高得多
-const REACHABLE_CIDRS = [
-  '104.16.0.0/13', '104.24.0.0/14', '172.64.0.0/13', '162.158.0.0/15', '188.114.96.0/20'
-];
-
 // Cloudflare 官方 IPv6 地址段（用于入口 IP 过滤）
 const CLOUDFLARE_CIDRS_V6 = [
   '2400:cb00::/32', '2606:4700::/32', '2803:f800::/32', '2405:b500::/32',
   '2405:8100::/32', '2a06:98c0::/29', '2c0f:f248::/32'
 ];
-// Cloudflare 官方公开 IPv6 网段（https://www.cloudflare.com/ips-v6/ 动态拉取，6 小时缓存；
-// 失败回退内置段；实测官方段随机地址 TCP+TLS 全端口可用，与 IPv4 补足同机制）
-let OFFICIAL_V6_CIDRS = CLOUDFLARE_CIDRS_V6.slice();
-let OFFICIAL_V6_CIDRS_T = 0;
-let OFFICIAL_V6_FAIL_T = 0;   // 最近一次拉取失败的时间：失败后 5 分钟内不再重试（否则每次订阅都白白消耗一个子请求并等待最长 10 秒）
-async function refreshOfficialV6CIDRs() {
-  const now = Date.now();
-  if (OFFICIAL_V6_CIDRS_T && now - OFFICIAL_V6_CIDRS_T < 6 * 60 * 60 * 1000) return;
-  if (OFFICIAL_V6_FAIL_T && now - OFFICIAL_V6_FAIL_T < 5 * 60 * 1000) return;
-  try {
-    const resp = await fetch('https://www.cloudflare.com/ips-v6/', { signal: AbortSignal.timeout(10000) });
-    if (!resp.ok) { OFFICIAL_V6_FAIL_T = now; return; }
-    const txt = await resp.text();
-    const cidrs = String(txt).split('\n').map(s => s.trim()).filter(s => /^[0-9a-fA-F:.]+\/\d+$/.test(s) && s.indexOf(':') >= 0);
-    if (cidrs.length >= 3) { OFFICIAL_V6_CIDRS = cidrs; OFFICIAL_V6_CIDRS_T = now; OFFICIAL_V6_FAIL_T = 0; }
-    else OFFICIAL_V6_FAIL_T = now;
-  } catch (e) { OFFICIAL_V6_FAIL_T = now; /* 拉取失败沿用内置/上次成功网段 */ }
-}
 
 // IPv6 CIDR 前缀匹配（展开为 16 进制组后按位比较）
 function ipInCidrV6(ip, cidr) {

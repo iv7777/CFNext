@@ -133,68 +133,6 @@ function cidrToRange(cidr) {
 }
 // CIDR 掩码表预编译：初始化时一次性把 CF 地址段编译为无符号整数区间数组，IP 校验变纯整数比较（性能提升数十倍，应对免费版 10ms CPU 硬限）
 const CLOUDFLARE_RANGES = CLOUDFLARE_CIDRS.map(cidrToRange);
-const _rangeCache = new Map();
-function cidrRangeCached(cidr) {
-  let r = _rangeCache.get(cidr);
-  if (!r) { r = cidrToRange(cidr); _rangeCache.set(cidr, r); }
-  return r;
-}
-function randomIPFromCidr(cidr) {
-  if (String(cidr).indexOf(':') >= 0) return randomIP6FromCidr(cidr);   // IPv6 段：按前缀展开随机生成（参考 CFNext v1.0.5）
-  const [start, end] = cidrRangeCached(cidr);
-  const r = start + Math.floor(Math.random() * ((end - start) >>> 0));
-  return `${(r >>> 24) & 255}.${(r >>> 16) & 255}.${(r >>> 8) & 255}.${r & 255}`;
-}
-// IPv6 随机地址生成：网络前缀位固定，主机位随机（16 进制组逐位置乱，返回压缩形式）
-function randomIP6FromCidr(cidr) {
-  const [net, bitsStr] = cidr.split('/');
-  const bits = parseInt(bitsStr, 10) || 0;
-  const expand = (a) => {
-    const dbl = a.indexOf('::');
-    let groups;
-    if (dbl >= 0) {
-      const left = a.slice(0, dbl).split(':').filter(Boolean);
-      const right = a.slice(dbl + 2).split(':').filter(Boolean);
-      const fill = 8 - left.length - right.length;
-      groups = [...left, ...Array(fill).fill('0'), ...right];
-    } else groups = a.split(':');
-    return groups.map(g => g.padStart(4, '0'));
-  };
-  const g = expand(net).map(x => parseInt(x, 16));
-  let b = 0;
-  for (let i = 0; i < 8; i++) for (let k = 15; k >= 0; k--) {
-    if (b >= bits) g[i] |= (Math.random() < 0.5 ? 1 : 0) << k;
-    b++;
-  }
-  return g.map(x => x.toString(16)).join(':');
-}
-function randomIPsFromCidrs(cidrs, count) {
-  const seen = new Set();
-  const out = [];
-  let guard = 0;
-  while (out.length < count && guard++ < count * 20) {
-    const ip = randomIPFromCidr(cidrs[Math.floor(Math.random() * cidrs.length)]);
-    if (!seen.has(ip)) { seen.add(ip); out.push(ip); }
-  }
-  return out;
-}
-
-// 解析 "1.2.3.4:443#名称, 5.6.7.8" 这类优选列表（仅接受合法 IP 行，过滤 HTML 等杂质）
-function parseIPList(text) {
-  const items = [];
-  const seen = new Set();   // 按 IP 去重（忽略端口）：同一 IP 无论端口/名称只保留第一条
-  String(text || '').split(/[\n,;]+/).map(s => s.trim()).filter(Boolean).forEach(s => {
-    let name = '';
-    if (s.includes('#')) {
-      const [a, n] = s.split('#');
-      s = a; name = n;
-    }
-    const { host, port } = parseHostPort(s, 443);
-    if (host && isValidIp(host) && !seen.has(host)) { seen.add(host); items.push({ ip: host, port, name }); }
-  });
-  return items;
-}
-
 // 出站代理地址解析：socks5:// / http(s):// / ss:// 或 host:port，可带 user:pass@
 function parseProxyAddress(addr) {
   if (!addr) return null;
