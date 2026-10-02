@@ -13,11 +13,6 @@ function toast(t, ty){
   clearTimeout(toastTimer);
   toastTimer = setTimeout(function(){ el.className = 'toast'; }, 2600);
 }
-function showMsg(id, t, ty){
-  var el = $(id);
-  el.textContent = t;
-  el.className = 'msg show ' + (ty || 'info');
-}
 function copyText(t){
   var done = false;
   function fin(ok2){
@@ -274,7 +269,7 @@ function attachMsg(el, cls, text){
 function fillField(d, v){
   if (d.custom) return;
   if (d.type === 'list'){
-    var arr = Array.isArray(v) ? v : (v == null || v === '' ? [] : [String(v)]);   // 兼容旧配置的字符串形式（如 region: 'all'）
+    var arr = Array.isArray(v) ? v : [];
     for (var k in d.els){ var e = $(d.els[k]); if (e) e.checked = arr.indexOf(k) >= 0; }
     return;
   }

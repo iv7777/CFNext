@@ -1,18 +1,16 @@
 // 单次订阅的节点上限（按 Workers / Pages 免费额度 10ms CPU 硬限设定）：结构化格式（Clash / Sing-box 等）
-// 实测约 400 节点 ~8ms，行式格式拼接成本很低；统一取 500
+// 约 400 节点 ~8ms，行式格式拼接成本很低；统一取 500
 const NODE_CAP = 500;
 
 // 根据 UA 或指定格式生成订阅
 async function generateSubscription(cfg, requestUrl, format, ua) {
-  // 兜底：path 为空或为 "/" 时一律回退 UUID（兼容 KV 残留旧值；Worker WS/xhttp 代理仅在 panelPath=cfg.path 处理）
-  if (!cfg.path || cfg.path === '/' || cfg.path === '') cfg.path = cfg.uuid;
   // 明文端口节点只由「仅 TLS 端口」控制（默认开启）；ECH 只对 TLS 生效，开启时同样只下发 TLS 端口节点。
   // 自定义域名的明文端口需在 Cloudflare 关闭「始终使用 HTTPS」，否则被 301 重定向、WebSocket 握手失败
   const rc = Object.assign({}, cfg, { host: cfg.host || new URL(requestUrl).hostname });
   const prefList = effectivePrefDomains(cfg);   // 面板填写的优选域名（整体替换内置列表）或内置列表
   if (rc.ech) rc.tlsOnly = true;
   // 筛选含 IPv6 时查询 AAAA 记录并生成 IPv6 节点（默认双选 IPv4+IPv6 同样生效）；
-  // 仅勾选 IPv6（单选）时全部走 IPv6 来源（参考 CFNext v1.0.5 可达性原则）
+  // 仅勾选 IPv6（单选）时全部走 IPv6 来源
   const ipT = (cfg.filter && cfg.filter.ipType) || [];
   const wantV6 = ipT.includes('IPv6');
   const onlyV6 = ipT.length === 1 && ipT[0] === 'IPv6';
@@ -66,7 +64,7 @@ async function generateSubscription(cfg, requestUrl, format, ua) {
   // 地址来源全部关闭时用官方域名兜底，保证订阅不为空（客户端不会收到「无效订阅」）
   if (!useNative && !useDomain && !useIp) rc.preferredDomains = BUILTIN_OFFICIAL_DOMAINS.map((d, i) => d + '#域名-' + String(i + 1).padStart(2, '0')).join('\n');
   // 仅勾选 IPv6（单选）时清掉各来源混入的 IPv4（域名 AAAA 解析的 v4 与各在线来源中的 v4 一并剔除，
-  // 避免 filterNodes 过滤空集后放宽回退全 v4；参考 CFNext v1.0.5 同款处理）
+  // 避免 filterNodes 过滤空集后放宽回退全 v4）
   if (onlyV6 && rc.preferredIPs) rc.preferredIPs = rc.preferredIPs.filter(x => String(x.ip).indexOf(':') >= 0);
   ua = (ua || '').toLowerCase();
   const forced = (format || '').toLowerCase();

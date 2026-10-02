@@ -145,7 +145,7 @@ function parseProxyAddress(addr) {
     // 以最后一个 @ 分隔凭据与主机：密码中未编码的 @ 不会把主机名截断
     const at = rest.lastIndexOf('@');
     const u = rest.slice(0, at), h = rest.slice(at + 1);
-    // 修复：用户名/密码可能经 URL 编码（密码含 %40/@、%28/() 等特殊字符时），解码后再用于认证，
+    // 用户名/密码可能经 URL 编码（含 %40/@、%28/() 等特殊字符时），需解码后再用于认证，
     // 否则 socks5 用户名密码 / HTTP Basic 认证会失败
     const dec = (s) => { try { return decodeURIComponent(s); } catch (e) { return s; } };
     const idx = u.indexOf(':');

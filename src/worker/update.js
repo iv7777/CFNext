@@ -1,4 +1,4 @@
-const VERSION = '2.1.1';
+const VERSION = '2.1.3';
 
 // 更新检测：点击版本号后拉取仓库代码比对版本号；有新版本时返回最新代码供面板复制
 // 版本基准为仓库 main 分支根目录的 CFNext.js（由 build.mjs 生成的部署文件）
@@ -33,7 +33,7 @@ async function fetchRepoFile(name){
     return { txt, version: extractVersion(txt) };
   } catch (e) { return { error: (e && e.message) || String(e) }; }
 }
-async function checkUpdate(env){
+async function checkUpdate(){
   const now = Date.now();
   if (UPDATE_CACHE && now - UPDATE_CACHE.t < 60000) return UPDATE_CACHE.r;
   // 拉取仓库 CFNext.js：比对版本号，有更新时直接把这次拉取的内容作为最新代码返回

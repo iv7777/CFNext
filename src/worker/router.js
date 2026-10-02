@@ -6,9 +6,9 @@ function isBrowserUA(ua) {
   return (ua || '').toLowerCase().includes('mozilla');
 }
 
-// 安全修复：
-//  - 未设置 ADMIN 时一律拒绝（原版未设密码 = 面板对所有人开放）
-//  - Cookie 改为带过期时间的 HMAC-SHA256 签名令牌（原版为固定的 md5(密码)，泄露后永久有效）
+// 鉴权：
+//  - 未设置 ADMIN 时一律拒绝
+//  - Cookie 为带过期时间的 HMAC-SHA256 签名令牌
 //  - 常量时间比较 + 登录失败限速
 function timingSafeEqual(a, b) {
   a = String(a); b = String(b);
@@ -22,10 +22,10 @@ async function hmacHex(key, msg) {
   const sig = await crypto.subtle.sign('HMAC', k, TE.encode(msg));
   return Array.from(new Uint8Array(sig)).map(b => b.toString(16).padStart(2, '0')).join('');
 }
-// 管理密码存储：KV 中保存加盐 PBKDF2-SHA256 摘要（格式 前缀 + 迭代次数 + $ + 盐 + $ + 摘要），不再保存明文。
+// 管理密码存储：KV 中保存加盐 PBKDF2-SHA256 摘要（格式 前缀 + 迭代次数 + $ + 盐 + $ + 摘要），不保存明文。
 // 迭代次数写在摘要里，日后可调高而不影响已保存的密码；取 1 万次是为了控制免费版 10ms CPU 限制下的登录开销。
 // 由环境变量 ADMIN 提供的密码仍是明文（环境变量本身即密钥存储），按常量时间比较。
-// 兼容：KV 中的旧版明文密码继续可用，下次在面板保存任意配置时自动改存摘要。
+// KV 中若存有明文密码同样可用，下次在面板保存任意配置时自动改存摘要。
 const ADMIN_HASH_PREFIX = 'cfnext-pbkdf2$';
 const ADMIN_HASH_ITER = 10000;
 const toHex = (u8) => Array.from(u8).map(b => b.toString(16).padStart(2, '0')).join('');
@@ -42,7 +42,7 @@ async function hashAdminPassword(password) {
 async function verifyAdminPassword(stored, password) {
   stored = String(stored || ''); password = String(password == null ? '' : password);
   if (!stored) return false;
-  if (!isAdminHash(stored)) return timingSafeEqual(password, stored);   // 环境变量 / 旧版明文
+  if (!isAdminHash(stored)) return timingSafeEqual(password, stored);   // 环境变量 / KV 中的明文
   const parts = stored.slice(ADMIN_HASH_PREFIX.length).split('$');
   const iter = parseInt(parts[0], 10);
   if (parts.length !== 3 || !(iter >= 1000 && iter <= 100000) || !parts[1] || !parts[2]) return false;
@@ -68,7 +68,7 @@ async function requireAuth(request, cfg) {
 }
 // 登录失败限速（按客户端 IP，同一 Worker 实例内生效，属尽力而为）：15 分钟内最多 5 次失败。
 // IPv6 按 /64 网段计数（单个用户通常拥有整个 /64，逐地址计数会被轻易绕过）；
-// 表满时只淘汰最旧项，不再整表清空（否则攻击者灌入大量来源即可清零所有计数）
+// 表满时只淘汰最旧项，不整表清空（否则攻击者灌入大量来源即可清零所有计数）
 const LOGIN_FAILS = new Map();
 const LOGIN_MAX_FAILS = 5, LOGIN_WINDOW_MS = 15 * 60 * 1000, LOGIN_TABLE_MAX = 5000;
 function loginRateKey(ip) {
@@ -166,7 +166,7 @@ async function handleRequest(request, env) {
   if (cfg._kvError && !(env.U && isUUID(String(env.U)))) {
     return new Response('配置存储暂不可用，请稍后重试', { status: 503, headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Retry-After': '30' } });
   }
-  const panelPath = cfg.path || cfg.uuid;
+  const panelPath = cfg.path;
   const path = url.pathname.replace(/^\/+|\/+$/g, '');
   const segs = path.split('/');
 
@@ -178,7 +178,7 @@ async function handleRequest(request, env) {
 
   // ---------- 登录 ----------
   if (segs[0] === 'login') {
-    // 安全修复：未设置 ADMIN 时登录页不存在（原版会 302 跳转并暴露面板路径）
+    // 未设置 ADMIN 时登录页不存在（避免暴露面板路径）
     if (!cfg.admin) return new Response('Not Found', { status: 404 });
     if (request.method === 'POST') {
       const clientIp = request.headers.get('CF-Connecting-IP') || 'unknown';
@@ -208,12 +208,12 @@ async function handleRequest(request, env) {
   }
 
   // 自定义订阅路径（基础配置中设置）作为订阅别名入口：/AAZ/sub 同样命中订阅处理；
-  // 面板入口、管理 API 与代理入口只认 panelPath（修复：原版把别名当作面板路径，别名下同样开放了面板与管理接口）
+  // 面板入口、管理 API 与代理入口只认 panelPath，别名下不开放面板与管理接口
   const subAlias = String(cfg.subUrl || '').trim().replace(/^\/+/, '').replace(/\/+$/, '');
   const isPanelRoot = segs[0] === panelPath;
   const isSubRoot = isPanelRoot || (!!subAlias && segs[0] === subAlias);
 
-  // 安全修复：根路径不再跳转到面板入口（原版会把面板路径 / UUID 直接告诉任何访问者）
+  // 根路径不跳转到面板入口（否则会把面板路径 / UUID 告诉任何访问者）
   if (segs[0] === '') {
     return new Response('Not Found', { status: 404 });
   }
@@ -267,7 +267,7 @@ async function handleRequest(request, env) {
       }
       if (request.method === 'POST') {
         if (cfg._kvError) return json({ ok: false, msg: kvErrorMessage(cfg._kvError) + '，为避免覆盖已有配置，已禁止保存' }, 503);
-        // 修复：未绑定 KV 时保存不会持久化（原版仍提示「已保存并生效」）
+        // 未绑定 KV 时保存不会持久化，必须拒绝而不是提示「已保存」
         if (!env.K || typeof env.K.put !== 'function') {
           return json({ ok: false, msg: '未绑定 KV 命名空间（变量名 K），无法保存面板配置；请在 Worker 设置中绑定 KV 后重试' }, 400);
         }
@@ -285,12 +285,12 @@ async function handleRequest(request, env) {
           }
           const crossErrors = crossCheckConfig(merged);
           if (crossErrors.length) return json({ ok: false, msg: formatConfigErrors(crossErrors), errors: crossErrors, ignored }, 400);
-          // KV 里的管理密码只存摘要：面板新设的密码，以及旧版遗留的明文密码，都在这里转成摘要
+          // KV 里的管理密码只存摘要：面板新设的密码（以及 KV 中已有的明文密码）都在这里转成摘要
           if (merged.admin && !isAdminHash(merged.admin) && !envLockedFields(env).admin) merged.admin = await hashAdminPassword(merged.admin);
           const stored = await saveConfig(env, merged);
           // 直接用刚写入的数据组装新配置（不回读 KV：边缘缓存可能仍是旧值）
           const fresh = buildConfig(env, stored);
-          // 修复：UUID / 管理密码 / 管理用户名变更会使登录态签名失效——当前会话已通过鉴权，直接签发新令牌，面板无需重新登录
+          // UUID / 管理密码 / 管理用户名变更会使登录态签名失效：当前会话已通过鉴权，直接签发新令牌，面板无需重新登录
           const headers = {};
           if (fresh.admin && authKey(fresh) !== authKey(cfg)) headers['Set-Cookie'] = authCookie(await makeAuthToken(fresh));
           return json({ ok: true, data: publicConfig(fresh, env), ignored, msg: '已保存：本地区立即生效，其他地区约 1 分钟内同步' }, 200, headers);
@@ -312,7 +312,6 @@ async function handleRequest(request, env) {
         if (cfg._kvError === 'unavailable') return json({ ok: false, msg: kvErrorMessage(cfg._kvError) + '，暂时无法重置' }, 503);   // 配置损坏（corrupt）时允许重置来修复
         if (!env.K || typeof env.K.delete !== 'function') return json({ ok: false, msg: '未绑定 KV 命名空间，无需重置' }, 400);
         await env.K.delete('config');
-        await env.K.delete('issued');   // 清理旧版本（轮询换新）遗留的 issued 键
         return json({ ok: true, msg: '已重置：KV 已清空，面板还原为初始部署状态' });
       } catch (e) { return json({ ok: false, msg: '重置失败: ' + (e.message || e) }, 500); }
     }
@@ -323,7 +322,7 @@ async function handleRequest(request, env) {
 
     if (apiName === 'update') {
       try {
-        const r = await checkUpdate(env);
+        const r = await checkUpdate();
         const d = { current: r.current, latest: r.latest, hasUpdate: r.hasUpdate, error: r.error || '' };
         if (r.hasUpdate && r.code) d.code = r.code;
         return json({ ok: true, data: d });

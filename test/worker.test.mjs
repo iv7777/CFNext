@@ -54,7 +54,7 @@ const NODE_LISTS = new Map();
 const fixedNodes = (lines, extra = {}) => {
   const url = 'https://nodes.test/' + createHash('md5').update(lines).digest('hex') + '.txt';
   NODE_LISTS.set(url, lines);
-  return { cfgRev: 2, src: { prefDomain: false }, ipsrc: { hostmonit: false, uouin: false, api1: true, api1Url: url }, filter: { ipType: ['IPv4'] }, ...extra };
+  return { src: { prefDomain: false }, ipsrc: { hostmonit: false, uouin: false, api1: true, api1Url: url }, filter: { ipType: ['IPv4'] }, ...extra };
 };
 const nodesFetch = (u) => NODE_LISTS.has(u) ? new Response(NODE_LISTS.get(u)) : new Response('Not Found', { status: 404 });
 
@@ -497,7 +497,7 @@ test('不再内置静态 IP 池；所有来源都没有产出时用官方域名�
   assert.ok(b.length > 0 && b.every(l => !/^\d+\.\d+\.\d+\.\d+$/.test(hostOf(l))), '无内置静态 IP');
 });
 
-test('仅 TLS 端口：默认开启；关闭后 443 节点追加 80 明文节点，自定义域名同样生效；ECH 强制仅 TLS；旧版 KV 迁移为开启', async () => {
+test('仅 TLS 端口：默认开启；关闭后 443 节点追加 80 明文节点，自定义域名同样生效；ECH 强制仅 TLS', async () => {
   const url = 'https://ports.example.com/list.txt';
   const handler = (u) => u === url ? new Response('104.16.1.1\n104.16.1.2:8080#p8080\n104.16.1.3:8443#p8443') : notFound();
   const cfg = (extra) => ({ filter: { ipType: ['IPv4'] }, src: { prefDomain: false },
@@ -509,20 +509,18 @@ test('仅 TLS 端口：默认开启；关闭后 443 节点追加 80 明文节点
     return t.split('\n').filter(l => /^vless:\/\//.test(l)).map(l => l.match(/:(\d+)\?/)[1] + ' ' + nameOf(l)).sort();
   });
   // 默认（开启）：只有 TLS 端口
-  assert.deepEqual(await portsOf(cfg({ cfgRev: 2 })), ['443 优选IP-01', '8443 p8443']);
+  assert.deepEqual(await portsOf(cfg({})), ['443 优选IP-01', '8443 p8443']);
   // 关闭：自定义域名也下发明文端口（443 → 追加 ·80，来源自带的 8080 原样保留），明文节点 security=none
-  const off = await portsOf(cfg({ cfgRev: 2, tlsOnly: false }));
+  const off = await portsOf(cfg({ tlsOnly: false }));
   assert.deepEqual(off, ['443 优选IP-01', '80 优选IP-01·80', '8080 p8080', '8443 p8443']);
   // ECH 开启时强制仅 TLS
-  assert.deepEqual(await portsOf(cfg({ cfgRev: 2, tlsOnly: false, ech: true })), ['443 优选IP-01', '8443 p8443']);
-  // 旧版 KV（无 cfgRev）保存的 tlsOnly:false 视为未选择，按新默认开启；保存后写入 cfgRev
-  assert.deepEqual(await portsOf(cfg({ tlsOnly: false })), ['443 优选IP-01', '8443 p8443']);
-  const env = baseEnv({ K: kv({ config: { tlsOnly: false } }) });
+  assert.deepEqual(await portsOf(cfg({ tlsOnly: false, ech: true })), ['443 优选IP-01', '8443 p8443']);
+  // 面板保存的关闭状态保留
+  const env = baseEnv({ K: kv() });
   const cookie = await login(env);
   assert.equal((await (await call(env, `/${UUID}/api/config`, { cookie })).json()).data.tlsOnly, true);
   await call(env, `/${UUID}/api/config`, { method: 'POST', cookie, body: { tlsOnly: false } });
-  assert.equal(stored(env).cfgRev, 2);
-  assert.equal((await (await call(env, `/${UUID}/api/config`, { cookie })).json()).data.tlsOnly, false, '新版保存的关闭状态保留');
+  assert.equal((await (await call(env, `/${UUID}/api/config`, { cookie })).json()).data.tlsOnly, false);
 });
 
 // ---------------- 代理：出站竞速 / WS 0-RTT 早数据 / VLESS 响应头 ----------------
@@ -861,7 +859,7 @@ test('sing-box：仅启用 XHTTP（无可用节点）时报错，而不是输出
 });
 
 test('原生地址节点同样遵循多协议命名（Trojan .T / XHTTP .X）', async () => {
-  const env = baseEnv({ K: kv({ config: { cfgRev: 2, enableTrojan: true, enableXhttp: true, src: { native: true, prefDomain: false, prefIp: false }, filter: { ipType: ['IPv4'] } } }) });
+  const env = baseEnv({ K: kv({ config: { enableTrojan: true, enableXhttp: true, src: { native: true, prefDomain: false, prefIp: false }, filter: { ipType: ['IPv4'] } } }) });
   const links = (await (await subOf(env, 'plain')).text()).split('\n').filter(Boolean);
   assert.deepEqual(links.filter(l => nameOf(l).startsWith('原生地址')).map(nameOf), ['原生地址', '原生地址.T', '原生地址.X']);
 });
@@ -1129,7 +1127,7 @@ const failingKv = (init = {}) => {
 };
 
 test('KV 读取失败：有环境变量 UUID 时节点与订阅照常工作，保存与重置被拒绝且不会覆盖已有配置；无环境变量 UUID 时返回 503', async () => {
-  const k = failingKv({ config: { alpn: 'h2', cfgRev: 2 } });
+  const k = failingKv({ config: { alpn: 'h2' } });
   const env = baseEnv({ K: k });
   const cookie = await login(env);                                   // ADMIN 来自环境变量，不依赖 KV
   assert.equal((await call(env, `/${UUID}/sub`, { ua: 'v2rayN/7' })).status, 200, '订阅仍可用');
@@ -1451,7 +1449,7 @@ const cfDoh = (map, log = []) => async (url) => {   // 简易 DoH：map[域名] 
   return new Response(JSON.stringify({ Status: 0, Answer: ips.map(data => ({ type: 1, data })) }));
 };
 const domainsOfSub = async (config, fetchHandler = notFound) => {
-  const env = baseEnv({ K: kv({ config: { cfgRev: 2, ...config } }) });
+  const env = baseEnv({ K: kv({ config: { ...config } }) });
   const t = await withFetch(fetchHandler, async () => (await call(env, `/${UUID}/sub`, { ua: 'v2rayN/7' })).text());
   return t.split('\n').filter(l => /^vless:\/\//.test(l)).map(l => l.match(/@([^:?]+):/)[1]);
 };
@@ -1586,7 +1584,7 @@ test('优选域名测试接口：解析输入框中尚未保存的域名，标�
 });
 
 test('自定义订阅 / 随机优选已移除：旧 KV 中的相关字段与 YX 环境变量被忽略，订阅按默认来源生成，面板不再有对应控件', async () => {
-  const legacy = { cfgRev: 2, filter: { ipType: ['IPv4'] }, ipsrc: { hostmonit: false, uouin: false },
+  const legacy = { filter: { ipType: ['IPv4'] }, ipsrc: { hostmonit: false, uouin: false },
     optimizer: { subMode: 'custom', subIncludeDefault: true, subRandomCount: 5 }, preferredDomains: 'my.custom.example\n104.16.0.9:443#MINE',
     preferredIPs: [{ ip: '104.16.0.10', port: 443, name: 'MINE2' }] };
   const env = baseEnv({ YX: '104.16.0.11:443#ENV', K: kv({ config: legacy }) });
@@ -1604,7 +1602,7 @@ test('自定义订阅 / 随机优选已移除：旧 KV 中的相关字段与 YX 
 });
 
 test('节点测活已移除：旧 KV 的 probeAlive 与 PROBE_ALIVE 环境变量被忽略，订阅不再对优选域名做任何预检解析，面板无对应开关', async () => {
-  const env = baseEnv({ PROBE_ALIVE: '1', K: kv({ config: { cfgRev: 2, probeAlive: true, filter: { ipType: ['IPv4'] }, ipsrc: { hostmonit: false, uouin: false } } }) });
+  const env = baseEnv({ PROBE_ALIVE: '1', K: kv({ config: { probeAlive: true, filter: { ipType: ['IPv4'] }, ipsrc: { hostmonit: false, uouin: false } } }) });
   const calls = [];
   const links = await withFetch((u) => { calls.push(u); return nodesFetch(u); }, async () =>
     (await (await call(env, `/${UUID}/sub/plain`, { ua: 'x' })).text()).split('\n').filter(Boolean));
