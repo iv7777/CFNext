@@ -18,7 +18,7 @@
 // ============================================================================
 import { connect } from 'cloudflare:sockets';
 
-const VERSION = '2.1.5';
+const VERSION = '2.1.6';
 
 // 更新检测：点击版本号后拉取仓库代码比对版本号；有新版本时返回最新代码供面板复制
 // 版本基准为仓库 main 分支根目录的 CFNext.js（由 build.mjs 生成的部署文件）
@@ -2878,12 +2878,13 @@ async function buildNodes(cfg, cap = NODE_CAP) {
   };
   const domains = String(cfg.preferredDomains || '').split(/[\n,;]+/).map(s => s.trim()).filter(s => s && !s.includes('://'));  // URL 数据源由 resolvePreferredDomains 解析，不作为服务器地址
   domains.forEach((d, i) => {
-    // 内部条目格式 "主机[:端口]#名称"（原生地址 / 官方域名兜底带名称）：剥离 #名称 后再解析地址，无名称时用“优选IP-XX”兜底
+    // 内部条目格式 "主机[:端口]#名称"（原生地址带名称）：剥离 #名称 后再解析地址；优选域名不带名称，命名为「优选域名-XX」
+    // （与优选 IP 的「优选IP-XX」区分，两者编号各自从 01 开始）
     const hash = d.indexOf('#');
     const addr = (hash >= 0 ? d.slice(0, hash) : d).trim();
     const nm = (hash >= 0 ? d.slice(hash + 1) : '').trim();
     const p = parseHostPort(addr, 443);
-    multiPort(p.host, p.port, nm || '优选IP-' + String(i + 1).padStart(2, '0'));
+    multiPort(p.host, p.port, nm || '优选域名-' + String(i + 1).padStart(2, '0'));
   });
   // 双选（IPv4+IPv6）时把 preferredIPs 重排为 v4/v6 交替：各来源 v4 天然排前，
   // 若不做交替，节点上限（cap）截断时会先占满 v4，IPv6 被整体挤掉——
@@ -3010,7 +3011,7 @@ function filterNodes(nodes, filter) {
       const m = meta[i];
       const isV6 = m.host.indexOf(':') >= 0;
       if (!m.name) return false;  // 跳过无法解析的非法节点
-      // 地区过滤仅剔除明确标记为其它地区的节点；不带地区标记的通用节点（优选IP-XX / 域名 / 原生地址 /
+      // 地区过滤仅剔除明确标记为其它地区的节点；不带地区标记的通用节点（优选IP-XX / 优选域名-XX / 原生地址 /
       // 运营商线路节点如「移动-01」「电信-U01」等）是 CF 通用入口，任意地区可用，一律保留
       if (tg && m.regions.length && !m.regions.some(r => rg.includes(r))) return false;
       if (t.length === 1) {

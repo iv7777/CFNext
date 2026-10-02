@@ -295,7 +295,7 @@ test('单次订阅最多下发 500 个节点，每次下发相同（不再轮询
 test('选择具体地区时仍保留不带地区的通用节点（优选域名节点）', async () => {
   const env = baseEnv({ K: kv({ config: { filter: { region: ['HK'], ipType: ['IPv4'] } } }) });
   const names = (await subLinks(env)).map(nameOf);
-  assert.ok(names.some(n => /^优选IP-\d+$/.test(n)), '优选域名节点（通用）保留');
+  assert.ok(names.some(n => /^优选域名-\d+$/.test(n)), '优选域名节点（通用）保留');
 });
 
 test('默认模式（IPv4+IPv6）子请求数不超过免费版 50 个上限，DoH 不重复查询', async () => {
@@ -344,7 +344,7 @@ test('HostMonit 优选改为调用数据接口：按运营商命名、只保留 
   assert.ok(!links.some(l => hostOf(l) === '8.8.8.8'), '非 CF 段 IP 被丢弃');
   // 只勾选「移动」：剔除联通 / 电信节点，保留移动节点与不带运营商标记的通用节点
   assert.ok(!('联通-01' in byName) && !('电信-01' in byName), '未勾选运营商的节点被剔除');
-  assert.ok(Object.keys(byName).some(n => /^优选IP-\d+$/.test(n)), '通用节点（优选域名）保留');
+  assert.ok(Object.keys(byName).some(n => /^优选域名-\d+$/.test(n)), '通用节点（优选域名）保留');
 });
 
 // ---------------- 优选 IP 来源开关：HostMonit / uouin / 自定义 API ----------------
@@ -495,6 +495,17 @@ test('不再内置静态 IP 池；所有来源都没有产出时用官方域名�
   // 默认模式（优选域名开启、在线来源离线）：只有优选域名节点，没有任何 IP 节点
   const b = await subLinks(baseEnv({ K: kv({ config: { filter: { ipType: ['IPv4'] }, ipsrc: { hostmonit: false, uouin: false } } }) }));
   assert.ok(b.length > 0 && b.every(l => !/^\d+\.\d+\.\d+\.\d+$/.test(hostOf(l))), '无内置静态 IP');
+});
+
+test('节点命名：优选域名节点为「优选域名-NN」，优选 IP 来源中不带名称的为「优选IP-NN」，两者编号各自独立、不再互相撞名', async () => {
+  const url = 'https://names.example.com/list.txt';
+  const config = { filter: { ipType: ['IPv4'] }, prefDomains: 'a.example.com\nb.example.com',
+    ipsrc: { hostmonit: false, uouin: false, api1: true, api1Url: url } };
+  const names = await withFetch((u) => u === url ? new Response('104.16.1.1\n104.16.1.2') : notFound(), async () => {
+    const t = await (await call(baseEnv({ K: kv({ config }) }), `/${UUID}/sub`, { ua: 'v2rayN/7.0' })).text();
+    return t.split('\n').filter(l => /^vless:\/\//.test(l)).map(l => hostOf(l) + ' ' + nameOf(l));
+  });
+  assert.deepEqual(names, ['a.example.com 优选域名-01', 'b.example.com 优选域名-02', '104.16.1.1 优选IP-01', '104.16.1.2 优选IP-02']);
 });
 
 test('仅 TLS 端口：默认开启；关闭后 443 节点追加 80 明文节点，自定义域名同样生效；ECH 强制仅 TLS', async () => {
