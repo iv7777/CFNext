@@ -1,6 +1,6 @@
 // ⚠ 本文件由 build.mjs 自动生成：请修改 src/ 下的源文件后运行 `node build.mjs`，不要直接编辑本文件。
 // ============================================================================
-//  CFNext —— Cloudflare 代理管理面板 · 全新独立编写
+//  CFNext —— Cloudflare 代理订阅面板 · 全新独立编写
 //  ----------------------------------------------------------------------------
 //  环境变量：
 //    U            VLESS UUID（必填，同时用作面板访问路径，除非设置了 D）
@@ -3487,7 +3487,7 @@ const PANEL_HTML = String.raw`
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>CFNext · Cloudflare 隧道面板</title>
+<title>CFNext · Cloudflare 代理订阅面板</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect x='3' y='3' width='18' height='18' rx='5' fill='%232563eb'/%3E%3Cpath d='M8 15V9l8 6V9' stroke='%23ffffff' stroke-width='2' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
 <script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.js" integrity="sha384-8FWZA6BGMXhsfO+BLtrJK0We6gg5o1JyO8xQm6peWDEUs17ACA5ziE/NIAkl9z2k" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
 <style>
@@ -3700,7 +3700,7 @@ pre.code{background:var(--bg2);border:1px solid var(--border);border-radius:8px;
 <aside class="sidebar" id="sidebar">
   <div class="brand">
     <div class="mark"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12h4l3-7 4 14 3-7h2"/></svg></div>
-    <div class="bt"><b>CFNext</b><span>Cloudflare 隧道面板</span></div>
+    <div class="bt"><b>CFNext</b><span>Cloudflare 代理订阅面板</span></div>
   </div>
   <nav class="nav" id="nav"></nav>
   <div class="side-foot">
@@ -3963,7 +3963,7 @@ pre.code{background:var(--bg2);border:1px solid var(--border);border-radius:8px;
 
     <!-- ===== 视图：关于 ===== -->
     <section class="view" data-view="about">
-      <div class="view-head"><h2>关于项目</h2><p>CFNext — Cloudflare 全新代理管理面板（独立界面 + 独立实现）</p></div>
+      <div class="view-head"><h2>关于项目</h2><p>CFNext — Cloudflare 代理订阅面板（独立界面 + 独立实现）</p></div>
       <div class="card">
         <h3><span class="tick"></span>相关链接</h3>
         <p style="font-size:13px;color:var(--dim)">YouTube @数字派：<a href="https://www.youtube.com/@PAI_CN" target="_blank" rel="noopener">youtube.com/@PAI_CN</a></p>
@@ -4813,7 +4813,7 @@ button:disabled{opacity:.6;cursor:not-allowed}
 <div class="box">
   <div class="brand">
     <div class="mark"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12h4l3-7 4 14 3-7h2"/></svg></div>
-    <div class="bt"><b>CFNext</b><span>Cloudflare 全新代理管理面板</span></div>
+    <div class="bt"><b>CFNext</b><span>Cloudflare 代理订阅面板</span></div>
   </div>
   <h1>登录</h1>
   <p>请输入管理用户名与密码以继续</p>
