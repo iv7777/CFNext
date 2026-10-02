@@ -18,7 +18,7 @@
 // ============================================================================
 import { connect } from 'cloudflare:sockets';
 
-const VERSION = '2.1.0';
+const VERSION = '2.1.1';
 
 // 更新检测：点击版本号后拉取仓库代码比对版本号；有新版本时返回最新代码供面板复制
 // 版本基准为仓库 main 分支根目录的 CFNext.js（由 build.mjs 生成的部署文件）
@@ -1828,25 +1828,25 @@ function capMap(map, max) { while (map.size > max) map.delete(map.keys().next().
 //   - 域名先查 TXT：TXT 含逗号/换行分隔的 IP 列表则解析为多候选；
 //     TXT 为 @edtunnel 标记（反代服务约定）或无有效 TXT 时查 A 记录
 //   - 结果缓存 5 分钟，避免每次连接都触发 DoH
+//   - opts.txt === false：只查 A 记录（内置地区反代域名没有 TXT 记录，已实测全部 14 个地区，查 TXT 只是白白多一次 DoH）
+// 注意：不能把「进行中的解析」（Promise）跨请求共享——Workers 中 fetch 归属发起它的请求，该请求结束（客户端断开）时
+// fetch 被取消，共享这个 Promise 的其它请求会永远等不到结果，且之后同一域名的解析全部卡死（已在 workerd 中复现）。
+// 只缓存解析完成的结果（普通数据可以跨请求共享）
 const PROXYIP_TTL = 5 * 60 * 1000, PROXYIP_NEG_TTL = 30 * 1000;   // 成功缓存 5 分钟；失败 / 无记录缓存 30 秒（避免每个连接都重新查 DoH）
-const PROXYIP_INFLIGHT = new Map();                              // 同一域名的并发解析合并为一次（冷启动时大量连接同时到达）
 const PROXYIP_DOHS = ['https://cloudflare-dns.com/dns-query', 'https://dns.alidns.com/resolve', 'https://doh.pub/dns-query'];
-async function resolveProxyIPs(host, port) {
+async function resolveProxyIPs(host, port, opts) {
   port = port || 443;
   if (isValidIp(host)) return [{ hostname: host, port }];
-  const cacheKey = host + ':' + port;
+  const txt = !(opts && opts.txt === false);
+  const cacheKey = host + ':' + port + (txt ? '' : ':a');
   const hit = PROXYIP_CACHE.get(cacheKey);
   if (hit && Date.now() - hit.t < (hit.ips.length ? PROXYIP_TTL : PROXYIP_NEG_TTL)) return hit.ips;
-  let job = PROXYIP_INFLIGHT.get(cacheKey);
-  if (!job) {
-    job = resolveProxyIPsUncached(host, port)
-      .then((ips) => { PROXYIP_CACHE.set(cacheKey, { t: Date.now(), ips }); capMap(PROXYIP_CACHE, 200); return ips; })
-      .finally(() => PROXYIP_INFLIGHT.delete(cacheKey));
-    PROXYIP_INFLIGHT.set(cacheKey, job);
-  }
-  return job;
+  const ips = await resolveProxyIPsUncached(host, port, txt);
+  PROXYIP_CACHE.set(cacheKey, { t: Date.now(), ips });
+  capMap(PROXYIP_CACHE, 200);
+  return ips;
 }
-async function resolveProxyIPsUncached(host, port) {
+async function resolveProxyIPsUncached(host, port, txt) {
   // 每种记录类型按端点顺序查询：前一个端点失败才换下一个（正常 1 个子请求，不再 3 个端点同时发）；
   // SERVFAIL 等视为失败换端点，NOERROR / NXDOMAIN 视为确定结果
   const dohQuery = async (type, filterType) => {
@@ -1858,7 +1858,7 @@ async function resolveProxyIPsUncached(host, port) {
   };
 
   // 并发查询 TXT 与 A 记录（TXT 优先，无有效 TXT 用 A）
-  const [txtRecords, aRecords] = await Promise.all([dohQuery('TXT', 16), dohQuery('A', 1)]);
+  const [txtRecords, aRecords] = await Promise.all([txt ? dohQuery('TXT', 16) : [], dohQuery('A', 1)]);
 
   let targets = [];
   // 1) TXT 记录：反代服务约定——TXT 存逗号/换行分隔的 IP 列表（支持 ip:port），或 @edtunnel 标记
@@ -1919,62 +1919,67 @@ async function raceConnect(jobs) {
   });
 }
 
-// 目标域名是否托管在 Cloudflare（A 记录全部落在 CF 段）：这类目标直连必被回环保护拦截，应立即让反代接管，
-// 不必等直连优先窗口。结果缓存（同 PROXYIP 缓存时长）；查询失败按「否」处理（保持直连优先）
-const CFHOST_CACHE = new Map();
-async function isCfHosted(host) {
-  if (!host || isValidIp(host)) return isCloudflareIP(host);
-  const hit = CFHOST_CACHE.get(host);
-  if (hit && Date.now() - hit.t < PROXYIP_TTL) return hit.v;
-  let job = PROXYIP_INFLIGHT.get('cf:' + host);
-  if (!job) {
-    job = dohFirst(PROXYIP_DOHS, (url) => url + '?name=' + encodeURIComponent(host) + '&type=A', (j) => {
-      if (!j || (j.Status !== 0 && j.Status !== 3)) return null;
-      return (j.Answer || []).filter(a => a.type === 1).map(a => a.data);
-    }).then((ips) => {
-      const v = !!(ips && ips.length && ips.every(isCloudflareIP));
-      if (ips) { CFHOST_CACHE.set(host, { t: Date.now(), v }); capMap(CFHOST_CACHE, 500); }
-      return v;
-    }, () => false).finally(() => PROXYIP_INFLIGHT.delete('cf:' + host));
-    PROXYIP_INFLIGHT.set('cf:' + host, job);
-  }
-  return job;
+// 学习型路由：直连失败、由反代接通的目标（Cloudflare 上的站点，直连会被回环保护拦截）记下来，
+// 之后到该目标的连接直接走反代：不再发注定失败的直连，也不需要任何 DNS 查询。
+// 只在直连「确实失败」（报错 / 超时）时记录；直连只是慢、超出优先窗口但最终能通的站点不记录（继续直连优先）。
+// 记录 30 分钟；按记录走反代却失败时删除记录并回落直连
+const RELAY_HOSTS = new Map();
+const RELAY_HOST_TTL = 30 * 60 * 1000;
+function relayHostKnown(host) {
+  const t = RELAY_HOSTS.get(host);
+  if (t === undefined) return false;
+  if (Date.now() - t > RELAY_HOST_TTL) { RELAY_HOSTS.delete(host); return false; }
+  return true;
 }
+function markRelayHost(host) { RELAY_HOSTS.delete(host); RELAY_HOSTS.set(host, Date.now()); capMap(RELAY_HOSTS, 1000); }
 
 // 直连优先竞速：直连与反代并发发起，但优先采用直连——
 //   · 直连在 graceMs 内成功 → 用直连（反代是第三方 SNI 中转，多一跳且可能误路由）
 //   · 直连失败（立即）/ 窗口到期 → 用已就绪的反代（反代并发建立，不额外等待）
 //   · 反代也不可用          → 继续等直连
 // 若不设窗口，就近反代的握手普遍比跨境直连快，几乎所有 TLS 流量都会被反代抢走。
-// graceMs = 0：不等直连（目标确定在 CF 段，直连必被回环保护拦截）；cfHint：解析出目标托管在 CF 时提前结束窗口
-async function racePreferDirect(directJob, relayJobs, graceMs, cfHint) {
+// graceMs = 0：不等直连（目标确定在 CF 段，直连必被回环保护拦截）；onDirectFail：直连最终失败时回调（学习型路由）
+// 反代整体等待上限 RELAY_WAIT_MAX：任何情况下都不会无限等待
+async function racePreferDirect(directJob, relayJobs, graceMs, onDirectFail) {
   let used = null;
   const recycle = (s) => { if (s && s !== used) { try { s.close(); } catch (e) { /* 忽略 */ } } };
   const directP = directJob
     ? Promise.resolve().then(directJob).then((s) => (s && s.readable ? s : null), () => null)
     : Promise.resolve(null);
+  // 直连最终失败且这次由反代接通：回调 onDirectFail（两件事先后顺序不定，都发生时调用一次）
+  let directFailed = false, relayUsed = false;
+  const learnIfBoth = () => { if (directFailed && relayUsed && onDirectFail) { onDirectFail(); onDirectFail = null; } };
+  if (directJob) directP.then((s) => { if (!s) { directFailed = true; learnIfBoth(); } });
   const relayP = (relayJobs && relayJobs.length)
-    ? raceConnect(relayJobs).then((s) => (s && s.readable ? s : null), () => null)
+    ? nullAfter(raceConnect(relayJobs).then((s) => (s && s.readable ? s : null), () => null), RELAY_WAIT_MAX, recycle)
     : Promise.resolve(null);
   let graceTimer = null;
   const first = await Promise.race([
     directP,
     new Promise((r) => { graceTimer = setTimeout(() => r(GRACE_EXPIRED), graceMs); }),
-    cfHint ? cfHint.then((cf) => (cf ? GRACE_EXPIRED : new Promise(() => {})), () => new Promise(() => {})) : new Promise(() => {}),
   ]);
   clearTimeout(graceTimer);
   if (first && first !== GRACE_EXPIRED) { used = first; relayP.then(recycle); return used; }   // 直连胜出
   const relay = await relayP;
-  if (relay) { used = relay; directP.then(recycle); return used; }                              // 反代接管
+  if (relay) { used = relay; relayUsed = true; learnIfBoth(); directP.then(recycle); return used; }   // 反代接管
   used = await directP;                                                                          // 反代不可用：等直连
   return used;
 }
 const GRACE_EXPIRED = Symbol('grace');
+// 等待 promise，超过 ms 返回 null；超时后才到达的连接交给 late 关闭
+function nullAfter(promise, ms, late) {
+  let timer = null, timedOut = false;
+  return Promise.race([
+    promise.then((v) => { clearTimeout(timer); if (timedOut && late) late(v); return v; }),
+    new Promise((r) => { timer = setTimeout(() => { timedOut = true; r(null); }, ms); }),
+  ]);
+}
 
 const DIRECT_TIMEOUT = 4000;   // 直连超时（反代并发进行，无需久等）
 const RELAY_TIMEOUT = 4000;    // 单个反代 IP 连接超时
 const MAX_RACERS = 4;          // 单次竞速最多并发路数（CF 单请求同时出站连接上限 6，留余量给 DoH 等）
 const SNIFF_WAIT_MS = 80;      // 头部已完整但尚无数据时，等首包判定协议的上限（不能拖慢建连）
+const RELAY_WAIT_MAX = 10000;  // 反代整体等待上限（DoH 解析 + 连接）
 const DIRECT_GRACE_MS = 1500;  // 直连优先窗口（直连失败会立即换反代，窗口只管「慢但能通」的直连；过短会让反代抢走正常站点的流量，如 YouTube 视频）
 
 // 首包协议判定：自定义反代与内置地区反代都是 SNI 型透明代理，只能搬运 TLS 流量（按 ClientHello 的 SNI 路由）。
@@ -2001,10 +2006,10 @@ function relayPlan(cfg, colo) {
     });
   }
   const primary = RELAY_DOMAINS[rl.region] ? rl.region : selectRelayRegion(colo);
-  const plan = [{ host: RELAY_DOMAINS[primary], port: 443, take: 2 }];
+  const plan = [{ host: RELAY_DOMAINS[primary], port: 443, take: 2, txt: false }];   // 内置域名只有 A 记录
   if (rl.region2 !== 'none') {
     const second = (RELAY_DOMAINS[rl.region2] && rl.region2 !== primary) ? rl.region2 : Object.keys(RELAY_DOMAINS).find(r => r !== primary);
-    plan.push({ host: RELAY_DOMAINS[second], port: 443, take: 1 });
+    plan.push({ host: RELAY_DOMAINS[second], port: 443, take: 1, txt: false });
   }
   return plan;
 }
@@ -2044,18 +2049,28 @@ async function openOutbound(parsed, cfg, colo, payloadKind) {
     if (!allowSniRelay) return [];
     return relayPlan(cfg, colo).map((p) => async () => {
       let ts = [];
-      try { ts = await resolveProxyIPs(p.host, p.port); } catch (e) { return null; }
+      try { ts = await resolveProxyIPs(p.host, p.port, { txt: p.txt !== false }); } catch (e) { return null; }
       if (!ts.length) return null;
       return await raceConnect(ts.slice(0, p.take).map(t => () => attempt(() => connectDirect(t, RELAY_TIMEOUT))));
     });
   };
   const directJob = () => attempt(() => connectDirect(target, DIRECT_TIMEOUT));
   const proxyJob = viaProxy ? () => attempt(() => viaProxy(target)) : null;
-  // 目标为 CF 段 IP → 直连必被回环保护拦截，不设直连窗口
-  const grace = isCloudflareIP(parsed.addr) ? 0 : DIRECT_GRACE_MS;
-  // 域名目标并发查 A 记录：托管在 CF 则立即让反代接管（见 isCfHosted）
-  const cfHint = grace > 0 && allowSniRelay && relayPlan(cfg, colo).length ? isCfHosted(parsed.addr) : null;
-  const pickBest = () => racePreferDirect(directJob, relayJobs().slice(0, MAX_RACERS - 1), grace, cfHint);
+  const hostKey = String(parsed.addr || '').toLowerCase();
+  const cfIp = isCloudflareIP(hostKey);
+  const learn = !isValidIp(hostKey);   // 学习型路由只针对域名目标（IP 目标按 CF 段直接判断）
+  const pickBest = async () => {
+    const jobs = relayJobs().slice(0, MAX_RACERS - 1);
+    // 目标为 CF 段 IP，或已记录需要反代的域名：直连必被回环保护拦截，直接走反代（不发注定失败的直连）；
+    // 反代不通时删除记录并回落直连（保证不比原先差）
+    if (jobs.length && (cfIp || (learn && relayHostKnown(hostKey)))) {
+      const r = await racePreferDirect(null, jobs, 0);
+      if (r) return r;
+      if (learn) RELAY_HOSTS.delete(hostKey);
+      return racePreferDirect(directJob, [], 0);
+    }
+    return racePreferDirect(directJob, jobs, DIRECT_GRACE_MS, (learn && jobs.length) ? () => markRelayHost(hostKey) : null);
+  };
 
   if (mode === 'only') {
     if (proxyJob) {

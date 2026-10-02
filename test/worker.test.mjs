@@ -580,7 +580,7 @@ async function openWs(env, headers = {}) {
   return lastServer;
 }
 
-test('出站竞速：目标走 Cloudflare（直连挂起）时内置反代并发接管，立即可用，不再白等 6s', async () => {
+test('出站竞速：直连挂起（Cloudflare 上的站点，SYN 被静默丢弃）时，直连优先窗口（1.5s）到期由内置反代接管', async () => {
   const log = fakeNet({ 'cf-site.example': { delay: 'hang' }, '203.0.113.10': { delay: 20 }, '203.0.113.20': { delay: 40 } });
   await withFetch(relayDoh, async () => {
     const ws = await openWs(baseEnv());
@@ -591,9 +591,90 @@ test('出站竞速：目标走 Cloudflare（直连挂起）时内置反代并发
     const used = log.find(s => s.written.length);
     assert.equal(used.hostname, '203.0.113.10', '本地区反代胜出');
     assert.deepEqual([...used.written[0]], TLS_HELLO, '反代收到去掉 VLESS 头的原始 TLS 数据');
-    assert.ok(ms < 1500, `建连耗时 ${ms}ms`);
+    assert.ok(ms >= 1400 && ms < 2500, `建连耗时 ${ms}ms`);
     await until(() => log.find(s => s.hostname === '203.0.113.20').closedByUs);   // 败者连接被释放
   });
+});
+
+test('学习型路由：直连失败、由反代接通的站点被记住，之后的连接直接走反代（不再发直连、不查 DNS）', async () => {
+  const log = fakeNet({ 'cf-learn.example': { delay: 'fail' }, '203.0.113.10': { delay: 10 }, '203.0.113.20': { delay: 10 } });
+  const dns = [];
+  await withFetch((url) => { dns.push(new URL(url).searchParams.get('name')); return relayDoh(url); }, async () => {
+    let ws = await openWs(baseEnv());
+    let t0 = Date.now();
+    await ws.emit('message', { data: vlessReq('cf-learn.example', 443, TLS_HELLO).buffer });
+    await until(() => log.some(s => s.written.length));
+    assert.ok(Date.now() - t0 < 500, '直连立即失败：反代马上接管，不等窗口');
+    assert.equal(log.filter(s => s.hostname === 'cf-learn.example').length, 1);
+    log.length = 0;
+    ws = await openWs(baseEnv());
+    t0 = Date.now();
+    await ws.emit('message', { data: vlessReq('cf-learn.example', 443, TLS_HELLO).buffer });
+    await until(() => log.some(s => s.written.length));
+    assert.equal(log.find(s => s.written.length).hostname, '203.0.113.10');
+    assert.equal(log.filter(s => s.hostname === 'cf-learn.example').length, 0, '第二次不再尝试直连');
+    assert.ok(!dns.includes('cf-learn.example'), '目标域名从不查 DNS');
+  });
+});
+
+test('学习型路由：直连只是慢（超出窗口但最终连通）的站点不记录；已记录的站点反代失败时回落直连并删除记录', async () => {
+  let log = fakeNet({ 'slowok.example': { delay: 1800 }, '203.0.113.10': { delay: 10 }, '203.0.113.20': { delay: 10 } });
+  await withFetch(relayDoh, async () => {
+    let ws = await openWs(baseEnv());
+    await ws.emit('message', { data: vlessReq('slowok.example', 443, TLS_HELLO).buffer });
+    await until(() => log.some(s => s.written.length));
+    await until(() => log.find(s => s.hostname === 'slowok.example').closedByUs);   // 直连随后连通，被回收
+    log.length = 0;
+    ws = await openWs(baseEnv());
+    await ws.emit('message', { data: vlessReq('slowok.example', 443, TLS_HELLO).buffer });
+    await until(() => log.some(s => s.written.length));
+    assert.equal(log.filter(s => s.hostname === 'slowok.example').length, 1, '未被记录：仍然尝试直连');
+    // 已记录的站点：反代全部失败 → 回落直连，记录删除
+    log = fakeNet({ 'flip.example': { delay: 'fail' }, '203.0.113.10': { delay: 10 }, '203.0.113.20': { delay: 10 } });
+    ws = await openWs(baseEnv());
+    await ws.emit('message', { data: vlessReq('flip.example', 443, TLS_HELLO).buffer });
+    await until(() => log.some(s => s.written.length));   // 记录 flip.example
+    log = fakeNet({ 'flip.example': { delay: 5 }, '203.0.113.10': { delay: 'fail' }, '203.0.113.20': { delay: 'fail' } });
+    ws = await openWs(baseEnv());
+    await ws.emit('message', { data: vlessReq('flip.example', 443, TLS_HELLO).buffer });
+    await until(() => log.some(s => s.written.length));
+    assert.equal(log.find(s => s.written.length).hostname, 'flip.example', '反代不通：回落直连');
+    log = fakeNet({ 'flip.example': { delay: 5 }, '203.0.113.10': { delay: 'fail' }, '203.0.113.20': { delay: 'fail' } });
+    ws = await openWs(baseEnv());
+    await ws.emit('message', { data: vlessReq('flip.example', 443, TLS_HELLO).buffer });
+    await until(() => log.some(s => s.written.length));
+    assert.equal(log[0].hostname, 'flip.example', '记录已删除：直连优先');
+  });
+});
+
+test('目标为 Cloudflare IP：不发注定失败的直连，直接走反代；反代不通时才回落直连', async () => {
+  const req = new Uint8Array([0, ...uuidBytes, 0, 1, 1, 187, 1, 104, 16, 0, 5, ...TLS_HELLO]);   // 104.16.0.5:443
+  let log = fakeNet({ '104.16.0.5': { delay: 5 }, '203.0.113.10': { delay: 10 }, '203.0.113.20': { delay: 10 } });
+  await withFetch(relayDoh, async () => {
+    let ws = await openWs(baseEnv());
+    await ws.emit('message', { data: req.buffer });
+    await until(() => log.some(s => s.written.length));
+    assert.equal(log.find(s => s.written.length).hostname, '203.0.113.10');
+    assert.equal(log.filter(s => s.hostname === '104.16.0.5').length, 0, '没有直连尝试');
+    log = fakeNet({ '104.16.0.5': { delay: 5 }, '203.0.113.10': { delay: 'fail' }, '203.0.113.20': { delay: 'fail' } });
+    ws = await openWs(baseEnv());
+    await ws.emit('message', { data: req.buffer });
+    await until(() => log.some(s => s.written.length));
+    assert.equal(log.find(s => s.written.length).hostname, '104.16.0.5', '反代不通：回落直连');
+  });
+});
+
+test('内置地区反代域名只查 A 记录（这些域名没有 TXT），自定义反代仍查 TXT', async () => {
+  fakeNet({ '198.51.100.31': { delay: 5 }, '198.51.100.32': { delay: 5 }, 'tx.example': { delay: 'fail' } });
+  const dns = [];
+  const stub = dohStub({ 'cloudflare-dns.com': { answers: {
+    'proxyip.jp.cmliussss.net|A': ['198.51.100.31'], 'proxyip.sg.cmliussss.net|A': ['198.51.100.32'], 'my-relay.example.net|A': ['198.51.100.31'] } } }, dns);
+  await withFetch(stub, () => connectVia(baseEnv({ K: kv({ config: { relay: { mode: 'builtin', region: 'JP', region2: 'SG' } } }) }), 'tx.example'));
+  await until(() => dns.filter(d => /cmliussss/.test(d.name)).length >= 2);
+  assert.deepEqual(dns.filter(d => /cmliussss/.test(d.name)).map(d => d.type), ['A', 'A']);
+  await withFetch(stub, () => connectVia(baseEnv({ K: kv({ config: { relay: { mode: 'custom', custom: 'my-relay.example.net' } } }) }), 'tx.example'));
+  await until(() => dns.filter(d => d.name === 'my-relay.example.net').length >= 2);
+  assert.deepEqual(dns.filter(d => d.name === 'my-relay.example.net').map(d => d.type).sort(), ['A', 'TXT']);
 });
 
 test('出站竞速：直连在优先窗口内成功时使用直连，已建立的反代连接被关闭', async () => {
@@ -1100,7 +1181,7 @@ const connectVia = async (env, host) => {
   return ws;
 };
 
-test('反代 / 落地域名解析：并发连接合并为一次查询，正常情况下每种记录只发 1 个 DoH 请求（Cloudflare 优先）', async () => {
+test('反代 / 落地域名解析：每种记录只发 1 个 DoH 请求（Cloudflare 优先）；结果缓存复用，但不跨请求共享进行中的解析', async () => {
   const log = fakeNet({ '198.51.100.5': { delay: 5 } });
   const dns = [];
   const env = baseEnv({ K: kv({ config: { proxyIP: 'dedupe.example.com' } }) });
@@ -1108,11 +1189,17 @@ test('反代 / 落地域名解析：并发连接合并为一次查询，正常�
     const sockets = [];
     for (let i = 0; i < 4; i++) sockets.push(await openWs(env));
     await Promise.all(sockets.map(ws => ws.emit('message', { data: vlessReq('t.example', 443, TLS_HELLO).buffer })));
+    await until(() => log.filter(s => s.hostname === '198.51.100.5').length === 4);
+    // 解析完成后的连接：直接用缓存，不再查询
+    const n = dns.length;
+    await connectVia(env, 't.example');
+    await until(() => log.filter(s => s.hostname === '198.51.100.5').length === 5);
+    assert.equal(dns.length, n, '缓存命中：不再查询');
   });
   const mine = dns.filter(d => d.name === 'dedupe.example.com');
-  assert.deepEqual(mine.map(d => d.type).sort(), ['A', 'TXT'], '4 个并发连接只查询一次（TXT + A）');
+  // 进行中的解析不跨请求共享（Workers 中发起请求结束时 fetch 被取消，共享者会永远挂起）：并发冷启动时各自查询
+  assert.deepEqual(mine.map(d => d.type).sort(), ['A', 'A', 'A', 'A', 'TXT', 'TXT', 'TXT', 'TXT']);
   assert.ok(mine.every(d => d.host === 'cloudflare-dns.com'), '只用第一个端点，没有同时发给 3 个');
-  assert.equal(log.filter(s => s.hostname === '198.51.100.5').length, 4);
 });
 
 test('反代域名解析：首选 DoH 失败时才换下一个端点；全部失败后 30 秒内不再重复查询', async () => {
