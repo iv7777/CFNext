@@ -135,7 +135,7 @@
 
     <!-- ===== 视图：节点配置（协议 / TLS / ECH / 落地出站） ===== -->
     <section class="view" data-view="nodes">
-      <div class="view-head"><h2>节点配置</h2><p>代理协议、TLS/ECH、节点测活与落地出站（保存后立即生效）</p></div>
+      <div class="view-head"><h2>节点配置</h2><p>代理协议、TLS/ECH 与落地出站（保存后立即生效）</p></div>
       <div class="grid3">
         <div class="card">
           <h3><span class="tick"></span>协议开关</h3>
@@ -149,11 +149,6 @@
           <div class="proto-row"><label class="switch"><input type="checkbox" id="tls-only"><span class="sl"></span></label><span>仅 TLS 端口（跳过 80/8080 等明文端口）</span></div>
           <div class="field" style="margin-top:12px"><label>ALPN 协商（h2 / http/1.1，逗号分隔）</label><input type="text" id="alpn" placeholder="留空自动，如 h2,http/1.1" autocomplete="off"></div>
           <p class="hint">默认开启：只下发 TLS 端口节点。关闭后，每个 443 节点另追加一个 80 明文端口节点（名称带「·80」），来源中自带的 8080 / 2052 等明文端口也原样下发。明文节点不加密 UUID 与 Host，更容易被识别封锁；自定义域名还需在 Cloudflare 关闭「始终使用 HTTPS」，否则明文节点无法连接。开启 ECH 时始终只下发 TLS 端口节点。</p>
-        </div>
-        <div class="card">
-          <h3><span class="tick"></span>节点测活</h3>
-          <div class="proto-row"><label class="switch"><input type="checkbox" id="q-probe-on"><span class="sl"></span></label><span>节点测活（TCP 探测）</span></div>
-          <p class="hint" style="margin-top:12px">关闭：不做任何 TCP 握手 / HTTP 探测与剔除，节点的下发策略、出入站方式、ProxyIP 等节点相关均按 V1.x版本处理方式处理——按数据源原始顺序全量下发，客户端自行择优。<br>开启：对候选地址做 TCP 探测并剔除判死项（含精选池 / 优选 IP / 域名预检 / ProxyIP 兜底）；Cloudflare 运行时禁止出站连接 CF IP 段，故对 CF 段 IP 跳过探测、直接视为可用（内置精选池实测 97% 可用，不会被误判清空），仅对非 CF 段（反代 / ProxyIP）真实测活剔除死节点。自定义订阅 / 随机优选模式不测活。</p>
         </div>
       </div>
       <div class="card">
@@ -214,7 +209,7 @@
         <h3><span class="tick"></span>优选域名</h3>
         <div class="field"><label>优选域名列表（每行一个纯主机名；留空 = 使用内置列表）</label>
           <textarea id="o-prefdomains" rows="6" placeholder="cf.example.com&#10;cdn.example.org" autocomplete="off" spellcheck="false"></textarea>
-          <div class="hint">填写后<b>整体替换</b>内置列表（不是追加）。用于「地址来源 → 优选域名」下发的域名节点、IPv6 解析、「追加默认优选域名」以及节点测活预检。只填主机名，不含 http://、端口、路径或通配符，最多 30 个；IP 地址请填到「优选节点」。</div>
+          <div class="hint">填写后<b>整体替换</b>内置列表（不是追加）。用于「地址来源 → 优选域名」下发的域名节点和 IPv6 解析。只填主机名，不含 http://、端口、路径或通配符，最多 30 个；IP 地址请放到「优选 IP 来源」的自定义优选 API 里。</div>
         </div>
         <div class="proto-row">
           <span class="hint" id="pd-count" style="margin:0">—</span>
@@ -222,7 +217,7 @@
           <button type="button" class="btn sm" onclick="loadBuiltinDomains()">载入内置列表</button>
           <button type="button" class="btn sm" id="ps-test-domains" onclick="testIpSource('domains')">测试</button>
         </div>
-        <p class="hint">每个域名的运营方都能通过 SNI 看到你的 Worker 主机名，只使用你信任的域名。测试会解析前 25 个域名，看它们是否落在 Cloudflare 段（占用同样数量的子请求，仅管理员手动触发）。逐个 DoH 解析的路径（IPv6、追加默认、测活预检）只处理前 25 个，其余仍作为域名节点下发。</p>
+        <p class="hint">每个域名的运营方都能通过 SNI 看到你的 Worker 主机名，只使用你信任的域名。测试会解析前 25 个域名，看它们是否落在 Cloudflare 段（占用同样数量的子请求，仅管理员手动触发）。逐个 DoH 解析的路径（IPv6 解析）只处理前 25 个，其余仍作为域名节点下发。</p>
         <div id="pd-test-out" class="ipt-out" style="display:none"></div>
       </div>
       <div class="card">

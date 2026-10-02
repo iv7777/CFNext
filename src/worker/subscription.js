@@ -1,92 +1,3 @@
-// 测活总开关（面板「节点测活」/ 环境变量 PROBE_ALIVE）：关闭时所有测活函数直接返回 true，不剔除任何节点。
-// 目前只用于默认模式下「优选域名」的预检（filterAliveDomains）。Cloudflare 运行时禁止 connect() 到 CF IP 段，
-// 对 CF 段 IP 的 TCP 探测恒失败，因此 testProxyAlive 对 CF 段直接视为可用，实际检查的是「域名能否解析到 CF 段 IP」
-let PROBE_ALIVE_ENABLED = false;
-function setProbeAlive(v) { PROBE_ALIVE_ENABLED = (v === true || v === 'true' || v === '1' || v === 1); }
-
-// 探测并发闸：Cloudflare Workers 每次调用同时等待响应头的连接数上限是 6，第 7 个连接会排队而不是报错；
-// 探测函数的超时计时器从 connect() 调用时就开始，排队的探测会在轮到建连前超时并被误判为死节点。
-// 用信号量把并发压到上限以下，并让超时计时器在拿到令牌后才启动
-const PROBE_CONCURRENCY = 4;              // 留 2 个名额给 DoH fetch / KV / D1 等其它出网调用
-let probeRunning = 0;
-const probeWaiters = [];
-function probeLimit() {
-  if (probeRunning < PROBE_CONCURRENCY) { probeRunning++; return Promise.resolve(); }
-  return new Promise(res => probeWaiters.push(res));
-}
-function probeRelease() {
-  const next = probeWaiters.shift();
-  if (next) next(); else probeRunning--;
-}
-// 对所有候选做并发受限的探测；fn 收 (item, index)，返回真值 = 可用
-async function probeAll(items, fn) {
-  const out = [];
-  let idx = 0;
-  const workers = Array.from({ length: Math.min(PROBE_CONCURRENCY, items.length) }, async () => {
-    while (idx < items.length) {
-      const i = idx++;
-      await probeLimit();
-      try { out[i] = await fn(items[i], i); }
-      catch (e) { out[i] = false; }
-      finally { probeRelease(); }
-    }
-  });
-  await Promise.all(workers);
-  return out;
-}
-
-
-// ProxyIP 可用性检测：TCP 连通测试（参考 TunnelBoard 测活思路，独立实现），2 秒超时
-async function testProxyAlive(server, port, timeoutMs) {
-  if (!PROBE_ALIVE_ENABLED) return true;   // 测活关闭：不剔除
-  // Cloudflare 运行时禁止出站连接 CF IP 段：对 CF 段 IP 的 TCP 探测恒失败，跳过探测视为可用，
-  // 避免精选池（实测 97% 可用）被整体判死清空、订阅被迫用随机 CF IP 补足（客户端可达率仅 28-45%）
-  if (isCloudflareIP(server)) return true;
-  const ms = timeoutMs || 2000;
-  try {
-    const conn = connect({ hostname: server, port: port });
-    await Promise.race([conn.opened, new Promise((_, rej) => setTimeout(() => rej(new Error('proxy timeout')), ms))]);
-    try { conn.close(); } catch (e) {}
-    return true;
-  } catch (e) { return false; }
-}
-
-// 域名可用性预检：DoH 解析首个 CF IP → TCP 测活，剔除死域名（NXDOMAIN / 解析到死 IP，客户端测速 -1 主因）。
-// 活域名仍按域名形式下发（保留客户端动态 DNS 解析拿最优边缘的优势）；结果 10 分钟缓存，避免每次订阅重测
-async function dohFirstCF(domain) {
-  try {
-    const res = await fetchTimeout('https://cloudflare-dns.com/dns-query?name=' + encodeURIComponent(domain) + '&type=A', { headers: { accept: 'application/dns-json' } }, 4000);
-    if (!res || !res.ok) return null;
-    const j = await res.json();
-    const ips = (j.Answer || []).filter(a => a.type === 1 && /^\d+\.\d+\.\d+\.\d+$/.test(a.data)).map(a => a.data);
-    return ips.filter(isCloudflareIP)[0] || null;
-  } catch (e) { return null; }
-}
-const DOMAIN_ALIVE_CACHE = { t: 0, key: null, list: null };
-async function filterAliveDomains(domainText) {
-  const domains = String(domainText || '').split(/[\n,;]+/).map(s => s.trim().replace(/^\*\./, '')).filter(Boolean);
-  // 测活关闭：域名预检直接跳过，原样下发，不剔除任何域名
-  if (!PROBE_ALIVE_ENABLED) return domains.join('\n');
-  // 缓存按输入列表区分（面板改了优选域名后不能继续返回旧列表）
-  const key = domains.join('\n');
-  if (Date.now() - DOMAIN_ALIVE_CACHE.t < 10 * 60 * 1000 && DOMAIN_ALIVE_CACHE.key === key && DOMAIN_ALIVE_CACHE.list !== null) return DOMAIN_ALIVE_CACHE.list;
-  // DoH 解析 + TCP 测活双重预检（10 分钟缓存）：解析不出 CF IP 或解析到非 CF 段的域名（源站已搬走）直接判死；
-  // 并发受限（≤4）：DoH fetch + TCP 探测都算出网，避免撞 6 连接上限；排队不计入超时。
-  // 只预检前 PREF_DOMAIN_DOH_LIMIT 个（子请求预算），其余原样保留
-  const head = domains.slice(0, PREF_DOMAIN_DOH_LIMIT), tail = domains.slice(PREF_DOMAIN_DOH_LIMIT);
-  const checked = await probeAll(head, async (d) => {
-    const ip = await dohFirstCF(d);
-    if (!ip || !isCloudflareIP(ip)) return { d, ok: false };
-    return { d, ok: await testProxyAlive(ip, 443) };
-  });
-  const alive = checked.map((c, i) => (c && c.ok ? head[i] : null)).filter(Boolean).concat(tail);
-  DOMAIN_ALIVE_CACHE.t = Date.now();
-  DOMAIN_ALIVE_CACHE.key = key;
-  DOMAIN_ALIVE_CACHE.list = alive.join('\n');
-  return DOMAIN_ALIVE_CACHE.list;
-}
-
-
 // 单次订阅的节点上限（按 Workers / Pages 免费额度 10ms CPU 硬限设定）：结构化格式（Clash / Sing-box 等）
 // 实测约 400 节点 ~8ms，行式格式拼接成本很低；统一取 500
 const NODE_CAP = 500;
@@ -121,10 +32,8 @@ async function generateSubscription(cfg, requestUrl, format, ua) {
   if (useNative && !onlyV6) rc.preferredDomains = rc.host + '#原生地址';
   // 仅勾选 IPv6 时跳过 v4 优选域名（域名节点为 IPv4 入口，混入会占满 cap 并被 filterNodes 剔除，导致数量控制下发不足）
   if (useDomain && !onlyV6) {
-    // 域名可用性预检（仅节点测活开启时）：DoH 解析 + TCP 测活，死域名不下发；
-    // 活域名仍按域名形式下发，保留客户端动态 DNS 解析拿当前最优 CF 边缘的优势
-    const aliveDomains = await filterAliveDomains(prefList);
-    if (aliveDomains) rc.preferredDomains = (rc.preferredDomains ? rc.preferredDomains + '\n' : '') + aliveDomains;
+    // 域名按原样下发（不预检）：客户端连接时自行解析到当前最优的 CF 边缘 IP；失效的域名可用「优选配置 → 优选域名 → 测试」找出
+    rc.preferredDomains = (rc.preferredDomains ? rc.preferredDomains + '\n' : '') + prefList;
   }
   // 「优选 IP」的在线来源（面板「优选配置 → 优选 IP 来源」开关控制，并行拉取，每个来源 1 个子请求、缓存 10 分钟）：
   // 自定义优选 API 1 / 2（用户自选来源排最前）→ HostMonit → uouin。HostMonit 为纯 IPv4，仅勾选 IPv6 时跳过
@@ -162,8 +71,7 @@ async function generateSubscription(cfg, requestUrl, format, ua) {
   ua = (ua || '').toLowerCase();
   const forced = (format || '').toLowerCase();
   const cap = NODE_CAP;
-  // 不对优选 IP 池做 TCP 测活剔除（对齐 1.0.6）：Worker 边缘连通性 ≠ 客户端连通性，且 Workers 无法连接 CF 段 IP，
-  // 测活只会误杀或拖慢订阅；全量按顺序下发由客户端自行择优（节点测活开启时仅做优选域名 DoH 预检）
+  // 不做任何测活剔除：Worker 边缘连通性 ≠ 客户端连通性，且 Workers 无法连接 CF 段 IP；全量按顺序下发由客户端自行择优
   let nodes = filterNodes(await buildNodes(rc, cap), cfg.filter);
   // 所有来源都没有产出节点时（如在线来源全部失败），用官方域名节点兜底，保证订阅不为空
   // （客户端不会收到「无效订阅」）；域名节点由客户端自行解析，IPv4 / IPv6 均可

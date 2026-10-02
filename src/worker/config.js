@@ -38,9 +38,6 @@ function buildConfig(env, kvCfg) {
   if (env.TROJAN === 'true' || env.TROJAN === '1') cfg.enableTrojan = true;
   if (env.TROJAN_PASSWORD) cfg.trojanPassword = String(env.TROJAN_PASSWORD);
   if (env.ALPN) cfg.alpn = String(env.ALPN);
-  // 节点测活：环境变量 PROBE_ALIVE=1/true 强制开启，=0/false 强制关闭（不走面板也能改）
-  if (env.PROBE_ALIVE === '1' || env.PROBE_ALIVE === 'true') cfg.probeAlive = true;
-  if (env.PROBE_ALIVE === '0' || env.PROBE_ALIVE === 'false') cfg.probeAlive = false;
   // KV 图形化配置（更高优先级）：按字段表逐项合并，未登记的旧字段（如已移除的 fragment / src.customPref）自动忽略
   if (kvCfg && typeof kvCfg === 'object') {
     for (const d of CONFIG_SCHEMA) {
@@ -59,8 +56,6 @@ function buildConfig(env, kvCfg) {
     if (d.lower) v = v.toLowerCase();
     setPath(cfg, key, v);
   }
-  // 节点测活开关同步到测活函数（订阅生成与手动测速都依赖此全局标记）
-  setProbeAlive(!!cfg.probeAlive);
   // 兜底：KV 中的 UUID 为空或非法时回退环境变量 U（修复：保存了空 / 非法 UUID 后每次请求随机生成新 UUID，
   // 面板登录态与所有节点同时失效且无法再进入面板的问题），仍无效才随机生成
   cfg.uuid = String(cfg.uuid || '').toLowerCase();

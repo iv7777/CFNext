@@ -68,7 +68,7 @@ test('GET /api/config 返回字段表默认值（与旧 DEFAULT_CONFIG 一致）
   const legacy = {
     host: '', enableVless: true, enableTrojan: false, trojanPassword: '', enableXhttp: false,
     alpn: '', ech: false, echHost: 'cloudflare-ech.com', echDns: '', tlsOnly: true,
-    probeAlive: false, proxyIP: '', outboundProxy: '', outboundMode: '',
+    proxyIP: '', outboundProxy: '', outboundMode: '',
     filter: { region: ['all'], ipType: ['IPv4', 'IPv6'], isp: ['移动', '联通', '电信'] },
     src: { native: false, prefDomain: true, prefIp: true },
   };
@@ -298,8 +298,8 @@ test('选择具体地区时仍保留不带地区的通用节点（优选域名�
   assert.ok(names.some(n => /^优选IP-\d+$/.test(n)), '优选域名节点（通用）保留');
 });
 
-test('默认模式（IPv4+IPv6、节点测活开启）子请求数不超过免费版 50 个上限，DoH 不重复查询', async () => {
-  const env = baseEnv({ K: kv({ config: { probeAlive: true } }) });
+test('默认模式（IPv4+IPv6）子请求数不超过免费版 50 个上限，DoH 不重复查询', async () => {
+  const env = baseEnv({ K: kv({ config: {} }) });
   const offline = globalThis.fetch;
   const seen = [];
   globalThis.fetch = async (url) => {
@@ -1315,13 +1315,6 @@ test('优选域名：填写后整体替换内置列表（默认模式域名节�
   assert.ok(![...names6].some(n => internals.DEFAULT_PREFERRED_DOMAINS.split('\n').includes(n)));
 });
 
-test('测活预检缓存按域名列表区分：面板修改优选域名后不会继续使用旧列表', async () => {
-  const doh = cfDoh({ 'a1.example.com': ['104.16.1.1'], 'b1.example.com': ['104.16.1.2'] });
-  const run = (prefDomains) => domainsOfSub({ probeAlive: true, filter: { ipType: ['IPv4'] }, ipsrc: { hostmonit: false, uouin: false }, prefDomains }, doh);
-  assert.deepEqual((await run('a1.example.com')).filter(h => h.endsWith('.example.com')), ['a1.example.com']);
-  assert.deepEqual((await run('b1.example.com')).filter(h => h.endsWith('.example.com')), ['b1.example.com']);
-});
-
 test('保存校验：非法优选域名 / 自定义反代给出字段级错误；「仅使用自定义反代」但列表为空被拒绝；配置可往返', async () => {
   const env = baseEnv();
   const cookie = await login(env);
@@ -1435,4 +1428,20 @@ test('自定义订阅 / 随机优选已移除：旧 KV 中的相关字段与 YX 
   const res = await call(env, `/${UUID}/api/config`, { method: 'POST', cookie, body: { alpn: 'h2' } });
   assert.equal(res.status, 200);
   for (const k of ['optimizer', 'preferredDomains', 'preferredIPs']) assert.equal(k in stored(env), false, `${k} 已从 KV 清除`);
+});
+
+test('节点测活已移除：旧 KV 的 probeAlive 与 PROBE_ALIVE 环境变量被忽略，订阅不再对优选域名做任何预检解析，面板无对应开关', async () => {
+  const env = baseEnv({ PROBE_ALIVE: '1', K: kv({ config: { cfgRev: 2, probeAlive: true, filter: { ipType: ['IPv4'] }, ipsrc: { hostmonit: false, uouin: false } } }) });
+  const calls = [];
+  const links = await withFetch((u) => { calls.push(u); return nodesFetch(u); }, async () =>
+    (await (await call(env, `/${UUID}/sub/plain`, { ua: 'x' })).text()).split('\n').filter(Boolean));
+  assert.equal(links.length, 14, '14 个内置优选域名原样下发');
+  assert.equal(calls.filter(u => /cloudflare-dns\.com|alidns/.test(u)).length, 0, '没有为预检发出任何 DoH 请求');
+  const cookie = await login(env);
+  const cfg = await (await call(env, `/${UUID}/api/config`, { cookie })).json();
+  assert.equal('probeAlive' in cfg.data, false);
+  const html = await (await call(env, `/${UUID}`, { cookie })).text();
+  assert.ok(!html.includes('id="q-probe-on"') && !html.includes('节点测活'));
+  await call(env, `/${UUID}/api/config`, { method: 'POST', cookie, body: { alpn: 'h2' } });
+  assert.equal('probeAlive' in stored(env), false, '下次保存时从 KV 清除');
 });

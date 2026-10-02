@@ -59,10 +59,6 @@ const CONFIG_SCHEMA = [
     pattern: '^https://\\S+$', hint: '须为 https:// 开头的 DoH 地址' },
   // TLS 控制：默认开启，只下发 TLS 端口节点；关闭后 443 节点另追加 80 明文节点，来源自带的明文端口原样下发（开启 ECH 时强制仅 TLS）
   { key: 'tlsOnly', type: 'bool', def: true, el: 'tls-only', label: '仅 TLS 端口' },
-  // 节点测活：默认关闭。开启后只对默认模式的「优选域名」做预检（DoH 解析不到 Cloudflare 段 IP 的死域名不下发），
-  // 其它来源一律不测活、按来源顺序全量下发由客户端择优——Workers 运行时禁止出站连接 Cloudflare IP 段，对 CF 段 IP 的 TCP 探测恒失败。
-  // 环境变量 PROBE_ALIVE=1 / 0 可强制开启 / 关闭
-  { key: 'probeAlive', type: 'bool', def: false, el: 'q-probe-on', label: '节点测活' },
   // ---- 落地与出站 ----
   { key: 'proxyIP', type: 'string', def: '', el: 's-proxyIP', label: '反代 / 落地 IP', maxLen: 256,
     pattern: '^[^\\s/]+$', hint: '格式为 host 或 host:port', check: 'hostPort' },

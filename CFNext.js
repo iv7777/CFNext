@@ -17,7 +17,7 @@
 // ============================================================================
 import { connect } from 'cloudflare:sockets';
 
-const VERSION = '2.0.17';
+const VERSION = '2.0.18';
 
 // 更新检测：点击版本号后拉取仓库代码比对版本号；有新版本时返回最新代码供面板复制
 // 版本基准为仓库 main 分支根目录的 CFNext.js（由 build.mjs 生成的部署文件）
@@ -528,10 +528,6 @@ const CONFIG_SCHEMA = [
     pattern: '^https://\\S+$', hint: '须为 https:// 开头的 DoH 地址' },
   // TLS 控制：默认开启，只下发 TLS 端口节点；关闭后 443 节点另追加 80 明文节点，来源自带的明文端口原样下发（开启 ECH 时强制仅 TLS）
   { key: 'tlsOnly', type: 'bool', def: true, el: 'tls-only', label: '仅 TLS 端口' },
-  // 节点测活：默认关闭。开启后只对默认模式的「优选域名」做预检（DoH 解析不到 Cloudflare 段 IP 的死域名不下发），
-  // 其它来源一律不测活、按来源顺序全量下发由客户端择优——Workers 运行时禁止出站连接 Cloudflare IP 段，对 CF 段 IP 的 TCP 探测恒失败。
-  // 环境变量 PROBE_ALIVE=1 / 0 可强制开启 / 关闭
-  { key: 'probeAlive', type: 'bool', def: false, el: 'q-probe-on', label: '节点测活' },
   // ---- 落地与出站 ----
   { key: 'proxyIP', type: 'string', def: '', el: 's-proxyIP', label: '反代 / 落地 IP', maxLen: 256,
     pattern: '^[^\\s/]+$', hint: '格式为 host 或 host:port', check: 'hostPort' },
@@ -1045,9 +1041,6 @@ function buildConfig(env, kvCfg) {
   if (env.TROJAN === 'true' || env.TROJAN === '1') cfg.enableTrojan = true;
   if (env.TROJAN_PASSWORD) cfg.trojanPassword = String(env.TROJAN_PASSWORD);
   if (env.ALPN) cfg.alpn = String(env.ALPN);
-  // 节点测活：环境变量 PROBE_ALIVE=1/true 强制开启，=0/false 强制关闭（不走面板也能改）
-  if (env.PROBE_ALIVE === '1' || env.PROBE_ALIVE === 'true') cfg.probeAlive = true;
-  if (env.PROBE_ALIVE === '0' || env.PROBE_ALIVE === 'false') cfg.probeAlive = false;
   // KV 图形化配置（更高优先级）：按字段表逐项合并，未登记的旧字段（如已移除的 fragment / src.customPref）自动忽略
   if (kvCfg && typeof kvCfg === 'object') {
     for (const d of CONFIG_SCHEMA) {
@@ -1066,8 +1059,6 @@ function buildConfig(env, kvCfg) {
     if (d.lower) v = v.toLowerCase();
     setPath(cfg, key, v);
   }
-  // 节点测活开关同步到测活函数（订阅生成与手动测速都依赖此全局标记）
-  setProbeAlive(!!cfg.probeAlive);
   // 兜底：KV 中的 UUID 为空或非法时回退环境变量 U（修复：保存了空 / 非法 UUID 后每次请求随机生成新 UUID，
   // 面板登录态与所有节点同时失效且无法再进入面板的问题），仍无效才随机生成
   cfg.uuid = String(cfg.uuid || '').toLowerCase();
@@ -3324,95 +3315,6 @@ final, 🐟 漏网之鱼
 `;
 }
 
-// 测活总开关（面板「节点测活」/ 环境变量 PROBE_ALIVE）：关闭时所有测活函数直接返回 true，不剔除任何节点。
-// 目前只用于默认模式下「优选域名」的预检（filterAliveDomains）。Cloudflare 运行时禁止 connect() 到 CF IP 段，
-// 对 CF 段 IP 的 TCP 探测恒失败，因此 testProxyAlive 对 CF 段直接视为可用，实际检查的是「域名能否解析到 CF 段 IP」
-let PROBE_ALIVE_ENABLED = false;
-function setProbeAlive(v) { PROBE_ALIVE_ENABLED = (v === true || v === 'true' || v === '1' || v === 1); }
-
-// 探测并发闸：Cloudflare Workers 每次调用同时等待响应头的连接数上限是 6，第 7 个连接会排队而不是报错；
-// 探测函数的超时计时器从 connect() 调用时就开始，排队的探测会在轮到建连前超时并被误判为死节点。
-// 用信号量把并发压到上限以下，并让超时计时器在拿到令牌后才启动
-const PROBE_CONCURRENCY = 4;              // 留 2 个名额给 DoH fetch / KV / D1 等其它出网调用
-let probeRunning = 0;
-const probeWaiters = [];
-function probeLimit() {
-  if (probeRunning < PROBE_CONCURRENCY) { probeRunning++; return Promise.resolve(); }
-  return new Promise(res => probeWaiters.push(res));
-}
-function probeRelease() {
-  const next = probeWaiters.shift();
-  if (next) next(); else probeRunning--;
-}
-// 对所有候选做并发受限的探测；fn 收 (item, index)，返回真值 = 可用
-async function probeAll(items, fn) {
-  const out = [];
-  let idx = 0;
-  const workers = Array.from({ length: Math.min(PROBE_CONCURRENCY, items.length) }, async () => {
-    while (idx < items.length) {
-      const i = idx++;
-      await probeLimit();
-      try { out[i] = await fn(items[i], i); }
-      catch (e) { out[i] = false; }
-      finally { probeRelease(); }
-    }
-  });
-  await Promise.all(workers);
-  return out;
-}
-
-
-// ProxyIP 可用性检测：TCP 连通测试（参考 TunnelBoard 测活思路，独立实现），2 秒超时
-async function testProxyAlive(server, port, timeoutMs) {
-  if (!PROBE_ALIVE_ENABLED) return true;   // 测活关闭：不剔除
-  // Cloudflare 运行时禁止出站连接 CF IP 段：对 CF 段 IP 的 TCP 探测恒失败，跳过探测视为可用，
-  // 避免精选池（实测 97% 可用）被整体判死清空、订阅被迫用随机 CF IP 补足（客户端可达率仅 28-45%）
-  if (isCloudflareIP(server)) return true;
-  const ms = timeoutMs || 2000;
-  try {
-    const conn = connect({ hostname: server, port: port });
-    await Promise.race([conn.opened, new Promise((_, rej) => setTimeout(() => rej(new Error('proxy timeout')), ms))]);
-    try { conn.close(); } catch (e) {}
-    return true;
-  } catch (e) { return false; }
-}
-
-// 域名可用性预检：DoH 解析首个 CF IP → TCP 测活，剔除死域名（NXDOMAIN / 解析到死 IP，客户端测速 -1 主因）。
-// 活域名仍按域名形式下发（保留客户端动态 DNS 解析拿最优边缘的优势）；结果 10 分钟缓存，避免每次订阅重测
-async function dohFirstCF(domain) {
-  try {
-    const res = await fetchTimeout('https://cloudflare-dns.com/dns-query?name=' + encodeURIComponent(domain) + '&type=A', { headers: { accept: 'application/dns-json' } }, 4000);
-    if (!res || !res.ok) return null;
-    const j = await res.json();
-    const ips = (j.Answer || []).filter(a => a.type === 1 && /^\d+\.\d+\.\d+\.\d+$/.test(a.data)).map(a => a.data);
-    return ips.filter(isCloudflareIP)[0] || null;
-  } catch (e) { return null; }
-}
-const DOMAIN_ALIVE_CACHE = { t: 0, key: null, list: null };
-async function filterAliveDomains(domainText) {
-  const domains = String(domainText || '').split(/[\n,;]+/).map(s => s.trim().replace(/^\*\./, '')).filter(Boolean);
-  // 测活关闭：域名预检直接跳过，原样下发，不剔除任何域名
-  if (!PROBE_ALIVE_ENABLED) return domains.join('\n');
-  // 缓存按输入列表区分（面板改了优选域名后不能继续返回旧列表）
-  const key = domains.join('\n');
-  if (Date.now() - DOMAIN_ALIVE_CACHE.t < 10 * 60 * 1000 && DOMAIN_ALIVE_CACHE.key === key && DOMAIN_ALIVE_CACHE.list !== null) return DOMAIN_ALIVE_CACHE.list;
-  // DoH 解析 + TCP 测活双重预检（10 分钟缓存）：解析不出 CF IP 或解析到非 CF 段的域名（源站已搬走）直接判死；
-  // 并发受限（≤4）：DoH fetch + TCP 探测都算出网，避免撞 6 连接上限；排队不计入超时。
-  // 只预检前 PREF_DOMAIN_DOH_LIMIT 个（子请求预算），其余原样保留
-  const head = domains.slice(0, PREF_DOMAIN_DOH_LIMIT), tail = domains.slice(PREF_DOMAIN_DOH_LIMIT);
-  const checked = await probeAll(head, async (d) => {
-    const ip = await dohFirstCF(d);
-    if (!ip || !isCloudflareIP(ip)) return { d, ok: false };
-    return { d, ok: await testProxyAlive(ip, 443) };
-  });
-  const alive = checked.map((c, i) => (c && c.ok ? head[i] : null)).filter(Boolean).concat(tail);
-  DOMAIN_ALIVE_CACHE.t = Date.now();
-  DOMAIN_ALIVE_CACHE.key = key;
-  DOMAIN_ALIVE_CACHE.list = alive.join('\n');
-  return DOMAIN_ALIVE_CACHE.list;
-}
-
-
 // 单次订阅的节点上限（按 Workers / Pages 免费额度 10ms CPU 硬限设定）：结构化格式（Clash / Sing-box 等）
 // 实测约 400 节点 ~8ms，行式格式拼接成本很低；统一取 500
 const NODE_CAP = 500;
@@ -3447,10 +3349,8 @@ async function generateSubscription(cfg, requestUrl, format, ua) {
   if (useNative && !onlyV6) rc.preferredDomains = rc.host + '#原生地址';
   // 仅勾选 IPv6 时跳过 v4 优选域名（域名节点为 IPv4 入口，混入会占满 cap 并被 filterNodes 剔除，导致数量控制下发不足）
   if (useDomain && !onlyV6) {
-    // 域名可用性预检（仅节点测活开启时）：DoH 解析 + TCP 测活，死域名不下发；
-    // 活域名仍按域名形式下发，保留客户端动态 DNS 解析拿当前最优 CF 边缘的优势
-    const aliveDomains = await filterAliveDomains(prefList);
-    if (aliveDomains) rc.preferredDomains = (rc.preferredDomains ? rc.preferredDomains + '\n' : '') + aliveDomains;
+    // 域名按原样下发（不预检）：客户端连接时自行解析到当前最优的 CF 边缘 IP；失效的域名可用「优选配置 → 优选域名 → 测试」找出
+    rc.preferredDomains = (rc.preferredDomains ? rc.preferredDomains + '\n' : '') + prefList;
   }
   // 「优选 IP」的在线来源（面板「优选配置 → 优选 IP 来源」开关控制，并行拉取，每个来源 1 个子请求、缓存 10 分钟）：
   // 自定义优选 API 1 / 2（用户自选来源排最前）→ HostMonit → uouin。HostMonit 为纯 IPv4，仅勾选 IPv6 时跳过
@@ -3488,8 +3388,7 @@ async function generateSubscription(cfg, requestUrl, format, ua) {
   ua = (ua || '').toLowerCase();
   const forced = (format || '').toLowerCase();
   const cap = NODE_CAP;
-  // 不对优选 IP 池做 TCP 测活剔除（对齐 1.0.6）：Worker 边缘连通性 ≠ 客户端连通性，且 Workers 无法连接 CF 段 IP，
-  // 测活只会误杀或拖慢订阅；全量按顺序下发由客户端自行择优（节点测活开启时仅做优选域名 DoH 预检）
+  // 不做任何测活剔除：Worker 边缘连通性 ≠ 客户端连通性，且 Workers 无法连接 CF 段 IP；全量按顺序下发由客户端自行择优
   let nodes = filterNodes(await buildNodes(rc, cap), cfg.filter);
   // 所有来源都没有产出节点时（如在线来源全部失败），用官方域名节点兜底，保证订阅不为空
   // （客户端不会收到「无效订阅」）；域名节点由客户端自行解析，IPv4 / IPv6 均可
@@ -3881,7 +3780,7 @@ pre.code{background:var(--bg2);border:1px solid var(--border);border-radius:8px;
 
     <!-- ===== 视图：节点配置（协议 / TLS / ECH / 落地出站） ===== -->
     <section class="view" data-view="nodes">
-      <div class="view-head"><h2>节点配置</h2><p>代理协议、TLS/ECH、节点测活与落地出站（保存后立即生效）</p></div>
+      <div class="view-head"><h2>节点配置</h2><p>代理协议、TLS/ECH 与落地出站（保存后立即生效）</p></div>
       <div class="grid3">
         <div class="card">
           <h3><span class="tick"></span>协议开关</h3>
@@ -3895,11 +3794,6 @@ pre.code{background:var(--bg2);border:1px solid var(--border);border-radius:8px;
           <div class="proto-row"><label class="switch"><input type="checkbox" id="tls-only"><span class="sl"></span></label><span>仅 TLS 端口（跳过 80/8080 等明文端口）</span></div>
           <div class="field" style="margin-top:12px"><label>ALPN 协商（h2 / http/1.1，逗号分隔）</label><input type="text" id="alpn" placeholder="留空自动，如 h2,http/1.1" autocomplete="off"></div>
           <p class="hint">默认开启：只下发 TLS 端口节点。关闭后，每个 443 节点另追加一个 80 明文端口节点（名称带「·80」），来源中自带的 8080 / 2052 等明文端口也原样下发。明文节点不加密 UUID 与 Host，更容易被识别封锁；自定义域名还需在 Cloudflare 关闭「始终使用 HTTPS」，否则明文节点无法连接。开启 ECH 时始终只下发 TLS 端口节点。</p>
-        </div>
-        <div class="card">
-          <h3><span class="tick"></span>节点测活</h3>
-          <div class="proto-row"><label class="switch"><input type="checkbox" id="q-probe-on"><span class="sl"></span></label><span>节点测活（TCP 探测）</span></div>
-          <p class="hint" style="margin-top:12px">关闭：不做任何 TCP 握手 / HTTP 探测与剔除，节点的下发策略、出入站方式、ProxyIP 等节点相关均按 V1.x版本处理方式处理——按数据源原始顺序全量下发，客户端自行择优。<br>开启：对候选地址做 TCP 探测并剔除判死项（含精选池 / 优选 IP / 域名预检 / ProxyIP 兜底）；Cloudflare 运行时禁止出站连接 CF IP 段，故对 CF 段 IP 跳过探测、直接视为可用（内置精选池实测 97% 可用，不会被误判清空），仅对非 CF 段（反代 / ProxyIP）真实测活剔除死节点。自定义订阅 / 随机优选模式不测活。</p>
         </div>
       </div>
       <div class="card">
@@ -3960,7 +3854,7 @@ pre.code{background:var(--bg2);border:1px solid var(--border);border-radius:8px;
         <h3><span class="tick"></span>优选域名</h3>
         <div class="field"><label>优选域名列表（每行一个纯主机名；留空 = 使用内置列表）</label>
           <textarea id="o-prefdomains" rows="6" placeholder="cf.example.com&#10;cdn.example.org" autocomplete="off" spellcheck="false"></textarea>
-          <div class="hint">填写后<b>整体替换</b>内置列表（不是追加）。用于「地址来源 → 优选域名」下发的域名节点、IPv6 解析、「追加默认优选域名」以及节点测活预检。只填主机名，不含 http://、端口、路径或通配符，最多 30 个；IP 地址请填到「优选节点」。</div>
+          <div class="hint">填写后<b>整体替换</b>内置列表（不是追加）。用于「地址来源 → 优选域名」下发的域名节点和 IPv6 解析。只填主机名，不含 http://、端口、路径或通配符，最多 30 个；IP 地址请放到「优选 IP 来源」的自定义优选 API 里。</div>
         </div>
         <div class="proto-row">
           <span class="hint" id="pd-count" style="margin:0">—</span>
@@ -3968,7 +3862,7 @@ pre.code{background:var(--bg2);border:1px solid var(--border);border-radius:8px;
           <button type="button" class="btn sm" onclick="loadBuiltinDomains()">载入内置列表</button>
           <button type="button" class="btn sm" id="ps-test-domains" onclick="testIpSource('domains')">测试</button>
         </div>
-        <p class="hint">每个域名的运营方都能通过 SNI 看到你的 Worker 主机名，只使用你信任的域名。测试会解析前 25 个域名，看它们是否落在 Cloudflare 段（占用同样数量的子请求，仅管理员手动触发）。逐个 DoH 解析的路径（IPv6、追加默认、测活预检）只处理前 25 个，其余仍作为域名节点下发。</p>
+        <p class="hint">每个域名的运营方都能通过 SNI 看到你的 Worker 主机名，只使用你信任的域名。测试会解析前 25 个域名，看它们是否落在 Cloudflare 段（占用同样数量的子请求，仅管理员手动触发）。逐个 DoH 解析的路径（IPv6 解析）只处理前 25 个，其余仍作为域名节点下发。</p>
         <div id="pd-test-out" class="ipt-out" style="display:none"></div>
       </div>
       <div class="card">
