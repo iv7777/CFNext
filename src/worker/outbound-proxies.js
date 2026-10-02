@@ -109,10 +109,10 @@ async function connectViaHttpProxy(proxy, target) {
 
 // ---------------------------------------------------------------------------
 // Shadowsocks AEAD 出站代理客户端（ss://）：aes-128-gcm / aes-256-gcm / chacha20-ietf-poly1305
-// 协议：客户端发 16B 随机 salt + AEAD 流（首个 chunk 为 length=0 空块校准 nonce）；
-//       服务端回 16B 随机 salt + 同构 AEAD 流。密钥派生：masterKey=SHA256(password)，
+// 协议：客户端发随机 salt + AEAD 流（数据流以目标地址头 ATYP+地址+端口 开头）；
+//       服务端回随机 salt + 同构 AEAD 流。密钥派生：masterKey=EVP_BytesToKey(MD5, password)，
 //       sessionKey=HKDF-SHA1(masterKey, salt, "ss-subkey")，每 chunk 两个 AEAD 块
-//       （2B 大端长度 + 负载），nonce 为 12B 大端计数器逐块 +1。
+//       （2B 大端长度 + 负载），nonce 为 12B 小端计数器逐块 +1；单块明文 ≤ 0x3FFF；salt 长度 = 密钥长度。
 // ---------------------------------------------------------------------------
 function ssCipherAlgo(method) {
   const m = String(method || '').toLowerCase().replace(/_/g, '-');
@@ -271,13 +271,18 @@ function chacha20Poly1305Open(key32, nonce12, data, aad) {
   if (diff !== 0) return null;
   return chacha20Xor(key32, nonce12, 1, ct);
 }
-async function newSsAead(algoName, keyBytes) {
+// 每个方向一个 AEAD 实例，nonce 是 12 字节小端计数器：每次 seal / open（即每个长度块、每个数据块各一次）后加 1。
+// （此前 nonce 从未真正递增，所有块都用同一个 nonce，既违反协议也无法与任何 SS 服务器互通）
+function ssNonceCounter() {
   const nonce = new Uint8Array(12);
-  const next = () => {
-    const n = nonce.slice();
-    for (let i = 11; i >= 0; i--) { n[i]++; if (n[i] !== 0) break; }
-    return n;
+  return () => {
+    const cur = nonce.slice();
+    for (let i = 0; i < 12; i++) { nonce[i]++; if (nonce[i] !== 0) break; }
+    return cur;
   };
+}
+async function newSsAead(algoName, keyBytes) {
+  const next = ssNonceCounter();
   if (algoName === 'CHACHA20-POLY1305') {
     // 纯 JS：CF Workers 的 crypto.subtle 不支持该算法
     return {
@@ -299,6 +304,31 @@ async function newSsAead(algoName, keyBytes) {
     }
   };
 }
+// 主密钥：传统 AEAD 方式用 OpenSSL EVP_BytesToKey(MD5, 无盐, 1 轮) 由密码派生，长度等于密钥长度
+// （此前误用 SHA-256(密码)，派生出的密钥与服务器不一致）
+function ssMasterKey(password, keyLen) {
+  const pw = TE.encode(password);
+  let key = new Uint8Array(0), prev = new Uint8Array(0);
+  while (key.length < keyLen) {
+    prev = md5Bytes(concatBytes(prev, pw));
+    key = concatBytes(key, prev);
+  }
+  return key.slice(0, keyLen);
+}
+// 目标地址头：ATYP(1=IPv4 / 3=域名 / 4=IPv6) + 地址 + 端口(2 字节大端)，作为客户端数据流的开头
+function ssAddressHeader(hostname, port) {
+  let head;
+  if (/^\d+\.\d+\.\d+\.\d+$/.test(hostname)) head = new Uint8Array([1, ...hostname.split('.').map(Number)]);
+  else if (hostname.indexOf(':') >= 0 && isValidIp(hostname)) head = new Uint8Array([4, ...ipv6ToBytes(hostname)]);
+  else {
+    const name = TE.encode(hostname);
+    if (name.length > 255) throw new Error('SS 目标域名过长');
+    head = new Uint8Array([3, name.length, ...name]);
+  }
+  return concatBytes(head, new Uint8Array([(port >> 8) & 255, port & 255]));
+}
+const SS_MAX_PAYLOAD = 0x3fff;   // AEAD 单块明文上限 16383 字节（长度字段高两位必须为 0）
+
 async function ssSealChunk(aead, data) {
   const len = new Uint8Array([(data.length >> 8) & 255, data.length & 255]);
   return concatBytes(await aead.seal(len), await aead.seal(data));
@@ -324,23 +354,23 @@ async function connectViaShadowsocks(proxy, target) {
     pending = pending.subarray(n);
     return out;
   };
-  const masterKey = new Uint8Array(await crypto.subtle.digest('SHA-256', TE.encode(proxy.password)));
-  // 客户端方向：随机 salt → subkey；先发 salt + 空 chunk（length=0，供服务端校准 nonce）
-  const clientSalt = crypto.getRandomValues(new Uint8Array(16));
-  const clientAead = await newSsAead(algo.name, await hkdfSha1(masterKey, clientSalt, algo.keyLen));
-  await rawWriter.write(clientSalt);
-  await rawWriter.write(await ssSealChunk(clientAead, new Uint8Array(0)));
+  const masterKey = ssMasterKey(proxy.password, algo.keyLen);
+  // 客户端方向：随机 salt（长度 = 密钥长度：AES-128 为 16，AES-256 / ChaCha20 为 32）→ 会话子密钥；
+  // 数据流以目标地址头开始（首个数据块即携带目标地址），之后才是转发的数据
+  const clientSalt = crypto.getRandomValues(new Uint8Array(algo.keyLen));
+  const clientAead = await newSsAead(algo.name, hkdfSha1(masterKey, clientSalt, algo.keyLen));
+  await rawWriter.write(concatBytes(clientSalt, await ssSealChunk(clientAead, ssAddressHeader(target.hostname, target.port))));
 
-  // 读方向：先收服务端 16B salt → 派生服务端 subkey → 逐 chunk 解密（空块跳过）
+  // 读方向：先收服务端 salt → 派生服务端子密钥 → 逐块解密（长度块 2+16 字节，数据块 len+16 字节；空块跳过）
   const readable = new ReadableStream({
     async start(controller) {
       try {
-        const serverSalt = await readN(16);
-        const serverAead = await newSsAead(algo.name, await hkdfSha1(masterKey, serverSalt, algo.keyLen));
+        const serverSalt = await readN(algo.keyLen);
+        const serverAead = await newSsAead(algo.name, hkdfSha1(masterKey, serverSalt, algo.keyLen));
         while (true) {
           const lb = await serverAead.open(await readN(18));
           const len = (lb[0] << 8) | lb[1];
-          if (len > 16384) throw new Error('SS 分片长度非法 ' + len);
+          if (len > SS_MAX_PAYLOAD) throw new Error('SS 分片长度非法 ' + len);
           const pb = await serverAead.open(await readN(len + 16));
           if (len > 0) controller.enqueue(pb);
         }
@@ -350,12 +380,12 @@ async function connectViaShadowsocks(proxy, target) {
     }
   });
 
-  // 写方向：明文按 ≤16384 分包加密写入底层
+  // 写方向：明文按 ≤ 0x3FFF 分块加密写入底层
   const writable = new WritableStream({
     async write(chunk) {
       const data = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk);
-      for (let off = 0; off < data.length; off += 16384) {
-        await rawWriter.write(await ssSealChunk(clientAead, data.subarray(off, Math.min(data.length, off + 16384))));
+      for (let off = 0; off < data.length; off += SS_MAX_PAYLOAD) {
+        await rawWriter.write(await ssSealChunk(clientAead, data.subarray(off, Math.min(data.length, off + SS_MAX_PAYLOAD))));
       }
     },
     close() { try { rawWriter.close(); } catch (e) { /* 忽略 */ } },

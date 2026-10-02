@@ -32,8 +32,8 @@ const MD5_K = [
   0x6fa87e4f, 0xfe2ce6e0, 0xa3014314, 0x4e0811a1, 0xf7537e82, 0xbd3af235, 0x2ad7d2bb, 0xeb86d391
 ];
 function rotl32(x, c) { return ((x << c) | (x >>> (32 - c))) >>> 0; }
-function md5hex(str) {
-  const bytes = TE.encode(String(str));
+// 输入字节数组，返回 16 字节摘要（Shadowsocks 的 EVP_BytesToKey 需要对字节拼接后再哈希）
+function md5Bytes(bytes) {
   const bitLen = bytes.length * 8;
   const paddedLen = (((bytes.length + 8) >> 6) + 1) << 6;
   const data = new Uint8Array(paddedLen);
@@ -59,14 +59,13 @@ function md5hex(str) {
     }
     a0 = (a0 + a) >>> 0; b0 = (b0 + b) >>> 0; c0 = (c0 + c) >>> 0; d0 = (d0 + d) >>> 0;
   }
-  let hex = '';
-  for (const v of [a0, b0, c0, d0]) {
-    hex += (v & 255).toString(16).padStart(2, '0');
-    hex += ((v >>> 8) & 255).toString(16).padStart(2, '0');
-    hex += ((v >>> 16) & 255).toString(16).padStart(2, '0');
-    hex += ((v >>> 24) & 255).toString(16).padStart(2, '0');
-  }
-  return hex;
+  const out = new Uint8Array(16);
+  const ov = new DataView(out.buffer);
+  [a0, b0, c0, d0].forEach((v, i) => ov.setUint32(i * 4, v, true));
+  return out;
+}
+function md5hex(str) {
+  return Array.from(md5Bytes(TE.encode(String(str)))).map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
 function uuidv4() {

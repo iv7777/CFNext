@@ -6,6 +6,14 @@
 
 ---
 
+# 更新日志 _V2.0.14
+
+### 🐛 BUG 处理
+
+1. 修复 `ss://` 出站代理（Shadowsocks AEAD）完全无法工作的问题：此前客户端从不发送目标地址，nonce 从不递增（所有数据块共用同一个 nonce），主密钥误用 SHA-256（应为 `EVP_BytesToKey`/MD5），AES-256-GCM / ChaCha20 的 salt 误用 16 字节（应等于密钥长度 32 字节），首个数据块是协议中不存在的空块，单块上限也超出 0x3FFF。现已按规范重写，并用 node:crypto 独立实现的参考服务端对 aes-128-gcm / aes-256-gcm / chacha20-ietf-poly1305 做互通测试（含 IPv4 / IPv6 / 域名目标和超过单块上限的数据）
+
+---
+
 # 更新日志 _V2.0.13
 
 ### 🐛 BUG 处理
@@ -301,7 +309,7 @@
 | 项 | 内容 |
 |---|---|
 | 项目名称 | **CFNext 订阅管理器** |
-| 当前版本 | v2.0.13 |
+| 当前版本 | v2.0.14 |
 | 运行环境 | Cloudflare Workers / Pages |
 | 部署形态 | 单文件 Worker/Pages（`CFNext.js`，由 `src/` 构建生成，见「九、开发与构建」） |
 | 数据存储 | Cloudflare KV（绑定变量 **K**）；未绑定时面板无法保存，仅环境变量生效 |

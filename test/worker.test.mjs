@@ -1129,7 +1129,7 @@ test('机房共享缓存：优选 API 结果写入 / 读取 Cache API；命中�
 
 // ---------------- 批次 4：纯函数已知答案 / 协议头模糊测试 / 面板注入 ----------------
 import { readFileSync } from 'node:fs';
-import { createHmac, hkdfSync, createCipheriv, randomBytes } from 'node:crypto';
+import { createHmac, hkdfSync, createCipheriv, createDecipheriv, randomBytes } from 'node:crypto';
 // 构建产物里的内部函数不对外导出：去掉 import / export default 后在函数作用域内求值，取出要测的纯函数
 const internals = (() => {
   const src = readFileSync(new URL('../CFNext.js', import.meta.url), 'utf8')
@@ -1213,4 +1213,81 @@ test('面板注入服务端的明文端口表（不再各存一份）', async ()
   const html = await (await call(env, `/${UUID}`, { cookie: await login(env) })).text();
   assert.ok(html.includes('var HTTP_PORTS = ' + JSON.stringify([...internals.HTTP_PORTS])), '注入值与服务端 HTTP_PORTS 一致');
   assert.ok(!html.includes('/*@CFNEXT_HTTP_PORTS@*/'), '占位符已替换');
+});
+
+// ---------------- Shadowsocks AEAD 出站：对照 node:crypto 实现的参考服务端 ----------------
+// 参考实现完全按 SS AEAD 规范独立编写（EVP_BytesToKey、salt=密钥长度、HKDF-SHA1 子密钥、小端 nonce 计数、≤0x3FFF 分块、
+// 数据流以目标地址头开头），用来验证 worker 的 ss:// 出站客户端能与真实服务端互通
+const ssMethods = { 'aes-128-gcm': { cipher: 'aes-128-gcm', keyLen: 16 }, 'aes-256-gcm': { cipher: 'aes-256-gcm', keyLen: 32 }, 'chacha20-ietf-poly1305': { cipher: 'chacha20-poly1305', keyLen: 32 } };
+function ssRefKey(password, keyLen) {
+  let key = Buffer.alloc(0), prev = Buffer.alloc(0);
+  while (key.length < keyLen) { prev = createHash('md5').update(Buffer.concat([prev, Buffer.from(password)])).digest(); key = Buffer.concat([key, prev]); }
+  return key.subarray(0, keyLen);
+}
+function ssRefStream(method, password, salt) {
+  const m = ssMethods[method];
+  const sub = Buffer.from(hkdfSync('sha1', ssRefKey(password, m.keyLen), salt, 'ss-subkey', m.keyLen));
+  let counter = 0n;
+  const nonce = () => { const n = Buffer.alloc(12); n.writeBigUInt64LE(counter++); return n; };   // 小端计数器
+  return {
+    seal(pt) { const c = createCipheriv(m.cipher, sub, nonce(), { authTagLength: 16 }); return Buffer.concat([c.update(pt), c.final(), c.getAuthTag()]); },
+    open(ct) { const d = createDecipheriv(m.cipher, sub, nonce(), { authTagLength: 16 }); d.setAuthTag(ct.subarray(-16)); return Buffer.concat([d.update(ct.subarray(0, -16)), d.final()]); },
+  };
+}
+// 从客户端写入的字节流解出全部明文（遇到不完整的块停止）
+function ssRefDecodeClient(method, password, bytes) {
+  const keyLen = ssMethods[method].keyLen;
+  const buf = Buffer.concat(bytes.map(b => Buffer.from(b)));
+  if (buf.length < keyLen) return { plain: Buffer.alloc(0), maxChunk: 0 };
+  const dec = ssRefStream(method, password, buf.subarray(0, keyLen));
+  let off = keyLen, maxChunk = 0; const out = [];
+  while (off + 18 <= buf.length) {
+    const len = dec.open(buf.subarray(off, off + 18)).readUInt16BE(0);
+    if (len > 0x3fff || off + 18 + len + 16 > buf.length) break;
+    out.push(dec.open(buf.subarray(off + 18, off + 18 + len + 16)));
+    off += 18 + len + 16; maxChunk = Math.max(maxChunk, len);
+  }
+  return { plain: Buffer.concat(out), maxChunk };
+}
+for (const method of Object.keys(ssMethods)) {
+  test(`Shadowsocks 出站（${method}）：与按规范实现的参考服务端互通——目标地址头、分块、小端 nonce、双向数据`, async () => {
+    const password = 'p@ss word!';
+    const targets = [
+      ['example.com', Buffer.from([3, 11, ...Buffer.from('example.com'), 1, 187])],
+    ];
+    for (const [host, expectHeader] of targets) {
+      const log = fakeNet({ '10.0.0.9': { delay: 5 } });
+      const env = baseEnv({ K: kv({ config: { outboundProxy: `ss://${method}:${encodeURIComponent(password)}@10.0.0.9:8388`, outboundMode: 'only' } }) });
+      const ws = await openWs(env);
+      const big = new Uint8Array(40000).map((_, i) => i & 255); big.set(TLS_HELLO);   // 超过单块上限：必须拆块
+      await ws.emit('message', { data: vlessReq(host, 443, [...big]).buffer });
+      await until(() => log.length && ssRefDecodeClient(method, password, log[0].written).plain.length >= expectHeader.length + big.length);
+      const { plain, maxChunk } = ssRefDecodeClient(method, password, log[0].written);
+      assert.deepEqual([...plain.subarray(0, expectHeader.length)], [...expectHeader], '数据流以目标地址头开始');
+      assert.deepEqual([...plain.subarray(expectHeader.length)], [...big], '转发的数据完整');
+      assert.ok(maxChunk <= 0x3fff, `单块 ${maxChunk} 字节不超过 0x3FFF`);
+      assert.equal(log[0].written[0].length >= ssMethods[method].keyLen, true);
+      // 服务端回包：salt + 多个块（nonce 逐块递增），客户端解密后转给 WebSocket
+      const serverSalt = randomBytes(ssMethods[method].keyLen);
+      const enc = ssRefStream(method, password, serverSalt);
+      const chunk = (pt) => Buffer.concat([enc.seal(Buffer.from([pt.length >> 8, pt.length & 255])), enc.seal(Buffer.from(pt))]);
+      log[0].push(Buffer.concat([serverSalt, chunk([9, 9, 9]), chunk([7, 7])]));
+      await until(() => ws.sent.length >= 3);
+      assert.deepEqual(ws.sent.slice(1).map(x => [...x]), [[9, 9, 9], [7, 7]]);
+    }
+  });
+}
+
+test('Shadowsocks 出站：IPv4 / IPv6 目标使用对应的地址类型；密码派生与 EVP_BytesToKey 一致', async () => {
+  const method = 'aes-256-gcm', password = 'secret';
+  const run = async (req, header) => {
+    const log = fakeNet({ '10.0.0.9': { delay: 5 } });
+    const env = baseEnv({ K: kv({ config: { outboundProxy: `ss://${method}:${password}@10.0.0.9:8388`, outboundMode: 'only' } }) });
+    const ws = await openWs(env);
+    await ws.emit('message', { data: req.buffer });
+    await until(() => log.length && ssRefDecodeClient(method, password, log[0].written).plain.length >= header.length);
+    assert.deepEqual([...ssRefDecodeClient(method, password, log[0].written).plain.subarray(0, header.length)], [...header]);
+  };
+  await run(new Uint8Array([0, ...uuidBytes, 0, 1, 1, 187, 1, 1, 2, 3, 4, ...TLS_HELLO]), [1, 1, 2, 3, 4, 1, 187]);
+  await run(vlessReqV6(443), [4, ...ipv6Bytes, 1, 187]);
 });
