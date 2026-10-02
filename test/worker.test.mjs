@@ -1445,3 +1445,30 @@ test('节点测活已移除：旧 KV 的 probeAlive 与 PROBE_ALIVE 环境变量
   await call(env, `/${UUID}/api/config`, { method: 'POST', cookie, body: { alpn: 'h2' } });
   assert.equal('probeAlive' in stored(env), false, '下次保存时从 KV 清除');
 });
+
+test('Stash 手动选择格式时输出 Clash 配置（与按 UA 识别一致），不再是明文链接', async () => {
+  const env = baseEnv({ K: kv({ config: customCfg() }) });
+  const forced = await (await subOf(env, 'stash')).text();
+  assert.match(forced, /^# CFNext 订阅\ntest-url:/);
+  assert.match(forced, /\nproxies:\n/);
+  const byUa = await (await withFetch(nodesFetch, () => call(env, `/${UUID}/sub`, { ua: 'Stash/2.7 Clash/1.9' }))).text();
+  assert.equal(forced, byUa, '手动选 Stash 与 Stash 客户端自动识别得到同一份配置');
+});
+
+test('Surge / Loon / Quantumult X 不输出 XHTTP 节点（它们没有 XHTTP 传输）；只启用 XHTTP 时明确报错', async () => {
+  const both = baseEnv({ K: kv({ config: customCfg({ enableXhttp: true }) }) });
+  for (const [fmt, nodeRe] of [['surge', /^a(\.X)? = vless,/m], ['loon', /^a(\.X)? = vless,/m], ['quanx', /tag=a(\.X)?$/m]]) {
+    const body = await (await subOf(both, fmt)).text();
+    assert.ok(!/\.X\b/.test(body), `${fmt} 不含 XHTTP 节点（.X）`);
+    assert.match(body, nodeRe, `${fmt} 仍包含 VLESS 节点`);
+  }
+  const only = baseEnv({ K: kv({ config: customCfg({ enableVless: false, enableTrojan: false, enableXhttp: true }) }) });
+  for (const [fmt, name] of [['surge', 'Surge'], ['loon', 'Loon'], ['quanx', 'Quantumult X']]) {
+    const res = await subOf(only, fmt);
+    assert.equal(res.status, 500, fmt);
+    assert.match(await res.text(), new RegExp(name + ' 不支持 XHTTP'));
+  }
+  // 链接类订阅与 Clash 仍然包含 XHTTP 节点
+  assert.match(await (await subOf(both, 'plain')).text(), /type=xhttp/);
+  assert.match(await (await subOf(both, 'clash')).text(), /network: xhttp/);
+});

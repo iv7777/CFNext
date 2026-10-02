@@ -6,6 +6,19 @@
 
 ---
 
+# 更新日志 _V2.0.21
+
+### 🐛 BUG 处理
+
+1. 修复「订阅格式」手动选 **Stash** 时输出的是明文链接、而 Stash 客户端自动识别得到 Clash 配置的不一致：现在两者都是 Clash 配置
+2. 修复 **Surge / Loon / Quantumult X** 订阅把 XHTTP 节点写成普通 WebSocket 节点（无法连接）的问题：这三种客户端没有 XHTTP 传输，现与 Sing-box、Surfboard 一致不再输出 XHTTP 节点；只启用 XHTTP 时明确报错而不是输出空配置
+
+### 🧹 其它
+
+- 「关于项目 → 特别鸣谢」移除 `zvos/CF-Workers-Monitor`（其对应的用量监控功能已在 2.0.10 移除）
+
+---
+
 # 更新日志 _V2.0.20
 
 ### 📝 说明校正
@@ -367,7 +380,7 @@
 | 项 | 内容 |
 |---|---|
 | 项目名称 | **CFNext 订阅管理器** |
-| 当前版本 | v2.0.20 |
+| 当前版本 | v2.0.21 |
 | 运行环境 | Cloudflare Workers / Pages |
 | 部署形态 | 单文件 Worker/Pages（`CFNext.js`，由 `src/` 构建生成，见「九、开发与构建」） |
 | 数据存储 | Cloudflare KV（绑定变量 **K**）；未绑定时面板无法保存，仅环境变量生效 |
@@ -396,7 +409,7 @@
 | 5 | **地区与筛选** | 地区选择（全部 / 香港 / 台湾 / 美国 / 新加坡 / 日本 / 韩国 / 德国）+ IP 版本（IPv4 / IPv6）+ 运营商（移动 / 联通 / 电信）组合筛选；地区 / 运营商只剔除名称明确标记为未选项的节点，通用节点保留；筛选后为空时按 运营商 → IP 类型 → 地区 逐级放宽 |
 | 6 | **落地与出站** | 反代 / 落地 IP（填写后作为固定出口优先使用）+ 出站代理（SOCKS5 / HTTP(S) / Shadowsocks）+ 出站模式（默认 / 直连优先 / 仅走代理）；直连与出站都不通时由地区反代兜底 |
 | 7 | **ECH 加密** | 自定义 ECH 域名 / ECH DNS（DoH），开启后自动进入仅 TLS 节点模式；链接类订阅与 Clash 订阅带 ECH 参数，Sing-box / Surge / Loon / Quantumult X 订阅不含 ECH |
-| 8 | **多客户端** | Clash / Mihomo、Sing-box、Surge、Surfboard、Loon、Quantumult X、v2rayN / Shadowrocket / Nekoray 等链接类客户端、Stash，按 UA 自动识别；订阅地址追加 `/clash`、`/singbox`、`/surge`、`/surfboard`、`/loon`、`/quanx`、`/v2ray`、`/plain` 等后缀可强制指定格式 |
+| 8 | **多客户端** | Clash / Mihomo、Sing-box、Surge、Surfboard、Loon、Quantumult X、v2rayN / Shadowrocket / Nekoray 等链接类客户端、Stash，按 UA 自动识别；订阅地址追加 `/clash`、`/stash`（同为 Clash 配置）、`/singbox`、`/surge`、`/surfboard`、`/loon`、`/quanx`、`/v2ray`、`/plain` 等后缀可强制指定格式；XHTTP 节点只出现在链接类与 Clash 订阅中，Sing-box / Surge / Surfboard / Loon / Quantumult X 没有 XHTTP 传输，一律不含 |
 | 9 | **日间 / 夜间模式** | 面板右上角一键切换，选择持久化到本地 |
 | 10 | **安全** | 管理密码（KV 中保存为加盐摘要）+ 登录限速、会话 24 小时有效且可退出、面板安全响应头 |
 | 11 | **配置 API** | `/api/config` GET/POST 读写配置，便于脚本化管理 |

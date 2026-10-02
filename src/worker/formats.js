@@ -251,8 +251,17 @@ function generateSingbox(cfg, nodes) {
   return JSON.stringify(config, null, 2);
 }
 
+// Surge / Loon / Quantumult X 没有 XHTTP 传输：XHTTP 节点若照常输出会被写成普通 WebSocket 节点而无法连接，因此一律剔除
+// （与 Sing-box、Surfboard 一致）；剔除后没有节点时明确报错，而不是输出空配置
+function dropXhttp(nodes, client) {
+  const out = nodes.filter(n => getParam(n, 'type') !== 'xhttp');
+  if (!out.length) throw new Error(client + ' 不支持 XHTTP，没有可用节点：请同时启用 VLESS 或 Trojan 协议');
+  return out;
+}
+
 // ---------- Surge ----------
 function generateSurge(cfg, nodes) {
+  nodes = dropXhttp(nodes, 'Surge');
   const host = cfg.host, path = '/' + cfg.path;
   const proxies = nodes.map((n, i) => {
     const { user, srv, prt, name, isTrojan, tls } = parseShareNode(n, i);
@@ -282,6 +291,7 @@ FINAL,🐟 漏网之鱼
 
 // ---------- Loon ----------
 function generateLoon(cfg, nodes) {
+  nodes = dropXhttp(nodes, 'Loon');
   const host = cfg.host, path = '/' + cfg.path;
   const proxies = nodes.map((n, i) => {
     const { user, srv, prt, name, isTrojan, tls } = parseShareNode(n, i);
@@ -310,6 +320,7 @@ FINAL,🐟 漏网之鱼
 
 // ---------- Quantumult X ----------
 function generateQuanX(cfg, nodes) {
+  nodes = dropXhttp(nodes, 'Quantumult X');
   const host = cfg.host, path = '/' + cfg.path;
   // QuanX 的 ip:port 格式中 IPv6 必须带方括号（裸 v6 与端口冒号歧义）
   const qxHost = (srv) => srv.indexOf(':') >= 0 ? '[' + srv + ']' : srv;
