@@ -363,6 +363,8 @@ function fillForm(){
   SCHEMA.forEach(function(d){ fillField(d, getPath(CFG, d.key)); applyEnvLock(d); });
   renderPreferred();
   onSubMode();
+  onRelayMode();
+  updatePdCount();
 }
 function collectForm(){
   if (!CFG) return null;
@@ -658,7 +660,8 @@ function previewSub(){
 }
 
 /* ===== 优选 IP 来源测试 ===== */
-var IPSRC_LABELS = { hostmonit: 'HostMonit 实时优选', uouin: 'uouin 分线路优选', api1: '自定义优选 API 1', api2: '自定义优选 API 2' };
+var IPSRC_LABELS = { hostmonit: 'HostMonit 实时优选', uouin: 'uouin 分线路优选', api1: '自定义优选 API 1', api2: '自定义优选 API 2', domains: '优选域名' };
+function testOutOf(src){ return $(src === 'domains' ? 'pd-test-out' : 'ps-test-out'); }
 // 构造元素（内容一律走 textContent：原始响应来自外部，不能当 HTML 渲染）
 function mkEl(tag, cls, text){
   var e = document.createElement(tag);
@@ -667,8 +670,9 @@ function mkEl(tag, cls, text){
   return e;
 }
 function testIpSource(src){
-  var btn = $('ps-test-' + src), out = $('ps-test-out');
+  var btn = $('ps-test-' + src), out = testOutOf(src);
   var body = { source: src };
+  if (src === 'domains') body.text = $('o-prefdomains').value;
   if (src === 'api1' || src === 'api2') {
     body.url = $('ps-' + src + '-url').value.trim();
     if (!body.url) { toast('请先填写 ' + IPSRC_LABELS[src] + ' 的地址', 'err'); $('ps-' + src + '-url').focus(); return; }
@@ -690,7 +694,7 @@ function tlsOnlyNow(){ return $('tls-only').checked || $('ech-on').checked; }
 function rerenderIpTest(){ if (LAST_IPTEST) renderIpTest(LAST_IPTEST.src, LAST_IPTEST.r); }
 function renderIpTest(src, r){
   LAST_IPTEST = { src: src, r: r };
-  var out = $('ps-test-out');
+  var out = testOutOf(src);
   out.textContent = '';
   var head = mkEl('div', 'ipt-head');
   head.appendChild(mkEl('b', '', IPSRC_LABELS[src] || src));
@@ -700,6 +704,7 @@ function renderIpTest(src, r){
     return;
   }
   var d = r.data;
+  if (src === 'domains') { renderDomainTest(out, head, d); return; }
   head.appendChild(mkEl('span', d.count ? 'ipt-ok' : 'ipt-err', d.count ? '✓ 可用 ' + d.count + ' 个 Cloudflare IP' : '✗ ' + (d.error || '没有可用 IP')));
   head.appendChild(mkEl('span', 'ipt-dim', 'HTTP ' + (d.status || '—') + ' · ' + d.ms + ' ms'));
   if (d.count && d.error) head.appendChild(mkEl('span', 'ipt-err', d.error));
@@ -728,6 +733,55 @@ function renderIpTest(src, r){
   if (!d.count) det.open = true;   // 没有可用 IP 时默认展开原始响应，便于排查
   out.appendChild(det);
 }
+
+// 优选域名测试结果：逐个域名显示解析到的 IP 以及是否在 Cloudflare 段
+function renderDomainTest(out, head, d){
+  var rows = d.domains || [], ok = rows.filter(function(x){ return x.ok; }).length;
+  head.appendChild(mkEl('span', ok ? 'ipt-ok' : 'ipt-err', ok ? '✓ ' + ok + ' / ' + rows.length + ' 个域名解析到 Cloudflare 段' : '✗ ' + (d.error || '没有可用域名')));
+  head.appendChild(mkEl('span', 'ipt-dim', d.ms + ' ms'));
+  out.appendChild(head);
+  if (rows.length) {
+    var lines = rows.map(function(x){
+      return (x.ok ? '✓ ' : '✗ ') + x.domain + '    ' + (x.failed ? '解析失败' : (x.ips.join(', ') || '无 A 记录') + (x.ok ? '' : '（不在 Cloudflare 段，不建议使用）'));
+    });
+    out.appendChild(mkEl('pre', 'code', lines.join('\n')));
+  }
+  if (d.rawLength > d.raw.length || /未测试/.test(d.raw || '')) out.appendChild(mkEl('div', 'ipt-dim', (d.raw.split('\n').pop() || '')));
+}
+
+/* ===== 优选域名 / 内置地区反代 ===== */
+var RELAY_ZH = { HK: '香港', US: '美国', SG: '新加坡', JP: '日本', KR: '韩国', DE: '德国', SE: '瑞典', NL: '荷兰', FI: '芬兰', GB: '英国' };
+// 地区下拉框的选项来自服务端字段表（与 RELAY_DOMAINS 同源）
+function populateRelaySelects(){
+  [['rl-region', 'relay.region', '自动（按 Worker 机房）'], ['rl-region2', 'relay.region2', '自动（默认的另一地区）']].forEach(function(c){
+    var el = $(c[0]), d = SCHEMA_BY_KEY[c[1]];
+    if (!el || !d) return;
+    el.innerHTML = '';
+    d.options.forEach(function(o){
+      var op = document.createElement('option');
+      op.value = o;
+      op.textContent = o === '' ? c[2] : (o === 'none' ? '不使用' : (RELAY_ZH[o] ? o + ' ' + RELAY_ZH[o] : o));
+      el.appendChild(op);
+    });
+  });
+}
+function onRelayMode(){
+  var m = $('rl-mode').value;
+  $('rl-builtin-box').style.display = (m === 'builtin') ? '' : 'none';
+  $('rl-custom-box').style.display = (m === 'custom') ? '' : 'none';
+}
+function updatePdCount(){
+  var n = $('o-prefdomains').value.split(/[\n,;\s]+/).filter(function(x){ return x; }).length;
+  var builtin = (CFG && CFG.builtinPrefDomains) ? CFG.builtinPrefDomains.length : 0;
+  $('pd-count').textContent = n ? ('当前自定义 ' + n + ' 个域名（上限 30），已替换内置列表') : ('留空：使用内置列表' + (builtin ? '（' + builtin + ' 个）' : ''));
+}
+function loadBuiltinDomains(){
+  if (!CFG || !CFG.builtinPrefDomains) return;
+  $('o-prefdomains').value = CFG.builtinPrefDomains.join('\n');
+  updatePdCount();
+  markDirty();
+}
+$('o-prefdomains').addEventListener('input', updatePdCount);
 
 /* ===== 优选配置 ===== */
 function onSubMode(){
@@ -784,6 +838,7 @@ $('tls-only').addEventListener('change', rerenderIpTest);
 $('ech-on').addEventListener('change', rerenderIpTest);
 /* ===== 启动 ===== */
 buildNav();
+populateRelaySelects();   // 先建好地区下拉选项（在 loadAll 回填表单之前）
 var initView = 'dashboard';
 try {
   var qv = new URLSearchParams(location.search).get('v');

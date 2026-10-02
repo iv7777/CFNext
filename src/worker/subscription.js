@@ -62,22 +62,26 @@ async function dohFirstCF(domain) {
     return ips.filter(isCloudflareIP)[0] || null;
   } catch (e) { return null; }
 }
-const DOMAIN_ALIVE_CACHE = { t: 0, list: null };
+const DOMAIN_ALIVE_CACHE = { t: 0, key: null, list: null };
 async function filterAliveDomains(domainText) {
-  // 测活关闭：域名预检直接跳过，返回原文（原样下发，不剔除任何域名）
-  if (!PROBE_ALIVE_ENABLED) return String(domainText || '').split(/[\n,;]+/).map(s => s.trim().replace(/^\*\./, '')).filter(Boolean).join('\n');
-  if (Date.now() - DOMAIN_ALIVE_CACHE.t < 10 * 60 * 1000 && DOMAIN_ALIVE_CACHE.list !== null) return DOMAIN_ALIVE_CACHE.list;
   const domains = String(domainText || '').split(/[\n,;]+/).map(s => s.trim().replace(/^\*\./, '')).filter(Boolean);
+  // 测活关闭：域名预检直接跳过，原样下发，不剔除任何域名
+  if (!PROBE_ALIVE_ENABLED) return domains.join('\n');
+  // 缓存按输入列表区分（面板改了优选域名后不能继续返回旧列表）
+  const key = domains.join('\n');
+  if (Date.now() - DOMAIN_ALIVE_CACHE.t < 10 * 60 * 1000 && DOMAIN_ALIVE_CACHE.key === key && DOMAIN_ALIVE_CACHE.list !== null) return DOMAIN_ALIVE_CACHE.list;
   // DoH 解析 + TCP 测活双重预检（10 分钟缓存）：解析不出 CF IP 或解析到非 CF 段的域名（源站已搬走）直接判死；
-  // 解析出 CF IP 再做 TCP 测活，连接超时的死域名剔除——客户端测速 -1 主因
-  // 并发受限（≤4）：DoH fetch + TCP 探测都算出网，避免撞 6 连接上限；排队不计入超时
-  const checked = await probeAll(domains, async (d) => {
+  // 并发受限（≤4）：DoH fetch + TCP 探测都算出网，避免撞 6 连接上限；排队不计入超时。
+  // 只预检前 PREF_DOMAIN_DOH_LIMIT 个（子请求预算），其余原样保留
+  const head = domains.slice(0, PREF_DOMAIN_DOH_LIMIT), tail = domains.slice(PREF_DOMAIN_DOH_LIMIT);
+  const checked = await probeAll(head, async (d) => {
     const ip = await dohFirstCF(d);
     if (!ip || !isCloudflareIP(ip)) return { d, ok: false };
     return { d, ok: await testProxyAlive(ip, 443) };
   });
-  const alive = checked.map((c, i) => (c && c.ok ? domains[i] : null)).filter(Boolean);
+  const alive = checked.map((c, i) => (c && c.ok ? head[i] : null)).filter(Boolean).concat(tail);
   DOMAIN_ALIVE_CACHE.t = Date.now();
+  DOMAIN_ALIVE_CACHE.key = key;
   DOMAIN_ALIVE_CACHE.list = alive.join('\n');
   return DOMAIN_ALIVE_CACHE.list;
 }
@@ -124,6 +128,7 @@ async function generateSubscription(cfg, requestUrl, format, ua) {
   // 明文端口节点只由「仅 TLS 端口」控制（默认开启）；ECH 只对 TLS 生效，开启时同样只下发 TLS 端口节点。
   // 自定义域名的明文端口需在 Cloudflare 关闭「始终使用 HTTPS」，否则被 301 重定向、WebSocket 握手失败
   const rc = Object.assign({}, cfg, { host: cfg.host || new URL(requestUrl).hostname });
+  const prefList = effectivePrefDomains(cfg);   // 面板填写的优选域名（整体替换内置列表）或内置列表
   if (rc.ech) rc.tlsOnly = true;
   const mode = (cfg.optimizer && cfg.optimizer.subMode) || '';
   // 订阅模式决定节点来源：
@@ -147,7 +152,7 @@ async function generateSubscription(cfg, requestUrl, format, ua) {
     resolved = await resolvePreferredDomains(cfg.preferredDomains || '', strictMode ? 200 : 40, strictMode ? 2000 : 300, incDefault, incDefault, wantV6);
     if (incDefault) {
       // 默认域名池优先（CNAME 域名解析出可用 CF 优选 IP，保证可达性），自定义节点追加在后并去重
-      const def = await resolvePreferredDomains(DEFAULT_PREFERRED_DOMAINS, 40, 240, false, true, wantV6);
+      const def = await resolvePreferredDomains(dohPrefDomains(prefList), 40, 240, false, true, wantV6);
       const seen = new Set(def.map(x => x.ip));
       resolved = [...def, ...resolved.filter(x => !seen.has(x.ip))];
     }
@@ -173,7 +178,7 @@ async function generateSubscription(cfg, requestUrl, format, ua) {
     if (useDomain && !onlyV6) {
       // 域名可用性预检（仅节点测活开启时）：DoH 解析 + TCP 测活，死域名不下发；
       // 活域名仍按域名形式下发，保留客户端动态 DNS 解析拿当前最优 CF 边缘的优势
-      const aliveDomains = await filterAliveDomains(DEFAULT_PREFERRED_DOMAINS);
+      const aliveDomains = await filterAliveDomains(prefList);
       if (aliveDomains) rc.preferredDomains = (rc.preferredDomains ? rc.preferredDomains + '\n' : '') + aliveDomains;
     }
     // 「优选 IP」的在线来源（面板「优选配置 → 优选 IP 来源」开关控制，并行拉取，每个来源 1 个子请求、缓存 10 分钟）：
@@ -197,8 +202,8 @@ async function generateSubscription(cfg, requestUrl, format, ua) {
     if (wantV6 && useDomain) {
       try {
         const v6src = onlyV6
-          ? DEFAULT_PREFERRED_DOMAINS + '\n' + BUILTIN_OFFICIAL_DOMAINS.join('\n')
-          : DEFAULT_PREFERRED_DOMAINS.split('\n').slice(0, V6_DOMAIN_LIMIT).join('\n');
+          ? dohPrefDomains(prefList) + '\n' + BUILTIN_OFFICIAL_DOMAINS.join('\n')
+          : prefList.split('\n').slice(0, V6_DOMAIN_LIMIT).join('\n');
         const v6dom = await resolvePreferredDomains(v6src, 40, onlyV6 ? 800 : 240, false, true, 'only');
         // 解析结果名为「域名-序号」，统一改为不带地区的通用名「优选IP-V6-NN」（地区筛选时作为通用节点保留）
         if (v6dom && v6dom.length) rc.preferredIPs.push(...v6dom.map((x, i) => Object.assign({}, x, { name: '优选IP-V6-' + String(i + 1).padStart(2, '0') })));

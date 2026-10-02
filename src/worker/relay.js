@@ -3,23 +3,7 @@
 // 出站兜底：直连与自定义反代均失败后使用，透明代理模式发送去掉 VLESS 头部的原始
 // TLS 数据，由对端按 SNI 路由到目标
 // ---------------------------------------------------------------------------
-const RELAY_DOMAINS = {
-  HK: 'proxyip.hk.cmliussss.net',
-  US: 'proxyip.us.cmliussss.net',
-  SG: 'proxyip.sg.cmliussss.net',
-  JP: 'proxyip.jp.cmliussss.net',
-  KR: 'proxyip.kr.cmliussss.net',
-  DE: 'proxyip.de.cmliussss.net',
-  SE: 'proxyip.se.cmliussss.net',
-  NL: 'proxyip.nl.cmliussss.net',
-  FI: 'proxyip.fi.cmliussss.net',
-  GB: 'proxyip.gb.cmliussss.net',
-  Oracle: 'proxyip.oracle.cmliussss.net',
-  DigitalOcean: 'proxyip.digitalocean.cmliussss.net',
-  Vultr: 'proxyip.vultr.cmliussss.net',
-  Multacom: 'proxyip.multacom.cmliussss.net'
-};
-
+// （RELAY_DOMAINS 在 constants.js 中定义：配置字段表需要引用其地区列表）
 // 根据 Worker 所在机房 colo（IATA 代码）选择最近的中继地区
 function selectRelayRegion(colo) {
   const c = (colo || '').toUpperCase();
@@ -185,9 +169,32 @@ function sniffPayloadKind(bytes) {
   return (bytes[0] === 0x16 && bytes[1] === 0x03) ? 'tls' : 'nontls';
 }
 
-// 打开到目标的出站连接（自定义反代 / 出站代理 / 直连 / 内置地区反代）
+// 按面板「内置地区反代」设置得出要竞速的反代：[{ host, port, take }]（take = 取该域名解析结果的前几个 IP）
+//   off     → 空（不使用地区反代）
+//   custom  → 自定义列表（最多 3 个，第一个取 2 个 IP，其余各 1 个）
+//   builtin → 首选地区（relay.region，留空按机房自动选）取 2 个 IP + 次选地区（relay.region2，留空取默认的另一地区，'none' 不用）取 1 个 IP
+function relayPlan(cfg, colo) {
+  const rl = cfg.relay || {};
+  const mode = rl.mode || 'builtin';
+  if (mode === 'off') return [];
+  if (mode === 'custom') {
+    return String(rl.custom || '').split('\n').map(s => s.trim()).filter(Boolean).slice(0, RELAY_CUSTOM_MAX).map((entry, i) => {
+      const { host, port } = parseHostPort(entry, 443);
+      return { host, port, take: i === 0 ? 2 : 1 };
+    });
+  }
+  const primary = RELAY_DOMAINS[rl.region] ? rl.region : selectRelayRegion(colo);
+  const plan = [{ host: RELAY_DOMAINS[primary], port: 443, take: 2 }];
+  if (rl.region2 !== 'none') {
+    const second = (RELAY_DOMAINS[rl.region2] && rl.region2 !== primary) ? rl.region2 : Object.keys(RELAY_DOMAINS).find(r => r !== primary);
+    plan.push({ host: RELAY_DOMAINS[second], port: 443, take: 1 });
+  }
+  return plan;
+}
+
+// 打开到目标的出站连接（自定义反代 / 出站代理 / 直连 / 地区反代）
 // 反代均为透明代理：发送去掉 VLESS/Trojan 头部的原始 TLS 数据，对端按 SNI 路由到目标。
-// 出站模式语义：only = 仅走出站代理（失败用内置地区反代兜底）；'' 默认 = 出站代理优先，失败后直连 ∥ 反代；
+// 出站模式语义：only = 仅走出站代理（失败用地区反代兜底，地区反代设为 off 时不兜底）；'' 默认 = 出站代理优先，失败后直连 ∥ 反代；
 // no = 直连 ∥ 反代优先，都不通时最后用出站代理
 async function openOutbound(parsed, cfg, colo, payloadKind) {
   const proxy = parseProxyAddress(cfg.outboundProxy);
@@ -214,16 +221,15 @@ async function openOutbound(parsed, cfg, colo, payloadKind) {
   }
 
   const target = { hostname: parsed.addr, port: parsed.port };
-  // 2) 内置地区反代：本地区（2 个 IP）+ 次地区（1 个 IP）并发，DoH 解析（5 分钟缓存）一并放入竞速
+  // 2) 地区反代（面板「内置地区反代」设置）：builtin = 首选地区（2 个 IP）+ 次选地区（1 个 IP）；custom = 自定义列表；
+  //    off = 不使用。各条目的 DoH 解析（5 分钟缓存）与连接并发竞速
   const relayJobs = () => {
     if (!allowSniRelay) return [];
-    const primary = selectRelayRegion(colo);
-    const regions = [primary, ...Object.keys(RELAY_DOMAINS).filter(r => r !== primary)].slice(0, 2);
-    return regions.map((region, idx) => async () => {
+    return relayPlan(cfg, colo).map((p) => async () => {
       let ts = [];
-      try { ts = await resolveProxyIPs(RELAY_DOMAINS[region], 443); } catch (e) { return null; }
+      try { ts = await resolveProxyIPs(p.host, p.port); } catch (e) { return null; }
       if (!ts.length) return null;
-      return await raceConnect(ts.slice(0, idx === 0 ? 2 : 1).map(t => () => attempt(() => connectDirect(t, RELAY_TIMEOUT))));
+      return await raceConnect(ts.slice(0, p.take).map(t => () => attempt(() => connectDirect(t, RELAY_TIMEOUT))));
     });
   };
   const directJob = () => attempt(() => connectDirect(target, DIRECT_TIMEOUT));

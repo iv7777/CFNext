@@ -7,7 +7,7 @@
 //    D / PATH     自定义面板路径（可选）
 //    ADMIN        面板管理密码（必填：未设置时面板与管理 API 一律禁用）
 //    HOST         自定义 SNI/Host（可选，默认使用 Worker 域名）
-//    PROXYIP      自定义反代/落地 IP（可选，填写后作为固定出口优先使用；留空则直连失败时由内置地区反代兜底，格式 host 或 host:port）
+//    PROXYIP      自定义反代/落地 IP（可选，填写后作为固定出口优先使用；留空则直连失败时由地区反代兜底（面板可配置），格式 host 或 host:port）
 //    S / OUTBOUND 出站代理（可选，socks5:// / http:// / ss:// 或 host:port）
 //    ECH          设为 true/1 开启 ECH 加密（可选）
 //    TROJAN       设为 true/1 开启 Trojan 协议（可选）
@@ -18,7 +18,7 @@
 // ============================================================================
 import { connect } from 'cloudflare:sockets';
 
-const VERSION = '2.0.14';
+const VERSION = '2.0.15';
 
 // 更新检测：点击版本号后拉取仓库代码比对版本号；有新版本时返回最新代码供面板复制
 // 版本基准为仓库 main 分支根目录的 CFNext.js（由 build.mjs 生成的部署文件）
@@ -474,6 +474,24 @@ const REGION_CN = {
 
 // IPv4+IPv6 混合时只对前 N 个优选域名查询 AAAA（控制子请求数，见 generateSubscription 默认模式）
 const V6_DOMAIN_LIMIT = 12;
+
+// 内置地区反代域名池：proxyip.<地区>.cmliussss.net 社区反代服务（解析为非 Cloudflare IP）
+const RELAY_DOMAINS = {
+  HK: 'proxyip.hk.cmliussss.net',
+  US: 'proxyip.us.cmliussss.net',
+  SG: 'proxyip.sg.cmliussss.net',
+  JP: 'proxyip.jp.cmliussss.net',
+  KR: 'proxyip.kr.cmliussss.net',
+  DE: 'proxyip.de.cmliussss.net',
+  SE: 'proxyip.se.cmliussss.net',
+  NL: 'proxyip.nl.cmliussss.net',
+  FI: 'proxyip.fi.cmliussss.net',
+  GB: 'proxyip.gb.cmliussss.net',
+  Oracle: 'proxyip.oracle.cmliussss.net',
+  DigitalOcean: 'proxyip.digitalocean.cmliussss.net',
+  Vultr: 'proxyip.vultr.cmliussss.net',
+  Multacom: 'proxyip.multacom.cmliussss.net'
+};
 // ---------------------------------------------------------------------------
 // 配置字段表（单一数据源）
 // ---------------------------------------------------------------------------
@@ -558,6 +576,13 @@ const CONFIG_SCHEMA = [
   { key: 'optimizer.subRandomCount', type: 'int', def: 16, el: 'o-rand', label: '随机优选数量', min: 1, max: 99 },
   // 自定义订阅模式下是否同时下发内置及默认地区节点（false 仅自定义）
   { key: 'optimizer.subIncludeDefault', type: 'bool', def: false, el: 'o-subinc', label: '追加默认节点' },
+  // ---- 优选域名：留空使用内置列表；填写后整体替换内置列表（每行一个纯主机名，最多 30 个） ----
+  { key: 'prefDomains', type: 'text', def: '', el: 'o-prefdomains', label: '优选域名', maxLen: 4096, check: 'domainList' },
+  // ---- 内置地区反代：builtin 内置（默认，按机房自动选地区）/ custom 仅用自定义反代列表 / off 不使用地区反代 ----
+  { key: 'relay.mode', type: 'enum', def: 'builtin', el: 'rl-mode', label: '地区反代模式', options: ['builtin', 'custom', 'off'] },
+  { key: 'relay.region', type: 'enum', def: '', el: 'rl-region', label: '首选反代地区', options: ['', ...Object.keys(RELAY_DOMAINS)] },
+  { key: 'relay.region2', type: 'enum', def: '', el: 'rl-region2', label: '次选反代地区', options: ['', 'none', ...Object.keys(RELAY_DOMAINS)] },
+  { key: 'relay.custom', type: 'text', def: '', el: 'rl-custom', label: '自定义反代列表', maxLen: 1024, check: 'relayList' },
   // ---- 订阅筛选（按节点名称中的地区/运营商标记 + 地址 IP 类型过滤下发） ----
   { key: 'filter.region', type: 'list', def: ['all'], label: '节点地区', options: ['all', 'HK', 'TW', 'US', 'SG', 'JP', 'KR', 'DE'],
     exclusive: 'all', emptyValue: ['all'],
@@ -638,7 +663,38 @@ function checkFieldValue(def, v) {
 
 // 仅服务端执行的附加校验：返回错误信息字符串或 { value } 规范化结果
 const SS_METHODS = ['aes-128-gcm', 'aes-256-gcm', 'chacha20-ietf-poly1305'];
+// 优选域名只接受纯主机名：至少一个点，每段 1-63 位字母数字或连字符，末段不能全为数字（排除 IP）；最多 30 个
+const PREF_DOMAIN_RE = /^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/;
+const PREF_DOMAIN_MAX = 30;
+// 经 DoH 逐个解析的上限（免费版每次请求最多 50 个子请求；与内置列表的规模一致）：超出部分仍作为域名节点下发，只是不参与解析
+const PREF_DOMAIN_DOH_LIMIT = 25;
+const RELAY_CUSTOM_MAX = 3;   // 自定义反代最多 3 个：与直连并发竞速，受 Workers 6 个同时出站连接的限制
 const SERVER_CHECKS = {
+  domainList(v) {
+    const seen = new Set(), out = [];
+    for (const raw of String(v || '').split(/[\n,;\s]+/).filter(Boolean)) {
+      const d = raw.toLowerCase();
+      if (!PREF_DOMAIN_RE.test(d) || /^[0-9]+$/.test(d.slice(d.lastIndexOf('.') + 1))) {
+        return '「' + raw.slice(0, 60) + '」不是有效的域名：只填主机名（如 cf.example.com），不含 http://、端口、路径或通配符，IP 地址请填到「优选节点」';
+      }
+      if (!seen.has(d)) { seen.add(d); out.push(d); }
+    }
+    if (out.length > PREF_DOMAIN_MAX) return '最多 ' + PREF_DOMAIN_MAX + ' 个域名（当前 ' + out.length + ' 个）';
+    return { value: out.join('\n') };
+  },
+  relayList(v) {
+    const seen = new Set(), out = [];
+    for (const raw of String(v || '').split(/[\n,;]+/).map(s => s.trim()).filter(Boolean)) {
+      const { host, port } = parseHostPort(raw, 443);
+      const h = host.toLowerCase();
+      if (!h || !(isValidIp(h) || new RegExp(HOSTNAME_PATTERN).test(h))) return '「' + raw.slice(0, 60) + '」不是有效的反代地址（格式 host 或 host:port，IPv6 需加方括号）';
+      if (!(port >= 1 && port <= 65535)) return '「' + raw.slice(0, 60) + '」的端口须为 1 - 65535';
+      const entry = (h.indexOf(':') >= 0 ? '[' + h + ']' : h) + (port === 443 ? '' : ':' + port);
+      if (!seen.has(entry)) { seen.add(entry); out.push(entry); }
+    }
+    if (out.length > RELAY_CUSTOM_MAX) return '最多 ' + RELAY_CUSTOM_MAX + ' 个自定义反代（当前 ' + out.length + ' 个）';
+    return { value: out.join('\n') };
+  },
   adminPass(v) {
     // 以摘要前缀开头的密码会被误当成已哈希的值，直接拒绝
     if (v && String(v).startsWith('cfnext-pbkdf2$')) return '密码不能以 cfnext-pbkdf2$ 开头';
@@ -760,6 +816,9 @@ function crossCheckConfig(cfg) {
   if (!cfg.enableVless && !cfg.enableTrojan && !cfg.enableXhttp) {
     errors.push({ field: 'enableVless', label: '协议开关', msg: '至少启用一种协议，否则订阅中没有任何节点' });
   }
+  if (cfg.relay && cfg.relay.mode === 'custom' && !String(cfg.relay.custom || '').trim()) {
+    errors.push({ field: 'relay.custom', label: '自定义反代列表', msg: '已选择「仅使用自定义反代」，请至少填写一个反代地址（或改回内置 / 关闭）' });
+  }
   for (const n of [1, 2]) {
     const s = cfg.ipsrc || {};
     if (s['api' + n] && !s['api' + n + 'Url']) {
@@ -788,6 +847,15 @@ const DEFAULT_PREFERRED_DOMAINS = [
   '8.889288.xyz', 'cdn.tzpro.xyz', 'cf.877771.xyz', 'xn--b6gac.eu.org',
   'bestcf.030101.xyz', 'cdns.doon.eu.org', 'fn.130519.xyz', 'saas.sin.fan'
 ].join('\n');
+// 实际生效的优选域名：面板填写了就整体替换内置列表，留空用内置列表
+function effectivePrefDomains(cfg) {
+  const own = cfg && cfg.prefDomains ? String(cfg.prefDomains).trim() : '';
+  return own || DEFAULT_PREFERRED_DOMAINS;
+}
+// 取前 PREF_DOMAIN_DOH_LIMIT 个（逐个 DoH 解析的路径使用，控制子请求数）
+function dohPrefDomains(text) {
+  return String(text).split('\n').slice(0, PREF_DOMAIN_DOH_LIMIT).join('\n');
+}
 
 
 // 明文 HTTP 端口：Cloudflare 边缘在这些端口上不支持 TLS，节点必须走明文 ws（否则握手失败连不通）
@@ -1855,23 +1923,7 @@ function findBytes(hay, needle) {
 // 出站兜底：直连与自定义反代均失败后使用，透明代理模式发送去掉 VLESS 头部的原始
 // TLS 数据，由对端按 SNI 路由到目标
 // ---------------------------------------------------------------------------
-const RELAY_DOMAINS = {
-  HK: 'proxyip.hk.cmliussss.net',
-  US: 'proxyip.us.cmliussss.net',
-  SG: 'proxyip.sg.cmliussss.net',
-  JP: 'proxyip.jp.cmliussss.net',
-  KR: 'proxyip.kr.cmliussss.net',
-  DE: 'proxyip.de.cmliussss.net',
-  SE: 'proxyip.se.cmliussss.net',
-  NL: 'proxyip.nl.cmliussss.net',
-  FI: 'proxyip.fi.cmliussss.net',
-  GB: 'proxyip.gb.cmliussss.net',
-  Oracle: 'proxyip.oracle.cmliussss.net',
-  DigitalOcean: 'proxyip.digitalocean.cmliussss.net',
-  Vultr: 'proxyip.vultr.cmliussss.net',
-  Multacom: 'proxyip.multacom.cmliussss.net'
-};
-
+// （RELAY_DOMAINS 在 constants.js 中定义：配置字段表需要引用其地区列表）
 // 根据 Worker 所在机房 colo（IATA 代码）选择最近的中继地区
 function selectRelayRegion(colo) {
   const c = (colo || '').toUpperCase();
@@ -2037,9 +2089,32 @@ function sniffPayloadKind(bytes) {
   return (bytes[0] === 0x16 && bytes[1] === 0x03) ? 'tls' : 'nontls';
 }
 
-// 打开到目标的出站连接（自定义反代 / 出站代理 / 直连 / 内置地区反代）
+// 按面板「内置地区反代」设置得出要竞速的反代：[{ host, port, take }]（take = 取该域名解析结果的前几个 IP）
+//   off     → 空（不使用地区反代）
+//   custom  → 自定义列表（最多 3 个，第一个取 2 个 IP，其余各 1 个）
+//   builtin → 首选地区（relay.region，留空按机房自动选）取 2 个 IP + 次选地区（relay.region2，留空取默认的另一地区，'none' 不用）取 1 个 IP
+function relayPlan(cfg, colo) {
+  const rl = cfg.relay || {};
+  const mode = rl.mode || 'builtin';
+  if (mode === 'off') return [];
+  if (mode === 'custom') {
+    return String(rl.custom || '').split('\n').map(s => s.trim()).filter(Boolean).slice(0, RELAY_CUSTOM_MAX).map((entry, i) => {
+      const { host, port } = parseHostPort(entry, 443);
+      return { host, port, take: i === 0 ? 2 : 1 };
+    });
+  }
+  const primary = RELAY_DOMAINS[rl.region] ? rl.region : selectRelayRegion(colo);
+  const plan = [{ host: RELAY_DOMAINS[primary], port: 443, take: 2 }];
+  if (rl.region2 !== 'none') {
+    const second = (RELAY_DOMAINS[rl.region2] && rl.region2 !== primary) ? rl.region2 : Object.keys(RELAY_DOMAINS).find(r => r !== primary);
+    plan.push({ host: RELAY_DOMAINS[second], port: 443, take: 1 });
+  }
+  return plan;
+}
+
+// 打开到目标的出站连接（自定义反代 / 出站代理 / 直连 / 地区反代）
 // 反代均为透明代理：发送去掉 VLESS/Trojan 头部的原始 TLS 数据，对端按 SNI 路由到目标。
-// 出站模式语义：only = 仅走出站代理（失败用内置地区反代兜底）；'' 默认 = 出站代理优先，失败后直连 ∥ 反代；
+// 出站模式语义：only = 仅走出站代理（失败用地区反代兜底，地区反代设为 off 时不兜底）；'' 默认 = 出站代理优先，失败后直连 ∥ 反代；
 // no = 直连 ∥ 反代优先，都不通时最后用出站代理
 async function openOutbound(parsed, cfg, colo, payloadKind) {
   const proxy = parseProxyAddress(cfg.outboundProxy);
@@ -2066,16 +2141,15 @@ async function openOutbound(parsed, cfg, colo, payloadKind) {
   }
 
   const target = { hostname: parsed.addr, port: parsed.port };
-  // 2) 内置地区反代：本地区（2 个 IP）+ 次地区（1 个 IP）并发，DoH 解析（5 分钟缓存）一并放入竞速
+  // 2) 地区反代（面板「内置地区反代」设置）：builtin = 首选地区（2 个 IP）+ 次选地区（1 个 IP）；custom = 自定义列表；
+  //    off = 不使用。各条目的 DoH 解析（5 分钟缓存）与连接并发竞速
   const relayJobs = () => {
     if (!allowSniRelay) return [];
-    const primary = selectRelayRegion(colo);
-    const regions = [primary, ...Object.keys(RELAY_DOMAINS).filter(r => r !== primary)].slice(0, 2);
-    return regions.map((region, idx) => async () => {
+    return relayPlan(cfg, colo).map((p) => async () => {
       let ts = [];
-      try { ts = await resolveProxyIPs(RELAY_DOMAINS[region], 443); } catch (e) { return null; }
+      try { ts = await resolveProxyIPs(p.host, p.port); } catch (e) { return null; }
       if (!ts.length) return null;
-      return await raceConnect(ts.slice(0, idx === 0 ? 2 : 1).map(t => () => attempt(() => connectDirect(t, RELAY_TIMEOUT))));
+      return await raceConnect(ts.slice(0, p.take).map(t => () => attempt(() => connectDirect(t, RELAY_TIMEOUT))));
     });
   };
   const directJob = () => attempt(() => connectDirect(target, DIRECT_TIMEOUT));
@@ -2472,6 +2546,27 @@ async function customApiFetch(url) {
   return r;
 }
 
+// 面板「优选域名 → 测试」：逐个解析域名的 A 记录，看是否落在 Cloudflare 段。
+// 最多测前 PREF_DOMAIN_DOH_LIMIT 个（子请求预算）；返回格式同其它来源，另带 domains 明细
+async function domainsFetch(list) {
+  const r = { status: 200, raw: '', items: [], dropped: [], error: '', domains: [] };
+  const names = list.slice(0, PREF_DOMAIN_DOH_LIMIT);
+  const rows = await Promise.all(names.map(async (domain) => {
+    const ips = await dohFirst(['https://cloudflare-dns.com/dns-query', 'https://dns.alidns.com/resolve'],
+      (ep) => ep + '?name=' + encodeURIComponent(domain) + '&type=A',
+      (j) => (!j || (j.Status !== 0 && j.Status !== 3)) ? null
+        : (j.Answer || []).filter(a => a.type === 1 && /^\d+\.\d+\.\d+\.\d+$/.test(String(a.data))).map(a => String(a.data)),
+      { timeoutMs: 4000 });
+    const cf = (ips || []).filter(isCloudflareIP);
+    return { domain, failed: ips === null, ips: (ips || []).slice(0, 4), cf: cf.length, ok: cf.length > 0 };
+  }));
+  r.domains = rows;
+  for (const row of rows) { if (row.ok) r.items.push({ ip: row.ips.find(isCloudflareIP), port: 443, name: row.domain }); else r.dropped.push(row.domain); }
+  r.raw = rows.map(x => x.domain + ' → ' + (x.failed ? '解析失败' : (x.ips.join(', ') || '无 A 记录')) + (x.ok ? '' : '（不在 Cloudflare 段）')).join('\n');
+  if (list.length > names.length) r.raw += '\n… 另有 ' + (list.length - names.length) + ' 个域名未测试（单次最多测 ' + PREF_DOMAIN_DOH_LIMIT + ' 个）';
+  if (!r.items.length) r.error = '没有域名解析到 Cloudflare 段 IP';
+  return r;
+}
 // ---------------------------------------------------------------------------
 // 订阅生成
 // ---------------------------------------------------------------------------
@@ -3459,22 +3554,26 @@ async function dohFirstCF(domain) {
     return ips.filter(isCloudflareIP)[0] || null;
   } catch (e) { return null; }
 }
-const DOMAIN_ALIVE_CACHE = { t: 0, list: null };
+const DOMAIN_ALIVE_CACHE = { t: 0, key: null, list: null };
 async function filterAliveDomains(domainText) {
-  // 测活关闭：域名预检直接跳过，返回原文（原样下发，不剔除任何域名）
-  if (!PROBE_ALIVE_ENABLED) return String(domainText || '').split(/[\n,;]+/).map(s => s.trim().replace(/^\*\./, '')).filter(Boolean).join('\n');
-  if (Date.now() - DOMAIN_ALIVE_CACHE.t < 10 * 60 * 1000 && DOMAIN_ALIVE_CACHE.list !== null) return DOMAIN_ALIVE_CACHE.list;
   const domains = String(domainText || '').split(/[\n,;]+/).map(s => s.trim().replace(/^\*\./, '')).filter(Boolean);
+  // 测活关闭：域名预检直接跳过，原样下发，不剔除任何域名
+  if (!PROBE_ALIVE_ENABLED) return domains.join('\n');
+  // 缓存按输入列表区分（面板改了优选域名后不能继续返回旧列表）
+  const key = domains.join('\n');
+  if (Date.now() - DOMAIN_ALIVE_CACHE.t < 10 * 60 * 1000 && DOMAIN_ALIVE_CACHE.key === key && DOMAIN_ALIVE_CACHE.list !== null) return DOMAIN_ALIVE_CACHE.list;
   // DoH 解析 + TCP 测活双重预检（10 分钟缓存）：解析不出 CF IP 或解析到非 CF 段的域名（源站已搬走）直接判死；
-  // 解析出 CF IP 再做 TCP 测活，连接超时的死域名剔除——客户端测速 -1 主因
-  // 并发受限（≤4）：DoH fetch + TCP 探测都算出网，避免撞 6 连接上限；排队不计入超时
-  const checked = await probeAll(domains, async (d) => {
+  // 并发受限（≤4）：DoH fetch + TCP 探测都算出网，避免撞 6 连接上限；排队不计入超时。
+  // 只预检前 PREF_DOMAIN_DOH_LIMIT 个（子请求预算），其余原样保留
+  const head = domains.slice(0, PREF_DOMAIN_DOH_LIMIT), tail = domains.slice(PREF_DOMAIN_DOH_LIMIT);
+  const checked = await probeAll(head, async (d) => {
     const ip = await dohFirstCF(d);
     if (!ip || !isCloudflareIP(ip)) return { d, ok: false };
     return { d, ok: await testProxyAlive(ip, 443) };
   });
-  const alive = checked.map((c, i) => (c && c.ok ? domains[i] : null)).filter(Boolean);
+  const alive = checked.map((c, i) => (c && c.ok ? head[i] : null)).filter(Boolean).concat(tail);
   DOMAIN_ALIVE_CACHE.t = Date.now();
+  DOMAIN_ALIVE_CACHE.key = key;
   DOMAIN_ALIVE_CACHE.list = alive.join('\n');
   return DOMAIN_ALIVE_CACHE.list;
 }
@@ -3521,6 +3620,7 @@ async function generateSubscription(cfg, requestUrl, format, ua) {
   // 明文端口节点只由「仅 TLS 端口」控制（默认开启）；ECH 只对 TLS 生效，开启时同样只下发 TLS 端口节点。
   // 自定义域名的明文端口需在 Cloudflare 关闭「始终使用 HTTPS」，否则被 301 重定向、WebSocket 握手失败
   const rc = Object.assign({}, cfg, { host: cfg.host || new URL(requestUrl).hostname });
+  const prefList = effectivePrefDomains(cfg);   // 面板填写的优选域名（整体替换内置列表）或内置列表
   if (rc.ech) rc.tlsOnly = true;
   const mode = (cfg.optimizer && cfg.optimizer.subMode) || '';
   // 订阅模式决定节点来源：
@@ -3544,7 +3644,7 @@ async function generateSubscription(cfg, requestUrl, format, ua) {
     resolved = await resolvePreferredDomains(cfg.preferredDomains || '', strictMode ? 200 : 40, strictMode ? 2000 : 300, incDefault, incDefault, wantV6);
     if (incDefault) {
       // 默认域名池优先（CNAME 域名解析出可用 CF 优选 IP，保证可达性），自定义节点追加在后并去重
-      const def = await resolvePreferredDomains(DEFAULT_PREFERRED_DOMAINS, 40, 240, false, true, wantV6);
+      const def = await resolvePreferredDomains(dohPrefDomains(prefList), 40, 240, false, true, wantV6);
       const seen = new Set(def.map(x => x.ip));
       resolved = [...def, ...resolved.filter(x => !seen.has(x.ip))];
     }
@@ -3570,7 +3670,7 @@ async function generateSubscription(cfg, requestUrl, format, ua) {
     if (useDomain && !onlyV6) {
       // 域名可用性预检（仅节点测活开启时）：DoH 解析 + TCP 测活，死域名不下发；
       // 活域名仍按域名形式下发，保留客户端动态 DNS 解析拿当前最优 CF 边缘的优势
-      const aliveDomains = await filterAliveDomains(DEFAULT_PREFERRED_DOMAINS);
+      const aliveDomains = await filterAliveDomains(prefList);
       if (aliveDomains) rc.preferredDomains = (rc.preferredDomains ? rc.preferredDomains + '\n' : '') + aliveDomains;
     }
     // 「优选 IP」的在线来源（面板「优选配置 → 优选 IP 来源」开关控制，并行拉取，每个来源 1 个子请求、缓存 10 分钟）：
@@ -3594,8 +3694,8 @@ async function generateSubscription(cfg, requestUrl, format, ua) {
     if (wantV6 && useDomain) {
       try {
         const v6src = onlyV6
-          ? DEFAULT_PREFERRED_DOMAINS + '\n' + BUILTIN_OFFICIAL_DOMAINS.join('\n')
-          : DEFAULT_PREFERRED_DOMAINS.split('\n').slice(0, V6_DOMAIN_LIMIT).join('\n');
+          ? dohPrefDomains(prefList) + '\n' + BUILTIN_OFFICIAL_DOMAINS.join('\n')
+          : prefList.split('\n').slice(0, V6_DOMAIN_LIMIT).join('\n');
         const v6dom = await resolvePreferredDomains(v6src, 40, onlyV6 ? 800 : 240, false, true, 'only');
         // 解析结果名为「域名-序号」，统一改为不带地区的通用名「优选IP-V6-NN」（地区筛选时作为通用节点保留）
         if (v6dom && v6dom.length) rc.preferredIPs.push(...v6dom.map((x, i) => Object.assign({}, x, { name: '优选IP-V6-' + String(i + 1).padStart(2, '0') })));
@@ -4052,7 +4152,7 @@ pre.code{background:var(--bg2);border:1px solid var(--border);border-radius:8px;
       </div>
       <div class="card">
         <h3><span class="tick"></span>落地与出站</h3>
-        <div class="field"><label>反代 / 落地 IP（填写后作为固定出口优先使用；留空则直连失败后由内置地区反代兜底，格式 host 或 host:port）</label><input type="text" id="s-proxyIP" placeholder="留空则直连失败后走内置地区反代" autocomplete="off"></div>
+        <div class="field"><label>反代 / 落地 IP（填写后作为固定出口优先使用；留空则直连失败后由地区反代兜底（见下方「内置地区反代」），格式 host 或 host:port）</label><input type="text" id="s-proxyIP" placeholder="留空则直连失败后走地区反代" autocomplete="off"></div>
         <div class="field"><label>出站代理（可选）</label><input type="text" id="s-outbound" placeholder="socks5://user:pass@1.2.3.4:1080 或 ss://chacha20-ietf-poly1305:密码@1.2.3.4:8388" autocomplete="off"></div>
         <p class="hint">支持 socks5://（可带 user:pass@）、http(s)://、ss:// 或 host:port（默认按 socks5，端口 1080）。SS 加密支持 aes-128-gcm / aes-256-gcm / chacha20-ietf-poly1305。</p>
         <div class="field" style="margin-bottom:0"><label>出站方式</label>
@@ -4061,6 +4161,29 @@ pre.code{background:var(--bg2);border:1px solid var(--border);border-radius:8px;
             <option value="no">直连优先（no）</option>
             <option value="only">仅走代理（only）</option>
           </select>
+        </div>
+      </div>
+      <div class="card">
+        <h3><span class="tick"></span>内置地区反代</h3>
+        <p class="hint" style="margin-top:0">直连不通（例如目标站同在 Cloudflare 上）时，Worker 会把 TLS 流量交给地区反代按 SNI 转发，并与直连并发竞速。反代是第三方服务器，能看到目标域名与连接元数据；不想经第三方时选「关闭」，或改用自己的反代。非 TLS 流量不会走地区反代。</p>
+        <div class="field"><label>地区反代模式</label>
+          <select id="rl-mode" onchange="onRelayMode()">
+            <option value="builtin">内置（proxyip.*.cmliussss.net，按 Worker 机房自动选地区）</option>
+            <option value="custom">仅使用我的反代列表</option>
+            <option value="off">关闭（只直连 / 出站代理）</option>
+          </select>
+        </div>
+        <div id="rl-builtin-box">
+          <div class="inrow">
+            <div class="field" style="flex:1;margin-bottom:0"><label>首选地区（取 2 个 IP）</label><select id="rl-region"></select></div>
+            <div class="field" style="flex:1;margin-bottom:0"><label>次选地区（取 1 个 IP）</label><select id="rl-region2"></select></div>
+          </div>
+          <div class="hint">首选留空 = 按 Worker 所在机房自动选择；次选留空 = 默认的另一地区（首选为 HK 时用 US，否则用 HK），选「不使用」则只用首选地区。</div>
+        </div>
+        <div class="field" id="rl-custom-box" style="margin-bottom:0">
+          <label>自定义反代列表（每行一个 host 或 host:port，最多 3 个，IPv6 需加方括号）</label>
+          <textarea id="rl-custom" rows="3" placeholder="proxyip.example.com&#10;203.0.113.10:443" autocomplete="off"></textarea>
+          <div class="hint">域名按 TXT / A 记录解析（与「反代 / 落地 IP」相同，缓存 5 分钟）；多个条目并发竞速。「反代 / 落地 IP」仍然优先于这里。</div>
         </div>
       </div>
       <div class="card">
@@ -4099,6 +4222,21 @@ pre.code{background:var(--bg2);border:1px solid var(--border);border-radius:8px;
           <input type="number" id="o-rand" min="1" max="99" value="16">
           <div class="hint">从 Cloudflare 地址段随机生成指定数量的优选节点直接下发，不经域名解析。单次订阅最多 99 个。</div>
         </div>
+      </div>
+      <div class="card">
+        <h3><span class="tick"></span>优选域名</h3>
+        <div class="field"><label>优选域名列表（每行一个纯主机名；留空 = 使用内置列表）</label>
+          <textarea id="o-prefdomains" rows="6" placeholder="cf.example.com&#10;cdn.example.org" autocomplete="off" spellcheck="false"></textarea>
+          <div class="hint">填写后<b>整体替换</b>内置列表（不是追加）。用于「地址来源 → 优选域名」下发的域名节点、IPv6 解析、「追加默认优选域名」以及节点测活预检。只填主机名，不含 http://、端口、路径或通配符，最多 30 个；IP 地址请填到「优选节点」。</div>
+        </div>
+        <div class="proto-row">
+          <span class="hint" id="pd-count" style="margin:0">—</span>
+          <span style="flex:1"></span>
+          <button type="button" class="btn sm" onclick="loadBuiltinDomains()">载入内置列表</button>
+          <button type="button" class="btn sm" id="ps-test-domains" onclick="testIpSource('domains')">测试</button>
+        </div>
+        <p class="hint">每个域名的运营方都能通过 SNI 看到你的 Worker 主机名，只使用你信任的域名。测试会解析前 25 个域名，看它们是否落在 Cloudflare 段（占用同样数量的子请求，仅管理员手动触发）。逐个 DoH 解析的路径（IPv6、追加默认、测活预检）只处理前 25 个，其余仍作为域名节点下发。</p>
+        <div id="pd-test-out" class="ipt-out" style="display:none"></div>
       </div>
       <div class="card">
         <h3><span class="tick"></span>优选 IP 来源（默认模式）</h3>
@@ -4581,6 +4719,8 @@ function fillForm(){
   SCHEMA.forEach(function(d){ fillField(d, getPath(CFG, d.key)); applyEnvLock(d); });
   renderPreferred();
   onSubMode();
+  onRelayMode();
+  updatePdCount();
 }
 function collectForm(){
   if (!CFG) return null;
@@ -4876,7 +5016,8 @@ function previewSub(){
 }
 
 /* ===== 优选 IP 来源测试 ===== */
-var IPSRC_LABELS = { hostmonit: 'HostMonit 实时优选', uouin: 'uouin 分线路优选', api1: '自定义优选 API 1', api2: '自定义优选 API 2' };
+var IPSRC_LABELS = { hostmonit: 'HostMonit 实时优选', uouin: 'uouin 分线路优选', api1: '自定义优选 API 1', api2: '自定义优选 API 2', domains: '优选域名' };
+function testOutOf(src){ return $(src === 'domains' ? 'pd-test-out' : 'ps-test-out'); }
 // 构造元素（内容一律走 textContent：原始响应来自外部，不能当 HTML 渲染）
 function mkEl(tag, cls, text){
   var e = document.createElement(tag);
@@ -4885,8 +5026,9 @@ function mkEl(tag, cls, text){
   return e;
 }
 function testIpSource(src){
-  var btn = $('ps-test-' + src), out = $('ps-test-out');
+  var btn = $('ps-test-' + src), out = testOutOf(src);
   var body = { source: src };
+  if (src === 'domains') body.text = $('o-prefdomains').value;
   if (src === 'api1' || src === 'api2') {
     body.url = $('ps-' + src + '-url').value.trim();
     if (!body.url) { toast('请先填写 ' + IPSRC_LABELS[src] + ' 的地址', 'err'); $('ps-' + src + '-url').focus(); return; }
@@ -4908,7 +5050,7 @@ function tlsOnlyNow(){ return $('tls-only').checked || $('ech-on').checked; }
 function rerenderIpTest(){ if (LAST_IPTEST) renderIpTest(LAST_IPTEST.src, LAST_IPTEST.r); }
 function renderIpTest(src, r){
   LAST_IPTEST = { src: src, r: r };
-  var out = $('ps-test-out');
+  var out = testOutOf(src);
   out.textContent = '';
   var head = mkEl('div', 'ipt-head');
   head.appendChild(mkEl('b', '', IPSRC_LABELS[src] || src));
@@ -4918,6 +5060,7 @@ function renderIpTest(src, r){
     return;
   }
   var d = r.data;
+  if (src === 'domains') { renderDomainTest(out, head, d); return; }
   head.appendChild(mkEl('span', d.count ? 'ipt-ok' : 'ipt-err', d.count ? '✓ 可用 ' + d.count + ' 个 Cloudflare IP' : '✗ ' + (d.error || '没有可用 IP')));
   head.appendChild(mkEl('span', 'ipt-dim', 'HTTP ' + (d.status || '—') + ' · ' + d.ms + ' ms'));
   if (d.count && d.error) head.appendChild(mkEl('span', 'ipt-err', d.error));
@@ -4946,6 +5089,55 @@ function renderIpTest(src, r){
   if (!d.count) det.open = true;   // 没有可用 IP 时默认展开原始响应，便于排查
   out.appendChild(det);
 }
+
+// 优选域名测试结果：逐个域名显示解析到的 IP 以及是否在 Cloudflare 段
+function renderDomainTest(out, head, d){
+  var rows = d.domains || [], ok = rows.filter(function(x){ return x.ok; }).length;
+  head.appendChild(mkEl('span', ok ? 'ipt-ok' : 'ipt-err', ok ? '✓ ' + ok + ' / ' + rows.length + ' 个域名解析到 Cloudflare 段' : '✗ ' + (d.error || '没有可用域名')));
+  head.appendChild(mkEl('span', 'ipt-dim', d.ms + ' ms'));
+  out.appendChild(head);
+  if (rows.length) {
+    var lines = rows.map(function(x){
+      return (x.ok ? '✓ ' : '✗ ') + x.domain + '    ' + (x.failed ? '解析失败' : (x.ips.join(', ') || '无 A 记录') + (x.ok ? '' : '（不在 Cloudflare 段，不建议使用）'));
+    });
+    out.appendChild(mkEl('pre', 'code', lines.join('\n')));
+  }
+  if (d.rawLength > d.raw.length || /未测试/.test(d.raw || '')) out.appendChild(mkEl('div', 'ipt-dim', (d.raw.split('\n').pop() || '')));
+}
+
+/* ===== 优选域名 / 内置地区反代 ===== */
+var RELAY_ZH = { HK: '香港', US: '美国', SG: '新加坡', JP: '日本', KR: '韩国', DE: '德国', SE: '瑞典', NL: '荷兰', FI: '芬兰', GB: '英国' };
+// 地区下拉框的选项来自服务端字段表（与 RELAY_DOMAINS 同源）
+function populateRelaySelects(){
+  [['rl-region', 'relay.region', '自动（按 Worker 机房）'], ['rl-region2', 'relay.region2', '自动（默认的另一地区）']].forEach(function(c){
+    var el = $(c[0]), d = SCHEMA_BY_KEY[c[1]];
+    if (!el || !d) return;
+    el.innerHTML = '';
+    d.options.forEach(function(o){
+      var op = document.createElement('option');
+      op.value = o;
+      op.textContent = o === '' ? c[2] : (o === 'none' ? '不使用' : (RELAY_ZH[o] ? o + ' ' + RELAY_ZH[o] : o));
+      el.appendChild(op);
+    });
+  });
+}
+function onRelayMode(){
+  var m = $('rl-mode').value;
+  $('rl-builtin-box').style.display = (m === 'builtin') ? '' : 'none';
+  $('rl-custom-box').style.display = (m === 'custom') ? '' : 'none';
+}
+function updatePdCount(){
+  var n = $('o-prefdomains').value.split(/[\n,;\s]+/).filter(function(x){ return x; }).length;
+  var builtin = (CFG && CFG.builtinPrefDomains) ? CFG.builtinPrefDomains.length : 0;
+  $('pd-count').textContent = n ? ('当前自定义 ' + n + ' 个域名（上限 30），已替换内置列表') : ('留空：使用内置列表' + (builtin ? '（' + builtin + ' 个）' : ''));
+}
+function loadBuiltinDomains(){
+  if (!CFG || !CFG.builtinPrefDomains) return;
+  $('o-prefdomains').value = CFG.builtinPrefDomains.join('\n');
+  updatePdCount();
+  markDirty();
+}
+$('o-prefdomains').addEventListener('input', updatePdCount);
 
 /* ===== 优选配置 ===== */
 function onSubMode(){
@@ -5002,6 +5194,7 @@ $('tls-only').addEventListener('change', rerenderIpTest);
 $('ech-on').addEventListener('change', rerenderIpTest);
 /* ===== 启动 ===== */
 buildNav();
+populateRelaySelects();   // 先建好地区下拉选项（在 loadAll 回填表单之前）
 var initView = 'dashboard';
 try {
   var qv = new URLSearchParams(location.search).get('v');
@@ -5215,6 +5408,7 @@ function publicConfig(cfg, env) {
   out.panelPath = cfg.path;                         // 当前生效的面板路径（保存后面板据此跳转）
   out.envLocked = envLockedFields(env);             // { 字段: 环境变量名 }：面板中只读
   out.kv = !!(env.K && typeof env.K.put === 'function');
+  out.builtinPrefDomains = DEFAULT_PREFERRED_DOMAINS.split('\n');   // 面板「载入内置列表」使用
   out.kvError = cfg._kvError ? kvErrorMessage(cfg._kvError) : '';   // 非空 = 配置存储异常，面板提示且保存被禁用
   return out;
 }
@@ -5430,6 +5624,12 @@ async function handleRequest(request, env) {
       let r;
       if (source === 'hostmonit') r = await hostmonitFetch(150);
       else if (source === 'uouin') r = await uouinFetch();
+      else if (source === 'domains') {
+        // 测试面板输入框里尚未保存的域名列表；留空则测试内置列表
+        const chk = SERVER_CHECKS.domainList(String((body && body.text) || ''));
+        if (typeof chk === 'string') return json({ ok: false, msg: chk }, 400);
+        r = await domainsFetch(chk.value ? chk.value.split('\n') : DEFAULT_PREFERRED_DOMAINS.split('\n'));
+      }
       else if (source === 'api1' || source === 'api2') {
         const chk = checkFieldValue(SCHEMA_BY_KEY.get('ipsrc.' + source + 'Url'), body.url);
         if (chk.error || !chk.value) return json({ ok: false, msg: chk.error || '请先填写 API 地址' }, 400);
@@ -5440,7 +5640,7 @@ async function handleRequest(request, env) {
         source, ms: Date.now() - t0, status: r.status, error: r.error || '',
         count: r.items.length, items: r.items.slice(0, 300),
         droppedCount: r.dropped.length, dropped: r.dropped.slice(0, 50),
-        raw: r.raw.slice(0, RAW_MAX), rawLength: r.raw.length,
+        raw: r.raw.slice(0, RAW_MAX), rawLength: r.raw.length, domains: r.domains,
       } });
     }
 

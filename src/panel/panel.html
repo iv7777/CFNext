@@ -169,7 +169,7 @@
       </div>
       <div class="card">
         <h3><span class="tick"></span>落地与出站</h3>
-        <div class="field"><label>反代 / 落地 IP（填写后作为固定出口优先使用；留空则直连失败后由内置地区反代兜底，格式 host 或 host:port）</label><input type="text" id="s-proxyIP" placeholder="留空则直连失败后走内置地区反代" autocomplete="off"></div>
+        <div class="field"><label>反代 / 落地 IP（填写后作为固定出口优先使用；留空则直连失败后由地区反代兜底（见下方「内置地区反代」），格式 host 或 host:port）</label><input type="text" id="s-proxyIP" placeholder="留空则直连失败后走地区反代" autocomplete="off"></div>
         <div class="field"><label>出站代理（可选）</label><input type="text" id="s-outbound" placeholder="socks5://user:pass@1.2.3.4:1080 或 ss://chacha20-ietf-poly1305:密码@1.2.3.4:8388" autocomplete="off"></div>
         <p class="hint">支持 socks5://（可带 user:pass@）、http(s)://、ss:// 或 host:port（默认按 socks5，端口 1080）。SS 加密支持 aes-128-gcm / aes-256-gcm / chacha20-ietf-poly1305。</p>
         <div class="field" style="margin-bottom:0"><label>出站方式</label>
@@ -178,6 +178,29 @@
             <option value="no">直连优先（no）</option>
             <option value="only">仅走代理（only）</option>
           </select>
+        </div>
+      </div>
+      <div class="card">
+        <h3><span class="tick"></span>内置地区反代</h3>
+        <p class="hint" style="margin-top:0">直连不通（例如目标站同在 Cloudflare 上）时，Worker 会把 TLS 流量交给地区反代按 SNI 转发，并与直连并发竞速。反代是第三方服务器，能看到目标域名与连接元数据；不想经第三方时选「关闭」，或改用自己的反代。非 TLS 流量不会走地区反代。</p>
+        <div class="field"><label>地区反代模式</label>
+          <select id="rl-mode" onchange="onRelayMode()">
+            <option value="builtin">内置（proxyip.*.cmliussss.net，按 Worker 机房自动选地区）</option>
+            <option value="custom">仅使用我的反代列表</option>
+            <option value="off">关闭（只直连 / 出站代理）</option>
+          </select>
+        </div>
+        <div id="rl-builtin-box">
+          <div class="inrow">
+            <div class="field" style="flex:1;margin-bottom:0"><label>首选地区（取 2 个 IP）</label><select id="rl-region"></select></div>
+            <div class="field" style="flex:1;margin-bottom:0"><label>次选地区（取 1 个 IP）</label><select id="rl-region2"></select></div>
+          </div>
+          <div class="hint">首选留空 = 按 Worker 所在机房自动选择；次选留空 = 默认的另一地区（首选为 HK 时用 US，否则用 HK），选「不使用」则只用首选地区。</div>
+        </div>
+        <div class="field" id="rl-custom-box" style="margin-bottom:0">
+          <label>自定义反代列表（每行一个 host 或 host:port，最多 3 个，IPv6 需加方括号）</label>
+          <textarea id="rl-custom" rows="3" placeholder="proxyip.example.com&#10;203.0.113.10:443" autocomplete="off"></textarea>
+          <div class="hint">域名按 TXT / A 记录解析（与「反代 / 落地 IP」相同，缓存 5 分钟）；多个条目并发竞速。「反代 / 落地 IP」仍然优先于这里。</div>
         </div>
       </div>
       <div class="card">
@@ -216,6 +239,21 @@
           <input type="number" id="o-rand" min="1" max="99" value="16">
           <div class="hint">从 Cloudflare 地址段随机生成指定数量的优选节点直接下发，不经域名解析。单次订阅最多 99 个。</div>
         </div>
+      </div>
+      <div class="card">
+        <h3><span class="tick"></span>优选域名</h3>
+        <div class="field"><label>优选域名列表（每行一个纯主机名；留空 = 使用内置列表）</label>
+          <textarea id="o-prefdomains" rows="6" placeholder="cf.example.com&#10;cdn.example.org" autocomplete="off" spellcheck="false"></textarea>
+          <div class="hint">填写后<b>整体替换</b>内置列表（不是追加）。用于「地址来源 → 优选域名」下发的域名节点、IPv6 解析、「追加默认优选域名」以及节点测活预检。只填主机名，不含 http://、端口、路径或通配符，最多 30 个；IP 地址请填到「优选节点」。</div>
+        </div>
+        <div class="proto-row">
+          <span class="hint" id="pd-count" style="margin:0">—</span>
+          <span style="flex:1"></span>
+          <button type="button" class="btn sm" onclick="loadBuiltinDomains()">载入内置列表</button>
+          <button type="button" class="btn sm" id="ps-test-domains" onclick="testIpSource('domains')">测试</button>
+        </div>
+        <p class="hint">每个域名的运营方都能通过 SNI 看到你的 Worker 主机名，只使用你信任的域名。测试会解析前 25 个域名，看它们是否落在 Cloudflare 段（占用同样数量的子请求，仅管理员手动触发）。逐个 DoH 解析的路径（IPv6、追加默认、测活预检）只处理前 25 个，其余仍作为域名节点下发。</p>
+        <div id="pd-test-out" class="ipt-out" style="display:none"></div>
       </div>
       <div class="card">
         <h3><span class="tick"></span>优选 IP 来源（默认模式）</h3>

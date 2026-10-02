@@ -82,3 +82,21 @@ const REGION_CN = {
 
 // IPv4+IPv6 混合时只对前 N 个优选域名查询 AAAA（控制子请求数，见 generateSubscription 默认模式）
 const V6_DOMAIN_LIMIT = 12;
+
+// 内置地区反代域名池：proxyip.<地区>.cmliussss.net 社区反代服务（解析为非 Cloudflare IP）
+const RELAY_DOMAINS = {
+  HK: 'proxyip.hk.cmliussss.net',
+  US: 'proxyip.us.cmliussss.net',
+  SG: 'proxyip.sg.cmliussss.net',
+  JP: 'proxyip.jp.cmliussss.net',
+  KR: 'proxyip.kr.cmliussss.net',
+  DE: 'proxyip.de.cmliussss.net',
+  SE: 'proxyip.se.cmliussss.net',
+  NL: 'proxyip.nl.cmliussss.net',
+  FI: 'proxyip.fi.cmliussss.net',
+  GB: 'proxyip.gb.cmliussss.net',
+  Oracle: 'proxyip.oracle.cmliussss.net',
+  DigitalOcean: 'proxyip.digitalocean.cmliussss.net',
+  Vultr: 'proxyip.vultr.cmliussss.net',
+  Multacom: 'proxyip.multacom.cmliussss.net'
+};

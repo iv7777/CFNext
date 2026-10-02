@@ -164,3 +164,24 @@ async function customApiFetch(url) {
   return r;
 }
 
+// 面板「优选域名 → 测试」：逐个解析域名的 A 记录，看是否落在 Cloudflare 段。
+// 最多测前 PREF_DOMAIN_DOH_LIMIT 个（子请求预算）；返回格式同其它来源，另带 domains 明细
+async function domainsFetch(list) {
+  const r = { status: 200, raw: '', items: [], dropped: [], error: '', domains: [] };
+  const names = list.slice(0, PREF_DOMAIN_DOH_LIMIT);
+  const rows = await Promise.all(names.map(async (domain) => {
+    const ips = await dohFirst(['https://cloudflare-dns.com/dns-query', 'https://dns.alidns.com/resolve'],
+      (ep) => ep + '?name=' + encodeURIComponent(domain) + '&type=A',
+      (j) => (!j || (j.Status !== 0 && j.Status !== 3)) ? null
+        : (j.Answer || []).filter(a => a.type === 1 && /^\d+\.\d+\.\d+\.\d+$/.test(String(a.data))).map(a => String(a.data)),
+      { timeoutMs: 4000 });
+    const cf = (ips || []).filter(isCloudflareIP);
+    return { domain, failed: ips === null, ips: (ips || []).slice(0, 4), cf: cf.length, ok: cf.length > 0 };
+  }));
+  r.domains = rows;
+  for (const row of rows) { if (row.ok) r.items.push({ ip: row.ips.find(isCloudflareIP), port: 443, name: row.domain }); else r.dropped.push(row.domain); }
+  r.raw = rows.map(x => x.domain + ' → ' + (x.failed ? '解析失败' : (x.ips.join(', ') || '无 A 记录')) + (x.ok ? '' : '（不在 Cloudflare 段）')).join('\n');
+  if (list.length > names.length) r.raw += '\n… 另有 ' + (list.length - names.length) + ' 个域名未测试（单次最多测 ' + PREF_DOMAIN_DOH_LIMIT + ' 个）';
+  if (!r.items.length) r.error = '没有域名解析到 Cloudflare 段 IP';
+  return r;
+}

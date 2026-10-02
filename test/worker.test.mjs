@@ -1134,7 +1134,7 @@ import { createHmac, hkdfSync, createCipheriv, createDecipheriv, randomBytes } f
 const internals = (() => {
   const src = readFileSync(new URL('../CFNext.js', import.meta.url), 'utf8')
     .replace(/^import .*$/m, '').replace('export default {', 'const __default = {');
-  return new Function('connect', src + '\n;return { md5hex, sha224hex, sha1Bytes, hmacSha1, hkdfSha1, poly1305, chacha20Poly1305Seal, chacha20Poly1305Open, parseVlessHeader, parseTrojanHeader, HTTP_PORTS, ipInCidrV6, isValidIp, parseProxyAddress, loginRateKey };')(() => { throw new Error('no sockets'); });
+  return new Function('connect', src + '\n;return { md5hex, sha224hex, sha1Bytes, hmacSha1, hkdfSha1, poly1305, chacha20Poly1305Seal, chacha20Poly1305Open, parseVlessHeader, parseTrojanHeader, HTTP_PORTS, ipInCidrV6, isValidIp, parseProxyAddress, loginRateKey, relayPlan, RELAY_DOMAINS, SERVER_CHECKS, effectivePrefDomains, DEFAULT_PREFERRED_DOMAINS };')(() => { throw new Error('no sockets'); });
 })();
 const hex = (u8) => Buffer.from(u8).toString('hex');
 const fromHexStr = (h) => new Uint8Array(Buffer.from(h.replace(/\s+/g, ''), 'hex'));
@@ -1290,4 +1290,156 @@ test('Shadowsocks 出站：IPv4 / IPv6 目标使用对应的地址类型；密�
   };
   await run(new Uint8Array([0, ...uuidBytes, 0, 1, 1, 187, 1, 1, 2, 3, 4, ...TLS_HELLO]), [1, 1, 2, 3, 4, 1, 187]);
   await run(vlessReqV6(443), [4, ...ipv6Bytes, 1, 187]);
+});
+
+// ---------------- 可配置：优选域名 / 内置地区反代 ----------------
+const cfDoh = (map, log = []) => async (url) => {   // 简易 DoH：map[域名] = [A 记录]，其余无记录
+  const u = new URL(url); const name = u.searchParams.get('name'), type = { 1: 'A', 28: 'AAAA' }[u.searchParams.get('type')] || u.searchParams.get('type');
+  log.push({ name, type });
+  const ips = type === 'A' ? (map[name] || []) : [];
+  return new Response(JSON.stringify({ Status: 0, Answer: ips.map(data => ({ type: 1, data })) }));
+};
+const domainsOfSub = async (config, fetchHandler = notFound) => {
+  const env = baseEnv({ K: kv({ config: { cfgRev: 2, ...config } }) });
+  const t = await withFetch(fetchHandler, async () => (await call(env, `/${UUID}/sub`, { ua: 'v2rayN/7' })).text());
+  return t.split('\n').filter(l => /^vless:\/\//.test(l)).map(l => l.match(/@([^:?]+):/)[1]);
+};
+
+test('优选域名校验：只接受纯主机名；规范化（小写、去重、多种分隔符）；上限 30 个', () => {
+  const chk = internals.SERVER_CHECKS.domainList;
+  assert.deepEqual(chk('A.Example.com, b.example.org\nA.example.com;  c.example.net'), { value: 'a.example.com\nb.example.org\nc.example.net' });
+  assert.deepEqual(chk(''), { value: '' });
+  for (const bad of ['https://a.example.com', 'a.example.com:443', 'a.example.com/path', '*.example.com', '1.2.3.4', 'localhost', '-a.example.com', 'a..example.com', 'a_b.example.com', 'exa mple.com x']) {
+    assert.equal(typeof chk(bad), 'string', `应拒绝：${bad}`);
+  }
+  const many = Array.from({ length: 31 }, (_, i) => `d${i}.example.com`).join('\n');
+  assert.match(chk(many), /最多 30 个/);
+  assert.equal(typeof chk(many.split('\n').slice(0, 30).join('\n')), 'object');
+});
+
+test('优选域名：填写后整体替换内置列表（默认模式域名节点、追加默认、IPv6 解析），留空用内置列表', async () => {
+  const base = { filter: { ipType: ['IPv4'] }, ipsrc: { hostmonit: false, uouin: false } };
+  // 默认模式：域名节点的 server 就是配置的域名
+  const own = await domainsOfSub({ ...base, prefDomains: 'one.example.com\ntwo.example.org' });
+  assert.deepEqual(own.filter(h => /example\.(com|org)$/.test(h)), ['one.example.com', 'two.example.org']);
+  assert.ok(!own.includes('cloudflare.182682.xyz') && !own.includes('bestcf.top'), '内置列表被整体替换');
+  const builtin = await domainsOfSub(base);
+  assert.deepEqual(builtin.slice(0, 3), internals.DEFAULT_PREFERRED_DOMAINS.split('\n').slice(0, 3), '留空沿用内置列表');
+  assert.equal(builtin.length, 25);
+  // 「追加默认优选域名」：只对配置的域名做 DoH 解析
+  const log = [];
+  const inc = await domainsOfSub({ ...base, optimizer: { subMode: 'custom', subIncludeDefault: true }, preferredDomains: '104.16.5.5#x', prefDomains: 'one.example.com' },
+    cfDoh({ 'one.example.com': ['104.16.9.9'] }, log));
+  assert.ok(inc.includes('104.16.9.9'));
+  assert.deepEqual([...new Set(log.filter(x => x.type === 'A').map(x => x.name))], ['one.example.com']);
+  // 仅 IPv6：只查询配置的域名（+官方域名）的 AAAA
+  const log6 = [];
+  await domainsOfSub({ ...base, filter: { ipType: ['IPv6'] }, prefDomains: 'one.example.com' }, cfDoh({}, log6));
+  const names6 = new Set(log6.filter(x => x.type === 'AAAA').map(x => x.name));
+  assert.ok(names6.has('one.example.com') && names6.has('cloudflare.com'));
+  assert.ok(![...names6].some(n => internals.DEFAULT_PREFERRED_DOMAINS.split('\n').includes(n)));
+});
+
+test('测活预检缓存按域名列表区分：面板修改优选域名后不会继续使用旧列表', async () => {
+  const doh = cfDoh({ 'a1.example.com': ['104.16.1.1'], 'b1.example.com': ['104.16.1.2'] });
+  const run = (prefDomains) => domainsOfSub({ probeAlive: true, filter: { ipType: ['IPv4'] }, ipsrc: { hostmonit: false, uouin: false }, prefDomains }, doh);
+  assert.deepEqual((await run('a1.example.com')).filter(h => h.endsWith('.example.com')), ['a1.example.com']);
+  assert.deepEqual((await run('b1.example.com')).filter(h => h.endsWith('.example.com')), ['b1.example.com']);
+});
+
+test('保存校验：非法优选域名 / 自定义反代给出字段级错误；「仅使用自定义反代」但列表为空被拒绝；配置可往返', async () => {
+  const env = baseEnv();
+  const cookie = await login(env);
+  const save = (body) => call(env, `/${UUID}/api/config`, { method: 'POST', cookie, body });
+  let r = await save({ prefDomains: 'https://bad.example.com' });
+  assert.equal(r.status, 400);
+  assert.equal((await r.json()).errors[0].field, 'prefDomains');
+  r = await save({ relay: { custom: 'a.example.com\nb.example.com\nc.example.com\nd.example.com' } });
+  assert.match((await r.json()).msg, /最多 3 个/);
+  r = await save({ relay: { custom: 'bad host' } });
+  assert.equal(r.status, 400);
+  r = await save({ relay: { mode: 'custom', custom: '' } });
+  assert.equal((await r.json()).errors[0].field, 'relay.custom');
+  r = await save({ relay: { mode: 'sideways' } });
+  assert.equal(r.status, 400);
+  r = await save({ prefDomains: 'Z.Example.com\na.example.com', relay: { mode: 'custom', custom: 'Relay.Example.com:8443, [2001:db8::1]:443', region: 'JP', region2: 'none' } });
+  assert.equal(r.status, 200);
+  const d = (await r.json()).data;
+  assert.equal(d.prefDomains, 'z.example.com\na.example.com');
+  assert.deepEqual(d.relay, { mode: 'custom', region: 'JP', region2: 'none', custom: 'relay.example.com:8443\n[2001:db8::1]' });
+  assert.equal(d.builtinPrefDomains.length, 25, '面板「载入内置列表」所需');
+  assert.equal(stored(env).relay.mode, 'custom');
+});
+
+test('地区反代计划：默认按机房自动选地区；可固定首选 / 次选；none 只用首选；custom 取前 3 个；off 为空', () => {
+  const plan = (relay, colo) => internals.relayPlan({ relay }, colo).map(p => `${p.host}:${p.port}x${p.take}`);
+  const R = internals.RELAY_DOMAINS;
+  assert.deepEqual(plan(undefined, 'NRT'), [`${R.JP}:443x2`, `${R.HK}:443x1`], '默认：机房对应地区 + 默认的另一地区');
+  assert.deepEqual(plan({ mode: 'builtin' }, 'HKG'), [`${R.HK}:443x2`, `${R.US}:443x1`], '首选为 HK 时次选用 US');
+  assert.deepEqual(plan({ mode: 'builtin', region: 'DE', region2: 'NL' }, 'NRT'), [`${R.DE}:443x2`, `${R.NL}:443x1`]);
+  assert.deepEqual(plan({ mode: 'builtin', region: 'DE', region2: 'none' }, 'NRT'), [`${R.DE}:443x2`]);
+  assert.deepEqual(plan({ mode: 'builtin', region: 'DE', region2: 'DE' }, 'NRT'), [`${R.DE}:443x2`, `${R.HK}:443x1`], '次选与首选相同：回到默认的另一地区');
+  assert.deepEqual(plan({ mode: 'builtin', region: 'bogus' }, 'NRT'), [`${R.JP}:443x2`, `${R.HK}:443x1`], '无效地区回退自动');
+  assert.deepEqual(plan({ mode: 'custom', custom: 'a.example.com\nb.example.com:8443\n203.0.113.9\nd.example.com' }, 'NRT'),
+    ['a.example.com:443x2', 'b.example.com:8443x1', '203.0.113.9:443x1']);
+  assert.deepEqual(plan({ mode: 'off' }, 'NRT'), []);
+});
+
+test('地区反代模式：off 时不解析也不连接任何地区反代；custom 只连自己的反代；固定地区只解析该地区', async () => {
+  // off：目标直连失败后不尝试任何反代，连接被关闭
+  let log = fakeNet({});
+  let dns = [];
+  let env = baseEnv({ K: kv({ config: { relay: { mode: 'off' } } }) });
+  await withFetch(cfDoh({}, dns), async () => {
+    const ws = await openWs(env);
+    await ws.emit('message', { data: vlessReq('off-test.example', 443, TLS_HELLO).buffer });
+    assert.equal(ws.closed.code, 1011);
+  });
+  assert.deepEqual(log.map(s => s.hostname), ['off-test.example'], '只尝试了直连');
+  assert.equal(dns.filter(d => d.name.startsWith('proxyip.')).length, 0, '没有解析任何内置反代域名');
+  // custom：直连挂起（目标在 Cloudflare 上）→ 自定义反代接管，内置反代不被碰
+  log = fakeNet({ 'cf-custom.example': { delay: 'hang' }, '203.0.113.31': { delay: 10 }, '203.0.113.30': { delay: 40 } });
+  dns = [];
+  env = baseEnv({ K: kv({ config: { relay: { mode: 'custom', custom: 'my-relay.example.com\n203.0.113.30:8443' } } }) });
+  await withFetch(cfDoh({ 'my-relay.example.com': ['203.0.113.31'] }, dns), async () => {
+    const ws = await openWs(env);
+    await ws.emit('message', { data: vlessReq('cf-custom.example', 443, TLS_HELLO).buffer });
+    await until(() => log.some(s => s.written.length));
+  });
+  const used = log.find(s => s.written.length);
+  assert.equal(used.hostname, '203.0.113.31');
+  assert.deepEqual([...used.written[0]], TLS_HELLO);
+  assert.equal(log.find(s => s.hostname === '203.0.113.30').port, 8443, 'IP:端口 原样连接');
+  assert.equal(dns.filter(d => d.name.startsWith('proxyip.')).length, 0, '自定义模式不解析内置反代');
+  // 固定地区：首选 SE、次选不使用 → 只解析 SE
+  log = fakeNet({ 'cf-se.example': { delay: 'hang' }, '203.0.113.50': { delay: 10 } });
+  dns = [];
+  env = baseEnv({ K: kv({ config: { relay: { mode: 'builtin', region: 'SE', region2: 'none' } } }) });
+  await withFetch(cfDoh({ 'proxyip.se.cmliussss.net': ['203.0.113.50'] }, dns), async () => {
+    const ws = await openWs(env);
+    await ws.emit('message', { data: vlessReq('cf-se.example', 443, TLS_HELLO).buffer });
+    await until(() => log.some(s => s.written.length));
+  });
+  assert.equal(log.find(s => s.written.length).hostname, '203.0.113.50');
+  assert.deepEqual([...new Set(dns.filter(d => d.name.startsWith('proxyip.')).map(d => d.name))], ['proxyip.se.cmliussss.net']);
+});
+
+test('优选域名测试接口：解析输入框中尚未保存的域名，标出是否在 Cloudflare 段；非法输入 400；需登录', async () => {
+  const env = baseEnv();
+  const cookie = await login(env);
+  const test = (body, ck = cookie) => call(env, `/${UUID}/api/ipsrc-test`, { method: 'POST', cookie: ck, body });
+  const doh = cfDoh({ 'good.example.com': ['104.16.1.1', '104.16.1.2'], 'moved.example.com': ['203.0.113.7'] });
+  await withFetch(doh, async () => {
+    const r = await (await test({ source: 'domains', text: 'good.example.com\nmoved.example.com\nnone.example.com' })).json();
+    assert.equal(r.ok, true);
+    assert.equal(r.data.count, 1);
+    const byName = Object.fromEntries(r.data.domains.map(x => [x.domain, x]));
+    assert.equal(byName['good.example.com'].ok, true);
+    assert.equal(byName['moved.example.com'].ok, false);
+    assert.deepEqual(byName['moved.example.com'].ips, ['203.0.113.7']);
+    assert.equal(byName['none.example.com'].ok, false);
+    assert.equal((await test({ source: 'domains', text: 'http://bad.example.com' })).status, 400);
+    assert.equal((await test({ source: 'domains', text: '' })).status, 200, '留空测试内置列表');
+  });
+  assert.equal((await test({ source: 'domains', text: 'good.example.com' }, '')).status, 403);
 });

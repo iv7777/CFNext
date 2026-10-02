@@ -119,6 +119,7 @@ function publicConfig(cfg, env) {
   out.panelPath = cfg.path;                         // 当前生效的面板路径（保存后面板据此跳转）
   out.envLocked = envLockedFields(env);             // { 字段: 环境变量名 }：面板中只读
   out.kv = !!(env.K && typeof env.K.put === 'function');
+  out.builtinPrefDomains = DEFAULT_PREFERRED_DOMAINS.split('\n');   // 面板「载入内置列表」使用
   out.kvError = cfg._kvError ? kvErrorMessage(cfg._kvError) : '';   // 非空 = 配置存储异常，面板提示且保存被禁用
   return out;
 }
@@ -334,6 +335,12 @@ async function handleRequest(request, env) {
       let r;
       if (source === 'hostmonit') r = await hostmonitFetch(150);
       else if (source === 'uouin') r = await uouinFetch();
+      else if (source === 'domains') {
+        // 测试面板输入框里尚未保存的域名列表；留空则测试内置列表
+        const chk = SERVER_CHECKS.domainList(String((body && body.text) || ''));
+        if (typeof chk === 'string') return json({ ok: false, msg: chk }, 400);
+        r = await domainsFetch(chk.value ? chk.value.split('\n') : DEFAULT_PREFERRED_DOMAINS.split('\n'));
+      }
       else if (source === 'api1' || source === 'api2') {
         const chk = checkFieldValue(SCHEMA_BY_KEY.get('ipsrc.' + source + 'Url'), body.url);
         if (chk.error || !chk.value) return json({ ok: false, msg: chk.error || '请先填写 API 地址' }, 400);
@@ -344,7 +351,7 @@ async function handleRequest(request, env) {
         source, ms: Date.now() - t0, status: r.status, error: r.error || '',
         count: r.items.length, items: r.items.slice(0, 300),
         droppedCount: r.dropped.length, dropped: r.dropped.slice(0, 50),
-        raw: r.raw.slice(0, RAW_MAX), rawLength: r.raw.length,
+        raw: r.raw.slice(0, RAW_MAX), rawLength: r.raw.length, domains: r.domains,
       } });
     }
 

@@ -82,6 +82,13 @@ const CONFIG_SCHEMA = [
   { key: 'optimizer.subRandomCount', type: 'int', def: 16, el: 'o-rand', label: '随机优选数量', min: 1, max: 99 },
   // 自定义订阅模式下是否同时下发内置及默认地区节点（false 仅自定义）
   { key: 'optimizer.subIncludeDefault', type: 'bool', def: false, el: 'o-subinc', label: '追加默认节点' },
+  // ---- 优选域名：留空使用内置列表；填写后整体替换内置列表（每行一个纯主机名，最多 30 个） ----
+  { key: 'prefDomains', type: 'text', def: '', el: 'o-prefdomains', label: '优选域名', maxLen: 4096, check: 'domainList' },
+  // ---- 内置地区反代：builtin 内置（默认，按机房自动选地区）/ custom 仅用自定义反代列表 / off 不使用地区反代 ----
+  { key: 'relay.mode', type: 'enum', def: 'builtin', el: 'rl-mode', label: '地区反代模式', options: ['builtin', 'custom', 'off'] },
+  { key: 'relay.region', type: 'enum', def: '', el: 'rl-region', label: '首选反代地区', options: ['', ...Object.keys(RELAY_DOMAINS)] },
+  { key: 'relay.region2', type: 'enum', def: '', el: 'rl-region2', label: '次选反代地区', options: ['', 'none', ...Object.keys(RELAY_DOMAINS)] },
+  { key: 'relay.custom', type: 'text', def: '', el: 'rl-custom', label: '自定义反代列表', maxLen: 1024, check: 'relayList' },
   // ---- 订阅筛选（按节点名称中的地区/运营商标记 + 地址 IP 类型过滤下发） ----
   { key: 'filter.region', type: 'list', def: ['all'], label: '节点地区', options: ['all', 'HK', 'TW', 'US', 'SG', 'JP', 'KR', 'DE'],
     exclusive: 'all', emptyValue: ['all'],
@@ -162,7 +169,38 @@ function checkFieldValue(def, v) {
 
 // 仅服务端执行的附加校验：返回错误信息字符串或 { value } 规范化结果
 const SS_METHODS = ['aes-128-gcm', 'aes-256-gcm', 'chacha20-ietf-poly1305'];
+// 优选域名只接受纯主机名：至少一个点，每段 1-63 位字母数字或连字符，末段不能全为数字（排除 IP）；最多 30 个
+const PREF_DOMAIN_RE = /^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/;
+const PREF_DOMAIN_MAX = 30;
+// 经 DoH 逐个解析的上限（免费版每次请求最多 50 个子请求；与内置列表的规模一致）：超出部分仍作为域名节点下发，只是不参与解析
+const PREF_DOMAIN_DOH_LIMIT = 25;
+const RELAY_CUSTOM_MAX = 3;   // 自定义反代最多 3 个：与直连并发竞速，受 Workers 6 个同时出站连接的限制
 const SERVER_CHECKS = {
+  domainList(v) {
+    const seen = new Set(), out = [];
+    for (const raw of String(v || '').split(/[\n,;\s]+/).filter(Boolean)) {
+      const d = raw.toLowerCase();
+      if (!PREF_DOMAIN_RE.test(d) || /^[0-9]+$/.test(d.slice(d.lastIndexOf('.') + 1))) {
+        return '「' + raw.slice(0, 60) + '」不是有效的域名：只填主机名（如 cf.example.com），不含 http://、端口、路径或通配符，IP 地址请填到「优选节点」';
+      }
+      if (!seen.has(d)) { seen.add(d); out.push(d); }
+    }
+    if (out.length > PREF_DOMAIN_MAX) return '最多 ' + PREF_DOMAIN_MAX + ' 个域名（当前 ' + out.length + ' 个）';
+    return { value: out.join('\n') };
+  },
+  relayList(v) {
+    const seen = new Set(), out = [];
+    for (const raw of String(v || '').split(/[\n,;]+/).map(s => s.trim()).filter(Boolean)) {
+      const { host, port } = parseHostPort(raw, 443);
+      const h = host.toLowerCase();
+      if (!h || !(isValidIp(h) || new RegExp(HOSTNAME_PATTERN).test(h))) return '「' + raw.slice(0, 60) + '」不是有效的反代地址（格式 host 或 host:port，IPv6 需加方括号）';
+      if (!(port >= 1 && port <= 65535)) return '「' + raw.slice(0, 60) + '」的端口须为 1 - 65535';
+      const entry = (h.indexOf(':') >= 0 ? '[' + h + ']' : h) + (port === 443 ? '' : ':' + port);
+      if (!seen.has(entry)) { seen.add(entry); out.push(entry); }
+    }
+    if (out.length > RELAY_CUSTOM_MAX) return '最多 ' + RELAY_CUSTOM_MAX + ' 个自定义反代（当前 ' + out.length + ' 个）';
+    return { value: out.join('\n') };
+  },
   adminPass(v) {
     // 以摘要前缀开头的密码会被误当成已哈希的值，直接拒绝
     if (v && String(v).startsWith('cfnext-pbkdf2$')) return '密码不能以 cfnext-pbkdf2$ 开头';
@@ -284,6 +322,9 @@ function crossCheckConfig(cfg) {
   if (!cfg.enableVless && !cfg.enableTrojan && !cfg.enableXhttp) {
     errors.push({ field: 'enableVless', label: '协议开关', msg: '至少启用一种协议，否则订阅中没有任何节点' });
   }
+  if (cfg.relay && cfg.relay.mode === 'custom' && !String(cfg.relay.custom || '').trim()) {
+    errors.push({ field: 'relay.custom', label: '自定义反代列表', msg: '已选择「仅使用自定义反代」，请至少填写一个反代地址（或改回内置 / 关闭）' });
+  }
   for (const n of [1, 2]) {
     const s = cfg.ipsrc || {};
     if (s['api' + n] && !s['api' + n + 'Url']) {
@@ -312,6 +353,15 @@ const DEFAULT_PREFERRED_DOMAINS = [
   '8.889288.xyz', 'cdn.tzpro.xyz', 'cf.877771.xyz', 'xn--b6gac.eu.org',
   'bestcf.030101.xyz', 'cdns.doon.eu.org', 'fn.130519.xyz', 'saas.sin.fan'
 ].join('\n');
+// 实际生效的优选域名：面板填写了就整体替换内置列表，留空用内置列表
+function effectivePrefDomains(cfg) {
+  const own = cfg && cfg.prefDomains ? String(cfg.prefDomains).trim() : '';
+  return own || DEFAULT_PREFERRED_DOMAINS;
+}
+// 取前 PREF_DOMAIN_DOH_LIMIT 个（逐个 DoH 解析的路径使用，控制子请求数）
+function dohPrefDomains(text) {
+  return String(text).split('\n').slice(0, PREF_DOMAIN_DOH_LIMIT).join('\n');
+}
 
 
 // 明文 HTTP 端口：Cloudflare 边缘在这些端口上不支持 TLS，节点必须走明文 ws（否则握手失败连不通）
