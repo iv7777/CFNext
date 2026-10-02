@@ -190,7 +190,7 @@ function generateSingbox(cfg, nodes) {
     if (isTrojan) {
       return { type: 'trojan', tag: name, server: srv, server_port: prt, password: user, tls: tlsObj, transport };
     }
-    return { type: 'vless', tag: name, server: srv, server_port: prt, uuid: user, packet_encoding: 'xudp', tls: tlsObj, transport };
+    return { type: 'vless', tag: name, server: srv, server_port: prt, uuid: user, tls: tlsObj, transport };
   });
   const tags = outbounds.map(o => o.tag);
   if (!tags.length) throw new Error('sing-box 官方内核不支持 XHTTP，没有可用节点：请同时启用 VLESS 或 Trojan 协议');

@@ -44,9 +44,12 @@ async function handleWebSocketProxy(request, cfg) {
   // 关键：必须声明二进制类型，否则 CF 将二进制帧按 UTF-8 解码成 string，VLESS/Trojan 头（含 16 字节原始 UUID）会被损坏导致隧道失败
   server.binaryType = 'arraybuffer';
   let socket = null, writer = null, headerSent = false, pending = null, protoWait = null, respSent = false;
+  let closed = false, pumped = false, wsClosed = false;   // closed：WS 已关闭（之后建好的出站连接要立即释放）；pumped：已开始把目标数据转给客户端（由它负责在结束时关闭 WS）
 
   const send = (data) => { try { server.send(data); } catch (e) { /* 忽略 */ } };
-  const fail = (err) => { try { server.close(1011, closeReason(err && err.message || err)); } catch (e) { /* 忽略 */ } };
+  // 只发一次关闭帧（重复 close 在运行时会抛异常，也会覆盖先发出的关闭码）
+  const closeWs = (code, reason) => { if (wsClosed) return; wsClosed = true; try { server.close(code, reason); } catch (e) { /* 忽略 */ } };
+  const fail = (err) => { closeWs(1011, closeReason(err && err.message || err)); cleanup(); };
 
   // 首包处理：WS 数据帧与 0-RTT 早数据共用。headerSent 在任何 await 之前置位，
   // 解析期间到达的后续帧走下方「暂存 / 直写」分支，不会重复解析
@@ -99,10 +102,12 @@ async function handleWebSocketProxy(request, cfg) {
           if (resp) send(resp);
         }
       } catch (e) { /* UDP 处理失败不响应，客户端按超时/回退处理 */ }
-      try { server.close(1000); } catch (e) { /* 忽略 */ }
+      closeWs(1000);
       return;
     }
     const conn = await openOutbound(parsed, cfg, request.cf && request.cf.colo, payloadKind);
+    // 建连期间客户端已断开：立即释放刚建好的出站连接，否则它会一直挂到目标端关闭
+    if (closed) { try { conn.close(); } catch (e) { /* 忽略 */ } return; }
     socket = conn;
     writer = conn.writable.getWriter();
     // 透明代理：去掉 VLESS/Trojan 头部，发送原始 TLS 数据，由对端按 SNI 路由
@@ -110,7 +115,8 @@ async function handleWebSocketProxy(request, cfg) {
     if (conn._preamble && conn._preamble.byteLength > 0) send(conn._preamble);
     if (pending && pending.byteLength > parsed.headerLength) await writer.write(pending.subarray(parsed.headerLength));
     pending = null;   // 出站就绪后清空缓冲，后续消息直接写出站
-    pumpToReader(conn.readable.getReader(), send, () => { try { server.close(1000); } catch (e) { /* 忽略 */ } });
+    pumped = true;
+    pumpToReader(conn.readable.getReader(), send, () => closeWs(1000));
   };
 
   // WS 0-RTT：先处理握手头中预发的首包，再处理数据帧；校验不通过时 earlyBytes 为 null，走原流程
@@ -126,10 +132,14 @@ async function handleWebSocketProxy(request, cfg) {
       else pending = pending ? concatBytes(pending, chunk) : chunk;
     } catch (err) { fail(err); }
   });
-  const cleanup = () => {
+  // accept({ allowHalfOpen: true }) 下收到客户端的关闭帧不会自动回应：这里必须自己收尾。
+  // 已有数据转发时，目标连接被关闭后由 pumpToReader 结束并关闭 WS；还没开始转发（握手 / 等首包 / 建连中）时直接关闭，避免连接悬挂
+  function cleanup() {
+    closed = true;
     if (protoWait) { clearTimeout(protoWait); protoWait = null; }
     if (socket) { try { socket.close(); } catch (e) { /* 忽略 */ } socket = null; }
-  };
+    if (!pumped) closeWs(1000);
+  }
   server.addEventListener('close', cleanup);
   server.addEventListener('error', cleanup);
   return new Response(null, { status: 101, webSocket: client });

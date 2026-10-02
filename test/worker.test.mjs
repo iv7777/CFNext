@@ -1525,3 +1525,48 @@ test('XHTTP 链接：未设置 ALPN 时显式带 alpn=h2（stream-one 依赖 HTT
   assert.match(x, /&alpn=h2,http\/1\.1(&|#)/);
   assert.match(ws, /&alpn=h2,http\/1\.1(&|#)/);
 });
+
+// ---------------- VLESS WebSocket ----------------
+test('WS：客户端在握手 / 等首包 / 建连期间断开时，服务端 WebSocket 与出站连接都被释放（allowHalfOpen 下不会自动回应关闭帧）', async () => {
+  // 1) 只发了头部、还在等首包时断开
+  let log = fakeNet({ 'half.example': { delay: 5 } });
+  let ws = await openWs(baseEnv());
+  ws.emit('message', { data: vlessReq('half.example', 443).buffer });
+  await ws.emit('close', { code: 1000 });
+  assert.ok(ws.closed, '服务端 WebSocket 已关闭，没有悬挂');
+  await new Promise(r => setTimeout(r, 120));   // 超过首包等待：不得再建立出站连接
+  assert.equal(log.length, 0);
+  // 2) 建连过程中断开：连接建好后立即释放
+  log = fakeNet({ 'slow.example': { delay: 80 } });
+  ws = await openWs(baseEnv());
+  const p = ws.emit('message', { data: vlessReq('slow.example', 443, TLS_HELLO).buffer });
+  await until(() => log.length > 0);
+  await ws.emit('close', { code: 1000 });
+  await p;
+  await until(() => log.every(s => s.closedByUs));
+  assert.ok(ws.closed);
+  // 3) 已在转发时断开：释放出站连接
+  log = fakeNet({ 'live.example': { delay: 5 } });
+  ws = await openWs(baseEnv());
+  await ws.emit('message', { data: vlessReq('live.example', 443, TLS_HELLO).buffer });
+  await ws.emit('close', { code: 1000 });
+  assert.equal(log[0].closedByUs, true);
+});
+
+test('WS：同一帧内一次性到达的大量数据帧（建连完成前）按序、完整地转发', async () => {
+  const log = fakeNet({ 'burst.example': { delay: 30 } });
+  const ws = await openWs(baseEnv());
+  const frames = Array.from({ length: 300 }, (_, i) => new Uint8Array(500).fill(i & 255));
+  ws.emit('message', { data: vlessReq('burst.example', 443).buffer });            // 先只有头部
+  for (const f of frames) ws.emit('message', { data: f.buffer.slice(0) });         // 连接建立前一口气到达
+  await until(() => log[0] && log[0].written.reduce((n, w) => n + w.length, 0) >= 300 * 500);
+  const got = Buffer.concat(log[0].written.map(w => Buffer.from(w)));
+  assert.equal(Buffer.compare(got, Buffer.concat(frames.map(f => Buffer.from(f)))), 0);
+});
+
+test('sing-box 的 VLESS 出站不再指定 packet_encoding=xudp（服务端不支持 Mux/XUDP，只支持 UDP-DNS）', async () => {
+  const env = baseEnv({ K: kv({ config: customCfg() }) });
+  const sb = JSON.parse(await (await subOf(env, 'singbox')).text());
+  const vless = sb.outbounds.filter(o => o.type === 'vless');
+  assert.ok(vless.length > 0 && vless.every(o => !('packet_encoding' in o)));
+});
