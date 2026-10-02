@@ -18,7 +18,7 @@
 // ============================================================================
 import { connect } from 'cloudflare:sockets';
 
-const VERSION = '2.0.15';
+const VERSION = '2.0.16';
 
 // 更新检测：点击版本号后拉取仓库代码比对版本号；有新版本时返回最新代码供面板复制
 // 版本基准为仓库 main 分支根目录的 CFNext.js（由 build.mjs 生成的部署文件）
@@ -666,7 +666,7 @@ const SS_METHODS = ['aes-128-gcm', 'aes-256-gcm', 'chacha20-ietf-poly1305'];
 // 优选域名只接受纯主机名：至少一个点，每段 1-63 位字母数字或连字符，末段不能全为数字（排除 IP）；最多 30 个
 const PREF_DOMAIN_RE = /^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/;
 const PREF_DOMAIN_MAX = 30;
-// 经 DoH 逐个解析的上限（免费版每次请求最多 50 个子请求；与内置列表的规模一致）：超出部分仍作为域名节点下发，只是不参与解析
+// 经 DoH 逐个解析的上限（免费版每次请求最多 50 个子请求，需给其它来源留出余量）：超出部分仍作为域名节点下发，只是不参与解析
 const PREF_DOMAIN_DOH_LIMIT = 25;
 const RELAY_CUSTOM_MAX = 3;   // 自定义反代最多 3 个：与直连并发竞速，受 Workers 6 个同时出站连接的限制
 const SERVER_CHECKS = {
@@ -835,16 +835,13 @@ function clientSchema() {
 // 内置官方直连域名：节点池为空时的最后兜底（保证订阅不为空），以及仅勾选 IPv6 时的 AAAA 来源
 const BUILTIN_OFFICIAL_DOMAINS = ['cloudflare.com', 'www.cloudflare.com', 'speed.cloudflare.com'];
 
-// 内置默认优选池：未配置任何优选时自动 DoH 解析下发真实优选节点（而非 CF 随机补足）
-// 2026-09 实测清洗：29 个候选中剔除 12 个已过期/NXDOMAIN 死链域名与 3 个非 CF 段域名（无法作入口），保留 14 个高可用活跃域名
-// 默认优选域名：第三方 CNAME 域名，解析到 Cloudflare 边缘；
-// 节点 server 直接下发域名（客户端连接时动态 DNS 解析，拿到当前最优 CF 边缘 IP，可用性远高于静态 IP 快照）
+// 内置默认优选域名：第三方 CNAME 域名，解析到 Cloudflare 边缘；节点 server 直接下发域名
+// （客户端连接时动态 DNS 解析，拿到当前最优 CF 边缘 IP，可用性远高于静态 IP 快照）。
+// 2026-10 用面板「优选域名 → 测试」实测：25 个中 11 个解析失败、无 A 记录或解析到非 Cloudflare 段（无法作入口），已剔除，保留 14 个。
+// 面板「优选域名」填写后会整体替换本列表
 const DEFAULT_PREFERRED_DOMAINS = [
-  'cloudflare.182682.xyz', 'speed.marisalnc.com', 'freeyx.cloudflare88.eu.org', 'bestcf.top',
-  'cdn.2020111.xyz', 'cfip.cfcdn.vip', 'cf.0sm.com', 'cf.090227.xyz', 'cf.zhetengsha.eu.org',
-  'cloudflare.9jy.cc', 'cf.zerone-cdn.pp.ua', 'cfip.1323123.xyz', 'cnamefuckxxs.yuchen.icu',
-  'cloudflare-ip.mofashi.ltd', '115155.xyz', 'cname.xirancdn.us', 'f3058171cad.002404.xyz',
-  '8.889288.xyz', 'cdn.tzpro.xyz', 'cf.877771.xyz', 'xn--b6gac.eu.org',
+  'cloudflare.182682.xyz', 'cdn.2020111.xyz', 'cf.0sm.com', 'cf.090227.xyz', 'cfip.1323123.xyz',
+  'cnamefuckxxs.yuchen.icu', 'cloudflare-ip.mofashi.ltd', 'cdn.tzpro.xyz', 'cf.877771.xyz', 'xn--b6gac.eu.org',
   'bestcf.030101.xyz', 'cdns.doon.eu.org', 'fn.130519.xyz', 'saas.sin.fan'
 ].join('\n');
 // 实际生效的优选域名：面板填写了就整体替换内置列表，留空用内置列表

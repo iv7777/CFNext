@@ -1325,7 +1325,10 @@ test('优选域名：填写后整体替换内置列表（默认模式域名节�
   assert.ok(!own.includes('cloudflare.182682.xyz') && !own.includes('bestcf.top'), '内置列表被整体替换');
   const builtin = await domainsOfSub(base);
   assert.deepEqual(builtin.slice(0, 3), internals.DEFAULT_PREFERRED_DOMAINS.split('\n').slice(0, 3), '留空沿用内置列表');
-  assert.equal(builtin.length, 25);
+  assert.equal(builtin.length, 14);
+  for (const dead of ['speed.marisalnc.com', 'freeyx.cloudflare88.eu.org', 'bestcf.top', 'cfip.cfcdn.vip', 'cf.zhetengsha.eu.org', 'cloudflare.9jy.cc', 'cf.zerone-cdn.pp.ua', '115155.xyz', 'cname.xirancdn.us', 'f3058171cad.002404.xyz', '8.889288.xyz']) {
+    assert.ok(!builtin.includes(dead), `${dead} 实测失效，不应在内置列表中`);
+  }
   // 「追加默认优选域名」：只对配置的域名做 DoH 解析
   const log = [];
   const inc = await domainsOfSub({ ...base, optimizer: { subMode: 'custom', subIncludeDefault: true }, preferredDomains: '104.16.5.5#x', prefDomains: 'one.example.com' },
@@ -1367,7 +1370,7 @@ test('保存校验：非法优选域名 / 自定义反代给出字段级错误�
   const d = (await r.json()).data;
   assert.equal(d.prefDomains, 'z.example.com\na.example.com');
   assert.deepEqual(d.relay, { mode: 'custom', region: 'JP', region2: 'none', custom: 'relay.example.com:8443\n[2001:db8::1]' });
-  assert.equal(d.builtinPrefDomains.length, 25, '面板「载入内置列表」所需');
+  assert.equal(d.builtinPrefDomains.length, 14, '面板「载入内置列表」所需');
   assert.equal(stored(env).relay.mode, 'custom');
 });
 
