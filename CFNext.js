@@ -17,7 +17,7 @@
 // ============================================================================
 import { connect } from 'cloudflare:sockets';
 
-const VERSION = '2.0.23';
+const VERSION = '2.0.24';
 
 // 更新检测：点击版本号后拉取仓库代码比对版本号；有新版本时返回最新代码供面板复制
 // 版本基准为仓库 main 分支根目录的 CFNext.js（由 build.mjs 生成的部署文件）
@@ -1915,13 +1915,35 @@ async function raceConnect(jobs) {
   });
 }
 
+// 目标域名是否托管在 Cloudflare（A 记录全部落在 CF 段）：这类目标直连必被回环保护拦截，应立即让反代接管，
+// 不必等直连优先窗口。结果缓存（同 PROXYIP 缓存时长）；查询失败按「否」处理（保持直连优先）
+const CFHOST_CACHE = new Map();
+async function isCfHosted(host) {
+  if (!host || isValidIp(host)) return isCloudflareIP(host);
+  const hit = CFHOST_CACHE.get(host);
+  if (hit && Date.now() - hit.t < PROXYIP_TTL) return hit.v;
+  let job = PROXYIP_INFLIGHT.get('cf:' + host);
+  if (!job) {
+    job = dohFirst(PROXYIP_DOHS, (url) => url + '?name=' + encodeURIComponent(host) + '&type=A', (j) => {
+      if (!j || (j.Status !== 0 && j.Status !== 3)) return null;
+      return (j.Answer || []).filter(a => a.type === 1).map(a => a.data);
+    }).then((ips) => {
+      const v = !!(ips && ips.length && ips.every(isCloudflareIP));
+      if (ips) { CFHOST_CACHE.set(host, { t: Date.now(), v }); capMap(CFHOST_CACHE, 500); }
+      return v;
+    }, () => false).finally(() => PROXYIP_INFLIGHT.delete('cf:' + host));
+    PROXYIP_INFLIGHT.set('cf:' + host, job);
+  }
+  return job;
+}
+
 // 直连优先竞速：直连与反代并发发起，但优先采用直连——
 //   · 直连在 graceMs 内成功 → 用直连（反代是第三方 SNI 中转，多一跳且可能误路由）
-//   · 直连失败 / 窗口到期   → 用已就绪的反代（反代并发建立，不额外等待）
+//   · 直连失败（立即）/ 窗口到期 → 用已就绪的反代（反代并发建立，不额外等待）
 //   · 反代也不可用          → 继续等直连
 // 若不设窗口，就近反代的握手普遍比跨境直连快，几乎所有 TLS 流量都会被反代抢走。
-// graceMs = 0：不等直连（目标确定在 CF 段，直连必被回环保护拦截）
-async function racePreferDirect(directJob, relayJobs, graceMs) {
+// graceMs = 0：不等直连（目标确定在 CF 段，直连必被回环保护拦截）；cfHint：解析出目标托管在 CF 时提前结束窗口
+async function racePreferDirect(directJob, relayJobs, graceMs, cfHint) {
   let used = null;
   const recycle = (s) => { if (s && s !== used) { try { s.close(); } catch (e) { /* 忽略 */ } } };
   const directP = directJob
@@ -1934,6 +1956,7 @@ async function racePreferDirect(directJob, relayJobs, graceMs) {
   const first = await Promise.race([
     directP,
     new Promise((r) => { graceTimer = setTimeout(() => r(GRACE_EXPIRED), graceMs); }),
+    cfHint ? cfHint.then((cf) => (cf ? GRACE_EXPIRED : new Promise(() => {})), () => new Promise(() => {})) : new Promise(() => {}),
   ]);
   clearTimeout(graceTimer);
   if (first && first !== GRACE_EXPIRED) { used = first; relayP.then(recycle); return used; }   // 直连胜出
@@ -1948,7 +1971,7 @@ const DIRECT_TIMEOUT = 4000;   // 直连超时（反代并发进行，无需久�
 const RELAY_TIMEOUT = 4000;    // 单个反代 IP 连接超时
 const MAX_RACERS = 4;          // 单次竞速最多并发路数（CF 单请求同时出站连接上限 6，留余量给 DoH 等）
 const SNIFF_WAIT_MS = 80;      // 头部已完整但尚无数据时，等首包判定协议的上限（不能拖慢建连）
-const DIRECT_GRACE_MS = 300;   // 直连优先窗口
+const DIRECT_GRACE_MS = 1500;  // 直连优先窗口（直连失败会立即换反代，窗口只管「慢但能通」的直连；过短会让反代抢走正常站点的流量，如 YouTube 视频）
 
 // 首包协议判定：自定义反代与内置地区反代都是 SNI 型透明代理，只能搬运 TLS 流量（按 ClientHello 的 SNI 路由）。
 // 非 TLS 流量（Telegram MTProto / 明文 HTTP / 裸 TCP）经反代能握手但转发不出任何数据 → 客户端无限重连，
@@ -2026,7 +2049,9 @@ async function openOutbound(parsed, cfg, colo, payloadKind) {
   const proxyJob = viaProxy ? () => attempt(() => viaProxy(target)) : null;
   // 目标为 CF 段 IP → 直连必被回环保护拦截，不设直连窗口
   const grace = isCloudflareIP(parsed.addr) ? 0 : DIRECT_GRACE_MS;
-  const pickBest = () => racePreferDirect(directJob, relayJobs().slice(0, MAX_RACERS - 1), grace);
+  // 域名目标并发查 A 记录：托管在 CF 则立即让反代接管（见 isCfHosted）
+  const cfHint = grace > 0 && allowSniRelay && relayPlan(cfg, colo).length ? isCfHosted(parsed.addr) : null;
+  const pickBest = () => racePreferDirect(directJob, relayJobs().slice(0, MAX_RACERS - 1), grace, cfHint);
 
   if (mode === 'only') {
     if (proxyJob) {

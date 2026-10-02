@@ -571,7 +571,7 @@ const TLS_HELLO = [0x16, 0x03, 0x01, 0x00, 0x05, 1, 2, 3, 4, 5];
 const relayDoh = (url) => {
   const name = new URL(url).searchParams.get('name') || '';
   const type = new URL(url).searchParams.get('type');
-  const ip = name.includes('.us.') ? '203.0.113.10' : name.includes('.hk.') ? '203.0.113.20' : null;
+  const ip = name.includes('.us.') ? '203.0.113.10' : name.includes('.hk.') ? '203.0.113.20' : name === 'cf-site.example' ? '104.16.0.1' : null;
   return new Response(JSON.stringify({ Status: 0, Answer: type === 'A' && ip ? [{ type: 1, data: ip }] : [] }));
 };
 async function openWs(env, headers = {}) {
@@ -580,7 +580,7 @@ async function openWs(env, headers = {}) {
   return lastServer;
 }
 
-test('出站竞速：目标走 Cloudflare（直连挂起）时内置反代并发接管，约 0.3s 可用，不再白等 6s', async () => {
+test('出站竞速：目标走 Cloudflare（直连挂起）时内置反代并发接管，立即可用，不再白等 6s', async () => {
   const log = fakeNet({ 'cf-site.example': { delay: 'hang' }, '203.0.113.10': { delay: 20 }, '203.0.113.20': { delay: 40 } });
   await withFetch(relayDoh, async () => {
     const ws = await openWs(baseEnv());
@@ -592,7 +592,7 @@ test('出站竞速：目标走 Cloudflare（直连挂起）时内置反代并发
     assert.equal(used.hostname, '203.0.113.10', '本地区反代胜出');
     assert.deepEqual([...used.written[0]], TLS_HELLO, '反代收到去掉 VLESS 头的原始 TLS 数据');
     assert.ok(ms < 1500, `建连耗时 ${ms}ms`);
-    assert.ok(log.find(s => s.hostname === '203.0.113.20').closedByUs, '败者连接被释放');
+    await until(() => log.find(s => s.hostname === '203.0.113.20').closedByUs);   // 败者连接被释放
   });
 });
 
@@ -604,6 +604,16 @@ test('出站竞速：直连在优先窗口内成功时使用直连，已建立�
     await until(() => log.some(s => s.written.length));
     assert.equal(log.find(s => s.written.length).hostname, 'direct.example');
     await until(() => log.filter(s => s.hostname.startsWith('203.')).every(s => s.closedByUs));
+  });
+});
+
+test('出站竞速：直连较慢（600ms）但能通时仍用直连，不被反代抢走；直连失败则立即换反代', async () => {
+  const log = fakeNet({ 'slow.example': { delay: 600 }, '203.0.113.10': { delay: 10 }, '203.0.113.20': { delay: 10 } });
+  await withFetch(relayDoh, async () => {
+    const ws = await openWs(baseEnv());
+    await ws.emit('message', { data: vlessReq('slow.example', 443, TLS_HELLO).buffer });
+    await until(() => log.some(s => s.written.length));
+    assert.equal(log.find(s => s.written.length).hostname, 'slow.example', '慢直连不应被反代取代');
   });
 });
 
