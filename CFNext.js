@@ -2249,46 +2249,31 @@ async function handleXhttpProxy(request, cfg) {
   if (parsed.command !== 1) throw new Error('XHTTP 仅支持 TCP 命令');
   const firstPayload = buf.subarray(parsed.headerLength);
   const conn = await openOutbound(parsed, cfg, request.cf && request.cf.colo, sniffPayloadKind(firstPayload));
+  // 数据面全部交给运行时原生管道（pipeTo），不经过 JS 逐块搬运：
+  // 免费版每个请求只有 10ms CPU，XHTTP 每条代理连接就是一个长请求，此前每个数据块都要 read → enqueue / write，
+  // 看视频时几 MB 数据就超出 CPU 上限（日志 Worker exceeded CPU time limit），连接被限流变得极慢。
+  // 原生流之间的 pipeTo 由运行时内部完成，几乎不计 JS CPU；背压与断开传播也由管道自动处理
   const writer = conn.writable.getWriter();
   if (firstPayload.byteLength) await writer.write(firstPayload);
+  writer.releaseLock();
+  bodyReader.releaseLock();
+  // 上行：请求体 → 目标（请求体结束时关闭目标写端，即 TCP 半关闭）
+  request.body.pipeTo(conn.writable).catch(() => {});
 
+  // 下行：先写 2 字节 VLESS 响应头（version=0 + addonsLen=0，否则 xhttp 客户端报 unexpected response version）
+  // 与 SOCKS5/HTTP 代理握手残留字节（目标端早期数据），再把目标连接原生管道接到响应体
+  const ts = typeof IdentityTransformStream === 'function' ? new IdentityTransformStream() : new TransformStream();
   (async () => {
     try {
-      while (true) {
-        const { done, value } = await bodyReader.read();
-        if (done) break;
-        await writer.write(value);
-      }
+      const w = ts.writable.getWriter();
+      await w.write(new Uint8Array([0, 0]));
+      if (conn._preamble && conn._preamble.byteLength > 0) await w.write(conn._preamble);
+      w.releaseLock();
+      await conn.readable.pipeTo(ts.writable);   // 客户端断开 → 取消目标读取；目标结束 → 响应结束
     } catch (e) { /* 忽略 */ }
-    try { await writer.close(); } catch (e) { /* 忽略 */ }
+    try { conn.close(); } catch (e) { /* 忽略 */ }
   })();
-
-  // 下行用 pull 驱动：只有客户端读走数据后才继续从目标连接读取（背压）。
-  // 此前在 start() 里无限循环 enqueue，客户端读得慢（或不读）时数据全部堆在内存里，下载大文件会撑爆 Worker 的 128MB 内存
-  const connReader = conn.readable.getReader();
-  const respStream = new ReadableStream({
-    start(controller) {
-      // 须先回 2 字节 VLESS 响应头（version=0 + addonsLen=0），否则 xhttp 客户端握手失败（真连接报 unexpected response version）
-      controller.enqueue(new Uint8Array([0, 0]));
-      // 补发 SOCKS5/HTTP 代理握手残留字节（目标端早期数据），避免 TLS 握手中途被截断
-      if (conn._preamble && conn._preamble.byteLength > 0) controller.enqueue(conn._preamble);
-    },
-    async pull(controller) {
-      try {
-        const { done, value } = await connReader.read();
-        if (!done) { controller.enqueue(value); return; }
-      } catch (e) { /* 目标连接异常中断：按结束处理 */ }
-      try { controller.close(); } catch (e) { /* 忽略 */ }
-      try { conn.close(); } catch (e) { /* 忽略 */ }
-    },
-    cancel() {
-      // 客户端断开：释放目标连接，并停止读取上行请求体
-      try { connReader.cancel(); } catch (e) { /* 忽略 */ }
-      try { conn.close(); } catch (e) { /* 忽略 */ }
-      try { bodyReader.cancel(); } catch (e) { /* 忽略 */ }
-    }
-  }, { highWaterMark: 256 * 1024, size: (chunk) => chunk.byteLength });
-  return new Response(respStream, { status: 200, headers: { 'content-type': 'application/octet-stream', 'x-accel-buffering': 'no', 'cache-control': 'no-store' } });
+  return new Response(ts.readable, { status: 200, headers: { 'content-type': 'application/octet-stream', 'x-accel-buffering': 'no', 'cache-control': 'no-store' } });
 }
 
 // ---------------------------------------------------------------------------

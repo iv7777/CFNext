@@ -17,6 +17,7 @@ export default [
       crypto: 'readonly', fetch: 'readonly', Request: 'readonly', Response: 'readonly', Headers: 'readonly', URL: 'readonly',
       URLSearchParams: 'readonly', TextEncoder: 'readonly', TextDecoder: 'readonly', AbortController: 'readonly', AbortSignal: 'readonly',
       WebSocketPair: 'readonly', caches: 'readonly', ReadableStream: 'readonly', WritableStream: 'readonly',
+      TransformStream: 'readonly', IdentityTransformStream: 'readonly',
       setTimeout: 'readonly', clearTimeout: 'readonly', atob: 'readonly', btoa: 'readonly',
     } },
     rules,
