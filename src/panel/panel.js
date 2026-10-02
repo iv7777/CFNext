@@ -182,7 +182,8 @@ function loadAll(){
       renderAll();
       makeSub(false);
       setConn(true);
-      toast('配置已加载', 'ok');
+      if (CFG.kvError) toast(CFG.kvError + '；保存已被禁用', 'err');
+      else toast('配置已加载', 'ok');
     } else if (r && r.status === 403) {
       location.href = '/login?next=' + encodeURIComponent(APIPATH);
     } else {

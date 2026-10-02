@@ -966,3 +966,163 @@ test('页面安全头：面板 / 登录页带 CSP、frame-ancestors、nosniff；
   assert.match(out.headers.get('Set-Cookie'), /luma_auth=; .*Max-Age=0/);
   assert.equal((await call(env, `/${UUID}/api/logout`)).status, 403, '未登录不可调用');
 });
+
+// ---------------- 批次 3：配置存储异常 / DoH 子请求 / 机房共享缓存 ----------------
+const failingKv = (init = {}) => {
+  const k = kv(init); let down = true;
+  return Object.assign(k, { puts: 0, setDown(v) { down = v; },
+    async get(key, opts) { if (down) throw new Error('KV unavailable'); return k.m.has(key) ? k.m.get(key) : null; },
+    async put(key, v) { this.puts++; k.m.set(key, v); } });
+};
+
+test('KV 读取失败：有环境变量 UUID 时节点与订阅照常工作，保存与重置被拒绝且不会覆盖已有配置；无环境变量 UUID 时返回 503', async () => {
+  const k = failingKv({ config: { alpn: 'h2', cfgRev: 2 } });
+  const env = baseEnv({ K: k });
+  const cookie = await login(env);                                   // ADMIN 来自环境变量，不依赖 KV
+  assert.equal((await call(env, `/${UUID}/sub`, { ua: 'v2rayN/7' })).status, 200, '订阅仍可用');
+  const cfg = await (await call(env, `/${UUID}/api/config`, { cookie })).json();
+  assert.match(cfg.data.kvError, /KV 暂时无法读取/);
+  const save = await call(env, `/${UUID}/api/config`, { method: 'POST', cookie, body: { alpn: 'http/1.1' } });
+  assert.equal(save.status, 503);
+  assert.equal(k.puts, 0, '没有向 KV 写入任何内容');
+  assert.equal((await call(env, `/${UUID}/api/reset`, { method: 'POST', cookie })).status, 503);
+  assert.equal(k.m.has('config'), true, '配置未被删除');
+  // 恢复后一切正常，原有配置还在
+  k.setDown(false);
+  const after = await (await call(env, `/${UUID}/api/config`, { cookie })).json();
+  assert.equal(after.data.alpn, 'h2');
+  assert.equal(after.data.kvError, '');
+  // 未设置环境变量 U：此时 UUID 只能是随机值，直接 503，不再让登录与节点悄悄失效
+  const noU = { ADMIN: 'pw', K: failingKv() };
+  const res = await call(noU, `/${UUID}/sub`, { ua: 'v2rayN/7' });
+  assert.equal(res.status, 503);
+  assert.equal(res.headers.get('Retry-After'), '30');
+});
+
+test('KV 中的配置损坏（不是合法 JSON）：显示提示并禁止保存，但允许重置修复', async () => {
+  const k = kv({ config: '{"alpn": "h2"' });
+  const env = baseEnv({ K: k });
+  const cookie = await login(env);
+  const cfg = await (await call(env, `/${UUID}/api/config`, { cookie })).json();
+  assert.match(cfg.data.kvError, /已损坏/);
+  assert.equal((await call(env, `/${UUID}/api/config`, { method: 'POST', cookie, body: { alpn: 'h2' } })).status, 503);
+  assert.equal(k.m.get('config'), '{"alpn": "h2"', '损坏内容保持原样，未被默认值覆盖');
+  assert.equal((await call(env, `/${UUID}/api/reset`, { method: 'POST', cookie })).status, 200);
+  assert.equal(k.m.has('config'), false);
+});
+
+// 反代域名解析：DoH 记录与统计
+const dohStub = (table, log = []) => async (url) => {
+  const u = new URL(url); const name = u.searchParams.get('name'); const type = { 1: 'A', 28: 'AAAA', 16: 'TXT' }[u.searchParams.get('type')] || u.searchParams.get('type');
+  log.push({ host: u.host, name, type });
+  const rule = table[u.host] || table['*'];
+  if (!rule) return new Response('x', { status: 500 });
+  if (rule.status) return new Response('x', { status: rule.status });
+  if (rule.delay) await new Promise(r => setTimeout(r, rule.delay));
+  const ans = (rule.answers && rule.answers[name + '|' + type]) || [];
+  return new Response(JSON.stringify({ Status: 0, Answer: ans.map(data => ({ type: type === 'A' ? 1 : type === 'TXT' ? 16 : 28, data })) }));
+};
+const connectVia = async (env, host) => {
+  const ws = await openWs(env);
+  await ws.emit('message', { data: vlessReq(host, 443, TLS_HELLO).buffer });
+  return ws;
+};
+
+test('反代 / 落地域名解析：并发连接合并为一次查询，正常情况下每种记录只发 1 个 DoH 请求（Cloudflare 优先）', async () => {
+  const log = fakeNet({ '198.51.100.5': { delay: 5 } });
+  const dns = [];
+  const env = baseEnv({ K: kv({ config: { proxyIP: 'dedupe.example.com' } }) });
+  await withFetch(dohStub({ 'cloudflare-dns.com': { delay: 40, answers: { 'dedupe.example.com|A': ['198.51.100.5'] } } }, dns), async () => {
+    const sockets = [];
+    for (let i = 0; i < 4; i++) sockets.push(await openWs(env));
+    await Promise.all(sockets.map(ws => ws.emit('message', { data: vlessReq('t.example', 443, TLS_HELLO).buffer })));
+  });
+  const mine = dns.filter(d => d.name === 'dedupe.example.com');
+  assert.deepEqual(mine.map(d => d.type).sort(), ['A', 'TXT'], '4 个并发连接只查询一次（TXT + A）');
+  assert.ok(mine.every(d => d.host === 'cloudflare-dns.com'), '只用第一个端点，没有同时发给 3 个');
+  assert.equal(log.filter(s => s.hostname === '198.51.100.5').length, 4);
+});
+
+test('反代域名解析：首选 DoH 失败时才换下一个端点；全部失败后 30 秒内不再重复查询', async () => {
+  fakeNet({ '198.51.100.6': { delay: 5 }, 'neg.example.com': { delay: 5 } });
+  // 首选端点 500 → 第二个端点接手，第三个不被访问
+  let dns = [];
+  let env = baseEnv({ K: kv({ config: { proxyIP: 'fallback.example.com' } }) });
+  await withFetch(dohStub({ 'dns.alidns.com': { answers: { 'fallback.example.com|A': ['198.51.100.6'] } } }, dns), () => connectVia(env, 't.example'));
+  let hosts = dns.filter(d => d.name === 'fallback.example.com').map(d => d.host);
+  assert.deepEqual([...new Set(hosts)].sort(), ['cloudflare-dns.com', 'dns.alidns.com']);
+  assert.ok(!hosts.includes('doh.pub'));
+  // 全部失败：第一次尝试所有端点，第二次连接直接用缓存的「无结果」
+  dns = [];
+  env = baseEnv({ K: kv({ config: { proxyIP: 'neg.example.com' } }) });
+  await withFetch(dohStub({}, dns), () => connectVia(env, 't.example'));
+  const first = dns.filter(d => d.name === 'neg.example.com').length;
+  assert.ok(first >= 6, `第一次查询了所有端点（${first}）`);
+  dns.length = 0;
+  await withFetch(dohStub({}, dns), () => connectVia(env, 't.example'));
+  assert.equal(dns.filter(d => d.name === 'neg.example.com').length, 0, '30 秒内不再重复查询');
+});
+
+test('UDP DNS（VLESS UDP 53）转 DoH：Cloudflare 优先，失败才换端点', async () => {
+  const query = new Uint8Array([0x12, 0x34, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 7, ...Buffer.from('example'), 3, ...Buffer.from('com'), 0, 0, 1, 0, 1]);
+  const req = () => new Uint8Array([0, ...uuidBytes, 0, 2, 0, 53, 1, 8, 8, 8, 8, ...query]);   // VLESS UDP（cmd=2）→ 8.8.8.8:53
+  const run = async (table) => {
+    const dns = [];
+    await withFetch(dohStub(table, dns), async () => {
+      const ws = await openWs(baseEnv());
+      await ws.emit('message', { data: req().buffer });
+      assert.equal(ws.sent.length, 1, 'DNS 应答');
+      const resp = ws.sent[0];
+      assert.deepEqual([...resp.slice(0, 2)], [0x12, 0x34]);
+      assert.deepEqual([...resp.slice(-4)], [93, 184, 216, 34]);
+    });
+    return dns.map(d => d.host);
+  };
+  const ans = { 'example.com|A': ['93.184.216.34'] };
+  assert.deepEqual(await run({ 'cloudflare-dns.com': { answers: ans } }), ['cloudflare-dns.com']);
+  assert.deepEqual(await run({ 'dns.google': { answers: ans } }), ['cloudflare-dns.com', 'dns.google']);
+});
+
+test('官方 IPv6 网段拉取失败后 5 分钟内不再重试（不再每次订阅都发一个注定失败的子请求）', async () => {
+  const env = baseEnv({ K: kv({ config: { filter: { ipType: ['IPv6'] }, optimizer: { subMode: 'random' } } }) });
+  const calls = [];
+  await withFetch((url) => { calls.push(url); return new Response('x', { status: 500 }); }, async () => {
+    for (let i = 0; i < 3; i++) await call(env, `/${UUID}/sub`, { ua: 'v2rayN/7' });
+  });
+  assert.ok(calls.filter(u => u.includes('ips-v6')).length <= 1, `ips-v6 请求 ${calls.filter(u => u.includes('ips-v6')).length} 次`);
+});
+
+test('机房共享缓存：优选 API 结果写入 / 读取 Cache API；命中时不再请求对方；Cache API 不可用时照常工作', async () => {
+  const store = new Map(), puts = [];
+  globalThis.caches = { default: {
+    async match(req) { return store.has(req.url) ? new Response(store.get(req.url)) : undefined; },
+    async put(req, res) { puts.push({ url: req.url, cc: res.headers.get('Cache-Control') }); store.set(req.url, await res.text()); },
+  } };
+  try {
+    const cfgFor = (url) => ({ filter: { ipType: ['IPv4'] }, src: { prefDomain: false }, ipsrc: { hostmonit: false, uouin: false, api1: true, api1Url: url } });
+    const linksFor = async (url, handler) => {
+      const env = baseEnv({ K: kv({ config: cfgFor(url) }) });
+      return withFetch(handler, async (calls) => {
+        const t = await (await call(env, `/${UUID}/sub`, { ua: 'v2rayN/7.0' })).text();
+        return { calls, hosts: t.split('\n').filter(l => /^vless:\/\//.test(l)).map(l => l.match(/@([^:]+):/)[1]) };
+      });
+    };
+    // 1) 共享缓存未命中：请求对方并写入共享缓存（max-age=600）
+    const urlA = 'https://shared-a.example.com/ips.txt';
+    const a = await linksFor(urlA, (u) => u === urlA ? new Response('104.16.8.8') : notFound());
+    assert.ok(a.hosts.includes('104.16.8.8'));
+    const key = 'https://cfnext-cache.invalid/url-' + md5('url:' + urlA);
+    assert.deepEqual(puts.filter(p => p.url === key).map(p => p.cc), ['max-age=600']);
+    // 2) 共享缓存命中（模拟另一个实例写入的结果）：完全不请求对方
+    const urlB = 'https://shared-b.example.com/ips.txt';
+    store.set('https://cfnext-cache.invalid/url-' + md5('url:' + urlB), JSON.stringify([{ ip: '104.16.7.7', port: 443, name: '共享-01' }]));
+    const b = await linksFor(urlB, (u) => { if (u === urlB) throw new Error('不应请求对方'); return notFound(); });
+    assert.ok(b.hosts.includes('104.16.7.7'));
+    assert.ok(!b.calls.includes(urlB));
+  } finally { delete globalThis.caches; }
+  // 3) 没有 Cache API：退回内存缓存，订阅照常
+  const urlC = 'https://shared-c.example.com/ips.txt';
+  const env = baseEnv({ K: kv({ config: { filter: { ipType: ['IPv4'] }, src: { prefDomain: false }, ipsrc: { hostmonit: false, uouin: false, api1: true, api1Url: urlC } } }) });
+  const t = await withFetch((u) => u === urlC ? new Response('104.16.6.6') : notFound(), async () => (await call(env, `/${UUID}/sub`, { ua: 'v2rayN/7.0' })).text());
+  assert.match(t, /@104\.16\.6\.6:443/);
+});

@@ -420,16 +420,19 @@ const REACHABLE_CIDRS_V6 = [
 // 失败回退内置段；实测官方段随机地址 TCP+TLS 全端口可用，与 IPv4 补足同机制）
 let OFFICIAL_V6_CIDRS = CLOUDFLARE_CIDRS_V6.slice();
 let OFFICIAL_V6_CIDRS_T = 0;
+let OFFICIAL_V6_FAIL_T = 0;   // 最近一次拉取失败的时间：失败后 5 分钟内不再重试（否则每次订阅都白白消耗一个子请求并等待最长 10 秒）
 async function refreshOfficialV6CIDRs() {
   const now = Date.now();
   if (OFFICIAL_V6_CIDRS_T && now - OFFICIAL_V6_CIDRS_T < 6 * 60 * 60 * 1000) return;
+  if (OFFICIAL_V6_FAIL_T && now - OFFICIAL_V6_FAIL_T < 5 * 60 * 1000) return;
   try {
     const resp = await fetch('https://www.cloudflare.com/ips-v6/', { signal: AbortSignal.timeout(10000) });
-    if (!resp.ok) return;
+    if (!resp.ok) { OFFICIAL_V6_FAIL_T = now; return; }
     const txt = await resp.text();
     const cidrs = String(txt).split('\n').map(s => s.trim()).filter(s => /^[0-9a-fA-F:.]+\/\d+$/.test(s) && s.indexOf(':') >= 0);
-    if (cidrs.length >= 3) { OFFICIAL_V6_CIDRS = cidrs; OFFICIAL_V6_CIDRS_T = now; }
-  } catch (e) { /* 拉取失败沿用内置/上次成功网段 */ }
+    if (cidrs.length >= 3) { OFFICIAL_V6_CIDRS = cidrs; OFFICIAL_V6_CIDRS_T = now; OFFICIAL_V6_FAIL_T = 0; }
+    else OFFICIAL_V6_FAIL_T = now;
+  } catch (e) { OFFICIAL_V6_FAIL_T = now; /* 拉取失败沿用内置/上次成功网段 */ }
 }
 
 // IPv6 CIDR 前缀匹配（展开为 16 进制组后按位比较）
@@ -1081,21 +1084,26 @@ function json(obj, status, headers) {
 // 配置加载：默认值 < 环境变量 < KV 图形化配置
 // KV 读取走 Cloudflare KV 内置边缘缓存 cacheTtl=30：请求/面板读配置命中边缘缓存，
 // 不再每次穿透 KV，KV 读量降一个数量级；不再使用模块级内存缓存（不同 isolate
-// 不共享且会残留陈旧值）。KV 写入后内部缓存层会以新值重校验，保存后读取即新配置。
+// 不共享且会残留陈旧值）。KV 是最终一致的：同一机房写入后随即可见，其它机房最多约 1 分钟后同步（面板保存提示即此含义）。
 // ---------------------------------------------------------------------------
-async function kvGetConfigCached(env) {
-  try { return await env.K.get('config', { cacheTtl: 30 }); } catch (e) { return null; }
-}
 
+// KV 读取失败 / 配置损坏时不再静默当作「没有配置」：否则未设置环境变量 U 时每次请求都会随机生成新 UUID（登录与全部节点同时失效），
+// 在此状态下保存还会用默认值覆盖掉真实配置。cfg._kvError 记录原因（unavailable：KV 读取出错；corrupt：存储内容不是合法 JSON），
+// 调用方据此拒绝写入；节点与订阅在环境变量提供了有效 UUID 时继续按环境变量 + 默认值工作
 async function loadConfig(env) {
-  let kvCfg = null;
+  let kvCfg = null, kvError = '';
   if (env.K && typeof env.K.get === 'function') {
     try {
-      const kvJson = await kvGetConfigCached(env);
-      if (kvJson) kvCfg = JSON.parse(kvJson);
-    } catch (e) { /* KV 读取失败忽略 */ }
+      const kvJson = await env.K.get('config', { cacheTtl: 30 });
+      if (kvJson) {
+        try { kvCfg = JSON.parse(kvJson); if (!kvCfg || typeof kvCfg !== 'object') throw new SyntaxError('not an object'); }
+        catch (e) { kvCfg = null; kvError = 'corrupt'; }
+      }
+    } catch (e) { kvError = 'unavailable'; }
   }
-  return buildConfig(env, kvCfg);
+  const cfg = buildConfig(env, kvCfg);
+  if (kvError) cfg._kvError = kvError;
+  return cfg;
 }
 
 // 由「默认值 < 环境变量 < KV 配置 < 锁定的环境变量」组装完整配置（纯函数：保存接口用刚写入的数据直接组装，
@@ -1341,14 +1349,42 @@ function detectTrojan(pending, cfg) {
 }
 
 // DoH 端点池（UDP/DNS → DoH 转换用；v1.0.5 修复：V2rayNG 关闭「本地 DNS」时远端 DNS 不可用）
+// Cloudflare 优先（Worker 与其同机房，延迟最低，且用户的查询不必先经过第三方境内解析器），其余按序兜底
 const DOH_ENDPOINTS = [
-  'https://doh.pub/dns-query',
-  'https://dns.alidns.com/resolve',
-  'https://1.1.1.1/dns-query',
-  'https://8.8.8.8/dns-query',
+  'https://cloudflare-dns.com/dns-query',
   'https://dns.google/dns-query',
-  'https://cloudflare-dns.com/dns-query'
+  'https://dns.alidns.com/resolve',
+  'https://doh.pub/dns-query'
 ];
+// 依次尝试 DoH 端点：前一个失败（网络错误 / 非 200 / SERVFAIL 等）立即换下一个；
+// 前一个超过 hedgeMs 仍未返回时提前并发发起下一个，先到先得。正常情况下每次查询只消耗 1 个子请求。
+// validate(json) 返回非 null 即视为成功结果（含「确认无记录」的空数组），返回 null 则换端点。全部失败返回 null
+function dohFirst(endpoints, buildUrl, validate, opts) {
+  const hedgeMs = (opts && opts.hedgeMs) || 700, timeoutMs = (opts && opts.timeoutMs) || 4000;
+  return new Promise((resolve) => {
+    let next = 0, pending = 0, done = false, timer = null;
+    const finish = (v) => { if (done) return; done = true; clearTimeout(timer); resolve(v); };
+    const launch = () => {
+      if (done) return;
+      clearTimeout(timer);
+      if (next >= endpoints.length) { if (!pending) finish(null); return; }
+      const ep = endpoints[next++];
+      pending++;
+      if (next < endpoints.length) timer = setTimeout(launch, hedgeMs);
+      (async () => {
+        let out = null;
+        try {
+          const res = await fetchTimeout(buildUrl(ep), { headers: { accept: 'application/dns-json' } }, timeoutMs);
+          if (res && res.ok) out = validate(await res.json());
+        } catch (e) { /* 视为失败，换下一个端点 */ }
+        pending--;
+        if (out != null) finish(out);
+        else if (!done && pending === 0) launch();
+      })();
+    };
+    launch();
+  });
+}
 // IPv6 字符串 → 16 字节（支持 :: 压缩）
 function ipv6ToBytes(ip) {
   const sp = String(ip).split('::');
@@ -1382,18 +1418,11 @@ async function dnsToDoH(query) {
   if (qtype !== 1 && qtype !== 28) return null;           // 仅 A/AAAA
   const name = labels.join('.');
   const question = query.subarray(12, qEnd);              // 响应中原样回显
-  let answer = null;
-  for (const ep of DOH_ENDPOINTS) {
-    try {
-      const r = await fetchTimeout(ep + '?name=' + encodeURIComponent(name) + '&type=' + qtype,
-        { headers: { accept: 'application/dns-json' } }, 5000);
-      if (!r || !r.ok) continue;
-      const j = await r.json();
-      if (!j || j.Status !== 0) continue;
-      const an = (j.Answer || []).filter(a => a.type === qtype && (a.type === 1 ? isValidIp(String(a.data)) : /^[0-9a-fA-F:]+$/.test(String(a.data))));
-      if (an.length) { answer = an; break; }
-    } catch (e) { /* 尝试下一个 DoH 端点 */ }
-  }
+  const answer = await dohFirst(DOH_ENDPOINTS, (ep) => ep + '?name=' + encodeURIComponent(name) + '&type=' + qtype, (j) => {
+    if (!j || j.Status !== 0) return null;
+    const an = (j.Answer || []).filter(a => a.type === qtype && (a.type === 1 ? isValidIp(String(a.data)) : /^[0-9a-fA-F:]+$/.test(String(a.data))));
+    return an.length ? an : null;
+  }, { timeoutMs: 5000 });
   if (!answer) return null;
   const header = new Uint8Array(12);
   const dv = new DataView(header.buffer);
@@ -1870,29 +1899,41 @@ function selectRelayRegion(colo) {
 
 // PROXYIP 反代 IP 解析缓存（TTL 5 分钟：域名 → DoH TXT/A 解析结果）
 const PROXYIP_CACHE = new Map();
+// 限制缓存表大小：超出时淘汰最先插入的项（Map 按插入顺序遍历），避免长期运行的实例内存无限增长
+function capMap(map, max) { while (map.size > max) map.delete(map.keys().next().value); }
 
 // 解析反代域名为 IP 候选列表：
 //   - IP 字面量直接返回
 //   - 域名先查 TXT：TXT 含逗号/换行分隔的 IP 列表则解析为多候选；
 //     TXT 为 @edtunnel 标记（反代服务约定）或无有效 TXT 时查 A 记录
 //   - 结果缓存 5 分钟，避免每次连接都触发 DoH
+const PROXYIP_TTL = 5 * 60 * 1000, PROXYIP_NEG_TTL = 30 * 1000;   // 成功缓存 5 分钟；失败 / 无记录缓存 30 秒（避免每个连接都重新查 DoH）
+const PROXYIP_INFLIGHT = new Map();                              // 同一域名的并发解析合并为一次（冷启动时大量连接同时到达）
+const PROXYIP_DOHS = ['https://cloudflare-dns.com/dns-query', 'https://dns.alidns.com/resolve', 'https://doh.pub/dns-query'];
 async function resolveProxyIPs(host, port) {
   port = port || 443;
   if (isValidIp(host)) return [{ hostname: host, port }];
   const cacheKey = host + ':' + port;
-  const now = Date.now();
   const hit = PROXYIP_CACHE.get(cacheKey);
-  if (hit && now - hit.t < 5 * 60 * 1000) return hit.ips;
-
-  const dohs = ['https://cloudflare-dns.com/dns-query', 'https://dns.alidns.com/resolve', 'https://doh.pub/dns-query'];
+  if (hit && Date.now() - hit.t < (hit.ips.length ? PROXYIP_TTL : PROXYIP_NEG_TTL)) return hit.ips;
+  let job = PROXYIP_INFLIGHT.get(cacheKey);
+  if (!job) {
+    job = resolveProxyIPsUncached(host, port)
+      .then((ips) => { PROXYIP_CACHE.set(cacheKey, { t: Date.now(), ips }); capMap(PROXYIP_CACHE, 200); return ips; })
+      .finally(() => PROXYIP_INFLIGHT.delete(cacheKey));
+    PROXYIP_INFLIGHT.set(cacheKey, job);
+  }
+  return job;
+}
+async function resolveProxyIPsUncached(host, port) {
+  // 每种记录类型按端点顺序查询：前一个端点失败才换下一个（正常 1 个子请求，不再 3 个端点同时发）；
+  // SERVFAIL 等视为失败换端点，NOERROR / NXDOMAIN 视为确定结果
   const dohQuery = async (type, filterType) => {
-    const jobs = dohs.map(async (url) => {
-      const res = await fetchTimeout(url + '?name=' + encodeURIComponent(host) + '&type=' + type, { headers: { accept: 'application/dns-json' } }, 4000);
-      if (!res || !res.ok) throw new Error('doh fail');
-      const j = await res.json();
+    const r = await dohFirst(PROXYIP_DOHS, (url) => url + '?name=' + encodeURIComponent(host) + '&type=' + type, (j) => {
+      if (!j || (j.Status !== 0 && j.Status !== 3)) return null;
       return (j.Answer || []).filter(a => a.type === filterType).map(a => a.data);
     });
-    try { return await Promise.any(jobs); } catch (e) { return []; }
+    return r || [];
   };
 
   // 并发查询 TXT 与 A 记录（TXT 优先，无有效 TXT 用 A）
@@ -1932,9 +1973,7 @@ async function resolveProxyIPs(host, port) {
 
   // 去重（按 hostname:port）
   const seen = new Set();
-  const result = targets.filter(t => { const k = t.hostname + ':' + t.port; if (seen.has(k)) return false; seen.add(k); return true; });
-  if (result.length) PROXYIP_CACHE.set(cacheKey, { t: now, ips: result });
-  return result;
+  return targets.filter(t => { const k = t.hostname + ':' + t.port; if (seen.has(k)) return false; seen.add(k); return true; });
 }
 
 // 出站并发竞速：同时发起多路连接，取最先握手成功的一路，后到的成功连接立即关闭（释放 CF 同时连接配额）。
@@ -2293,6 +2332,24 @@ function decodeUtf8OrGbk(buf) {
 // 修复：原先抓取 stock.hostmonit.com/CloudFlareYes 页面，该页面已改版为前端渲染的单页应用，HTML 中不含任何 IP，
 // 每次都拿到 0 个；现改为调用其数据接口（key 为社区项目通用的公开 key，接口失效时由其它来源兜底）。
 // 节点名带运营商（如「移动-01」），面板「运营商偏好」筛选据此生效。失败时沿用上次成功结果，都没有则返回 null
+// 机房内共享缓存（Cache API）：第三方优选来源的结果各实例原先只缓存在自己的内存里，每个新实例 / 每次冷启动都要重新请求对方；
+// 放进 caches.default 后同一机房的所有实例共用，10 分钟内只请求一次。Cache API 不可用（本地测试 / 部分域名下 put 不生效）时静默退回内存缓存
+const SHARED_CACHE_BASE = 'https://cfnext-cache.invalid/';
+async function sharedCacheGet(key) {
+  try {
+    if (typeof caches === 'undefined' || !caches.default) return null;
+    const res = await caches.default.match(new Request(SHARED_CACHE_BASE + key));
+    return res ? await res.json() : null;
+  } catch (e) { return null; }
+}
+async function sharedCachePut(key, value, ttlSec) {
+  try {
+    if (typeof caches === 'undefined' || !caches.default) return;
+    await caches.default.put(new Request(SHARED_CACHE_BASE + key), new Response(JSON.stringify(value), {
+      headers: { 'Content-Type': 'application/json', 'Cache-Control': 'max-age=' + (ttlSec || 600) }
+    }));
+  } catch (e) { /* 写入失败不影响订阅 */ }
+}
 const HOSTMONIT_API = 'https://api.hostmonit.com/get_optimization_ip';
 const HOSTMONIT_KEY = 'iDetkOys';
 const HOSTMONIT_LINE_CN = { CM: '移动', CU: '联通', CT: '电信' };
@@ -2348,8 +2405,10 @@ async function hostmonitFetch(maxCount) {
 async function fetchLatestPreferredIPs(maxCount) {
   maxCount = Math.max(1, parseInt(maxCount) || 150);
   if (SUBPREF_CACHE.ips && Date.now() - SUBPREF_CACHE.t < 10 * 60 * 1000) return SUBPREF_CACHE.ips;
+  const shared = await sharedCacheGet('hostmonit');
+  if (shared && shared.length) { SUBPREF_CACHE.t = Date.now(); SUBPREF_CACHE.ips = shared; return shared; }
   const r = await hostmonitFetch(maxCount);
-  if (r.items.length) { SUBPREF_CACHE.t = Date.now(); SUBPREF_CACHE.ips = r.items; return r.items; }
+  if (r.items.length) { SUBPREF_CACHE.t = Date.now(); SUBPREF_CACHE.ips = r.items; await sharedCachePut('hostmonit', r.items); return r.items; }
   return SUBPREF_CACHE.ips;   // 本次失败：沿用上次成功结果（可能为 null）
 }
 
@@ -2390,8 +2449,12 @@ async function uouinFetch() {
 async function fetchUouinIPs(wantV4, wantV6) {
   let list = UOUIN_CACHE.ips;
   if (!list || Date.now() - UOUIN_CACHE.t >= 10 * 60 * 1000) {
-    const r = await uouinFetch();
-    if (r.items.length) { UOUIN_CACHE.t = Date.now(); UOUIN_CACHE.ips = r.items; list = r.items; }
+    const shared = await sharedCacheGet('uouin');
+    if (shared && shared.length) { UOUIN_CACHE.t = Date.now(); UOUIN_CACHE.ips = shared; list = shared; }
+    else {
+      const r = await uouinFetch();
+      if (r.items.length) { UOUIN_CACHE.t = Date.now(); UOUIN_CACHE.ips = r.items; list = r.items; await sharedCachePut('uouin', r.items); }
+    }
   }
   // 按 IP 类型筛选取用（缓存中保留全部，v4 / v6 由调用方决定）
   return (list || []).filter(x => (x.ip.indexOf(':') >= 0 ? wantV6 : wantV4));
@@ -2514,6 +2577,12 @@ function trojanNode(cfg, server, port, name) {
 
 // 优选域名 / 优选 API 的 DNS 解析缓存（TTL 10 分钟：域名或 URL → IP 列表）
 const DNH_CACHE = new Map();
+// 优选 API 解析结果：写入内存缓存与机房共享缓存（10 分钟）
+async function storeUrlCache(ck, rec) {
+  DNH_CACHE.set(ck, { t: Date.now(), ips: rec });
+  capMap(DNH_CACHE, 300);
+  await sharedCachePut('url-' + md5hex(ck), rec, 600);
+}
 // 带超时的 fetch（手动 AbortController，兼容所有运行时）
 function fetchTimeout(url, opts, ms) {
   return new Promise((resolve) => {
@@ -2565,6 +2634,10 @@ async function resolvePreferredDomains(domainsStr, limitPerDomain = 100, maxTota
       const ck = 'url:' + d + (allowRegionFallback ? '|rf' : '') + (filterCF ? '' : '|raw');
       const cHit = DNH_CACHE.get(ck);
       if (!opts.fresh && cHit && now - cHit.t < 10 * 60 * 1000) return cHit.ips.slice(0, limitPerDomain);
+      if (!opts.fresh) {
+        const shared = await sharedCacheGet('url-' + md5hex(ck));
+        if (Array.isArray(shared)) { DNH_CACHE.set(ck, { t: now, ips: shared }); capMap(DNH_CACHE, 300); return shared.slice(0, limitPerDomain); }
+      }
       try {
         const res = await fetchTimeout(d, {}, 6000);
         if (!res) { if (opts.onRaw) opts.onRaw(d, 0, ''); throw new Error('unreachable'); }
@@ -2623,7 +2696,7 @@ async function resolvePreferredDomains(domainsStr, limitPerDomain = 100, maxTota
               if (nm) { counters[nm] = (counters[nm] || 0) + 1; rec.push({ ip, port, name: nm + '-' + String(counters[nm]).padStart(2, '0'), ...(relay ? { relay: true } : {}) }); }
               else rec.push({ ip, port, name: '', ...(relay ? { relay: true } : {}) });
             }
-            DNH_CACHE.set(ck, { t: now, ips: rec });
+            await storeUrlCache(ck, rec);
             return rec.slice();
           }
         }
@@ -2649,7 +2722,7 @@ async function resolvePreferredDomains(domainsStr, limitPerDomain = 100, maxTota
             if (nm) { counters[nm] = (counters[nm] || 0) + 1; rec.push({ ip, port, name: nm + '-' + String(counters[nm]).padStart(2, '0'), ...(relay ? { relay: true } : {}) }); }
             else rec.push({ ip, port, name: '', ...(relay ? { relay: true } : {}) });
           }
-          DNH_CACHE.set(ck, { t: now, ips: rec });
+          await storeUrlCache(ck, rec);
           return rec.slice();
         }
         // vless/trojan 订阅行提取（子订阅/转换器输出）：vless://uuid@host:port#名称
@@ -2710,7 +2783,7 @@ async function resolvePreferredDomains(domainsStr, limitPerDomain = 100, maxTota
           else rec.push({ ip, port, name: rawName.slice(0, 40), ...(relay ? { relay: true } : {}) });
         }
         // 已移除「地区回退生成」：源内无可用 IP 时不再用随机 CF IP 冒充该地区节点
-        DNH_CACHE.set(ck, { t: now, ips: rec });
+        await storeUrlCache(ck, rec);
         return rec.slice();   // 返回副本：均衡截断的 shift() 会原地修改数组，直接返回引用会污染缓存
       } catch (e) {
         // SWR 平滑容灾：当次拉取网络异常/超时，沿用上一轮有效缓存兜底，确保外部数据源抖动时订阅永不枯竭
@@ -2749,7 +2822,7 @@ async function resolvePreferredDomains(domainsStr, limitPerDomain = 100, maxTota
       if (hit && hit.ips && hit.ips.length) return hit.ips.slice(0, limitPerDomain).map((ip, i) => ({ ip, port: 443, name: d + '-' + (i + 1) }));
       return [];
     }
-    DNH_CACHE.set(dk, { t: now, ips });
+    DNH_CACHE.set(dk, { t: now, ips }); capMap(DNH_CACHE, 300);
     return ips.map((ip, i) => ({ ip, port: 443, name: d + '-' + (i + 1) }));
   }));
   // 按输入顺序均衡截断：轮流取每条目的节点，保证各地区/域名都有且总量受控
@@ -3756,7 +3829,11 @@ function publicConfig(cfg, env) {
   out.panelPath = cfg.path;                         // 当前生效的面板路径（保存后面板据此跳转）
   out.envLocked = envLockedFields(env);             // { 字段: 环境变量名 }：面板中只读
   out.kv = !!(env.K && typeof env.K.put === 'function');
+  out.kvError = cfg._kvError ? kvErrorMessage(cfg._kvError) : '';   // 非空 = 配置存储异常，面板提示且保存被禁用
   return out;
+}
+function kvErrorMessage(kind) {
+  return kind === 'corrupt' ? 'KV 中保存的配置已损坏（不是合法 JSON），当前使用的是环境变量与默认值' : 'KV 暂时无法读取，当前使用的是环境变量与默认值';
 }
 function formatConfigErrors(errors) {
   return errors.map(e => (e.label ? e.label + '：' : '') + e.msg).join('；');
@@ -3790,6 +3867,10 @@ async function handleRequest(request, env) {
   }
 
   const cfg = await loadConfig(env);
+  // 配置存储异常且环境变量没有提供有效 UUID：此时的 UUID 是随机生成的，继续处理只会让所有节点和登录失效，直接返回 503
+  if (cfg._kvError && !(env.U && isUUID(String(env.U)))) {
+    return new Response('配置存储暂不可用，请稍后重试', { status: 503, headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Retry-After': '30' } });
+  }
   const panelPath = cfg.path || cfg.uuid;
   const path = url.pathname.replace(/^\/+|\/+$/g, '');
   const segs = path.split('/');
@@ -3887,6 +3968,7 @@ async function handleRequest(request, env) {
         return json({ ok: true, data: publicConfig(cfg, env) });
       }
       if (request.method === 'POST') {
+        if (cfg._kvError) return json({ ok: false, msg: kvErrorMessage(cfg._kvError) + '，为避免覆盖已有配置，已禁止保存' }, 503);
         // 修复：未绑定 KV 时保存不会持久化（原版仍提示「已保存并生效」）
         if (!env.K || typeof env.K.put !== 'function') {
           return json({ ok: false, msg: '未绑定 KV 命名空间（变量名 K），无法保存面板配置；请在 Worker 设置中绑定 KV 后重试' }, 400);
@@ -3929,6 +4011,7 @@ async function handleRequest(request, env) {
     if (apiName === 'reset') {
       if (request.method !== 'POST') return json({ ok: false, msg: '仅支持 POST' }, 405);
       try {
+        if (cfg._kvError === 'unavailable') return json({ ok: false, msg: kvErrorMessage(cfg._kvError) + '，暂时无法重置' }, 503);   // 配置损坏（corrupt）时允许重置来修复
         if (!env.K || typeof env.K.delete !== 'function') return json({ ok: false, msg: '未绑定 KV 命名空间，无需重置' }, 400);
         await env.K.delete('config');
         await env.K.delete('issued');   // 清理旧版本（轮询换新）遗留的 issued 键
