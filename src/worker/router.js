@@ -48,23 +48,41 @@ async function verifyAdminPassword(stored, password) {
   if (parts.length !== 3 || !(iter >= 1000 && iter <= 100000) || !parts[1] || !parts[2]) return false;
   return timingSafeEqual(await pbkdf2Hex(password, fromHex(parts[1]), iter), parts[2]);
 }
+// 登录会话：空闲 24 小时过期——登录后每次使用面板（打开页面 / 调用接口）都把有效期顺延为 24 小时，
+// 但自登录起最长 7 天，到期必须重新登录（限制遗失或被盗的 Cookie 可用的时长）。
+// 令牌格式「过期时间.登录时间.签名」，签名覆盖两个时间，无法篡改；服务端不保存会话
 const AUTH_TTL_MS = 24 * 60 * 60 * 1000;
+const AUTH_MAX_MS = 7 * 24 * 60 * 60 * 1000;
+const AUTH_REFRESH_MIN_MS = 10 * 60 * 1000;   // 新有效期至少比当前晚 10 分钟才重新签发（连续操作时不必每个请求都换 Cookie）
 // 当前生效的管理用户名（KV 中为空等异常情况回落默认 admin）
 function adminUserOf(cfg) { return String(cfg.adminUser || '') || 'admin'; }
 // 会话签名密钥含用户名：修改用户名与修改密码一样，使其它浏览器的登录态失效
 function authKey(cfg) { return 'cfnext-auth|' + String(cfg.admin) + '|' + String(cfg.uuid) + '|' + adminUserOf(cfg); }
-async function makeAuthToken(cfg) {
-  const exp = Date.now() + AUTH_TTL_MS;
-  return exp + '.' + await hmacHex(authKey(cfg), String(exp));
+// iat：登录时间（续期时沿用，保证 7 天上限从首次登录算起）；返回 { token, exp }
+async function makeAuthToken(cfg, iat) {
+  const now = Date.now();
+  iat = iat || now;
+  const exp = Math.min(now + AUTH_TTL_MS, iat + AUTH_MAX_MS);
+  return { token: exp + '.' + iat + '.' + await hmacHex(authKey(cfg), exp + '.' + iat), exp };
 }
-async function requireAuth(request, cfg) {
+// 校验登录 Cookie：有效时返回会话 { exp, iat }，否则 false。
+// 传入 state 时顺便判断是否需要续期，需要则把新 Cookie 放到 state.setCookie（由 fetch 入口附加到响应上）
+async function requireAuth(request, cfg, state) {
   if (!cfg.admin) return false;
   const cookies = request.headers.get('Cookie') || '';
   const m = cookies.match(/(?:^|;\s*)cfnext_auth=([^;]+)/);
   if (!m) return false;
-  const [exp, sig] = m[1].split('.');
-  if (!exp || !sig || !/^\d+$/.test(exp) || Number(exp) < Date.now()) return false;
-  return timingSafeEqual(sig, await hmacHex(authKey(cfg), exp));
+  const parts = m[1].split('.');
+  if (parts.length !== 3 || !/^\d+$/.test(parts[0]) || !/^\d+$/.test(parts[1]) || !parts[2]) return false;
+  const exp = Number(parts[0]), iat = Number(parts[1]), now = Date.now();
+  if (exp < now || now - iat > AUTH_MAX_MS) return false;
+  if (!timingSafeEqual(parts[2], await hmacHex(authKey(cfg), parts[0] + '.' + parts[1]))) return false;
+  const session = { exp, iat };
+  if (state && Math.min(now + AUTH_TTL_MS, iat + AUTH_MAX_MS) - exp >= AUTH_REFRESH_MIN_MS) {
+    const t = await makeAuthToken(cfg, iat);
+    state.setCookie = authCookie(t.token, t.exp);
+  }
+  return session;
 }
 // 登录失败限速（按客户端 IP，同一 Worker 实例内生效，属尽力而为）：15 分钟内最多 5 次失败。
 // IPv6 按 /64 网段计数（单个用户通常拥有整个 /64，逐地址计数会被轻易绕过）；
@@ -109,8 +127,10 @@ function safeNext(next, panelPath) {
   next = String(next || '');
   return (/^\/[^\/\\]/.test(next)) ? next : ('/' + panelPath);
 }
-function authCookie(token) {
-  return `cfnext_auth=${token}; Path=/; Max-Age=86400; HttpOnly; Secure; SameSite=Lax`;
+// Cookie 有效期与令牌的过期时间一致
+function authCookie(token, exp) {
+  const maxAge = Math.max(0, Math.floor((exp - Date.now()) / 1000));
+  return `cfnext_auth=${token}; Path=/; Max-Age=${maxAge}; HttpOnly; Secure; SameSite=Lax`;
 }
 // 返回给面板的配置：只含字段表登记的配置项，不下发管理密码明文；附带面板需要的派生信息
 function publicConfig(cfg, env) {
@@ -151,7 +171,7 @@ function panelPage() {
   return PANEL_PAGE;
 }
 
-async function handleRequest(request, env) {
+async function handleRequest(request, env, state) {
   const url = new URL(request.url);
   const UA = request.headers.get('User-Agent') || '';
   const upgrade = (request.headers.get('Upgrade') || '').toLowerCase();
@@ -172,7 +192,7 @@ async function handleRequest(request, env) {
 
   // ---------- 版本接口（仅登录后可用；公开会让扫描器识别部署与版本） ----------
   if (segs[0] === 'version') {
-    if (!(await requireAuth(request, cfg))) return new Response('Not Found', { status: 404 });
+    if (!(await requireAuth(request, cfg, state))) return new Response('Not Found', { status: 404 });
     return json({ version: VERSION });
   }
 
@@ -191,12 +211,12 @@ async function handleRequest(request, env) {
       const passOk = await verifyAdminPassword(cfg.admin, params.get('password') || '');
       if (userOk && passOk) {
         loginSuccess(clientIp);
-        const token = await makeAuthToken(cfg);
+        const t = await makeAuthToken(cfg);
         return new Response(JSON.stringify({ ok: true, next: safeNext(params.get('next'), panelPath) }), {
           status: 200,
           headers: {
             'Content-Type': 'application/json; charset=utf-8',
-            'Set-Cookie': authCookie(token)
+            'Set-Cookie': authCookie(t.token, t.exp)
           }
         });
       }
@@ -249,7 +269,7 @@ async function handleRequest(request, env) {
     if (!cfg.admin) {
       return new Response('面板已禁用：请先在 Worker 环境变量中设置 ADMIN（管理密码），然后重新访问。', { status: 403, headers: { 'Content-Type': 'text/plain; charset=utf-8' } });
     }
-    if (!(await requireAuth(request, cfg))) {
+    if (!(await requireAuth(request, cfg, state))) {
       return Response.redirect(new URL('/login?next=' + encodeURIComponent('/' + panelPath), request.url).href, 302);
     }
     return new Response(panelPage(), { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' } });
@@ -258,7 +278,7 @@ async function handleRequest(request, env) {
   // ---------- API ----------
   if (isPanelRoot && segs[1] === 'api') {
     const apiName = segs[2] || '';
-    const authed = await requireAuth(request, cfg);
+    const authed = await requireAuth(request, cfg, state);
     if (!authed) {
       return json({ ok: false, status: 403, msg: '未授权（需要管理密码）' }, 403);
     }
@@ -293,8 +313,9 @@ async function handleRequest(request, env) {
           // 直接用刚写入的数据组装新配置（不回读 KV：边缘缓存可能仍是旧值）
           const fresh = buildConfig(env, stored);
           // UUID / 管理密码 / 管理用户名变更会使登录态签名失效：当前会话已通过鉴权，直接签发新令牌，面板无需重新登录
+          // （沿用原登录时间，7 天上限不因此重置）
           const headers = {};
-          if (fresh.admin && authKey(fresh) !== authKey(cfg)) headers['Set-Cookie'] = authCookie(await makeAuthToken(fresh));
+          if (fresh.admin && authKey(fresh) !== authKey(cfg)) { const t = await makeAuthToken(fresh, authed.iat); headers['Set-Cookie'] = authCookie(t.token, t.exp); }
           return json({ ok: true, data: publicConfig(fresh, env), ignored, msg: '已保存：本地区立即生效，其他地区约 1 分钟内同步' }, 200, headers);
         } catch (e) { return json({ ok: false, msg: '保存失败: ' + (e.message || e) }, 500); }
       }
@@ -396,6 +417,13 @@ function withSecurityHeaders(res) {
 
 export default {
   async fetch(request, env) {
-    return withSecurityHeaders(await handleRequest(request, env));
+    const state = {};
+    let res = await handleRequest(request, env, state);
+    // 登录会话续期：已登录的请求在响应上附带新 Cookie（响应自己设置了 Cookie 时以响应为准，如退出登录、改密码）
+    if (state.setCookie && res.status !== 101 && !res.headers.has('Set-Cookie')) {
+      res = new Response(res.body, res);
+      res.headers.set('Set-Cookie', state.setCookie);
+    }
+    return withSecurityHeaders(res);
   }
 };

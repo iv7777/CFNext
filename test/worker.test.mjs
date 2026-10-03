@@ -178,6 +178,54 @@ test('修改 UUID：重新签发登录态并返回新面板路径（问题 2）'
   assert.equal(old.status, 403, '旧令牌随 UUID 变更失效');
 });
 
+test('登录会话：使用面板时顺延 24 小时（10 分钟内不重复签发），24 小时未使用失效，自登录起最长 7 天；旧格式令牌失效', async () => {
+  const realNow = Date.now;
+  let off = 0;
+  Date.now = () => realNow() + off;
+  try {
+    const env = baseEnv();
+    const H = 3600 * 1000;
+    const api = (cookie) => call(env, `/${UUID}/api/config`, { cookie });
+    const cookieOf = (res) => (res.headers.get('Set-Cookie') || '').split(';')[0];
+    const maxAge = (res) => Number(((res.headers.get('Set-Cookie') || '').match(/Max-Age=(\d+)/) || [])[1]);
+    let cookie = await login(env);
+    assert.equal(cookie.split('=')[1].split('.').length, 3, '令牌含过期时间与登录时间');
+    // 5 分钟后使用：有效期只会延长 5 分钟，不重新签发
+    off = 5 * 60 * 1000;
+    let r = await api(cookie);
+    assert.equal(r.status, 200); assert.equal(r.headers.get('Set-Cookie'), null);
+    // 2 小时后使用：重新签发，有效期为此刻起 24 小时
+    off = 2 * H;
+    r = await api(cookie);
+    assert.equal(r.status, 200);
+    assert.ok(Math.abs(maxAge(r) - 86400) <= 2, 'Max-Age ≈ 24h');
+    const old = cookie;
+    cookie = cookieOf(r);
+    // 原令牌在其自身有效期内仍可用；顺延后的令牌在原令牌过期后仍可用
+    off = 25 * H;
+    assert.equal((await api(old)).status, 403, '24 小时未使用的令牌失效');
+    r = await api(cookie);
+    assert.equal(r.status, 200, '顺延后的令牌仍有效');
+    cookie = cookieOf(r) || cookie;
+    // 每天使用一次（间隔 23 小时）：一直有效，直到登录满 7 天
+    for (let d = 1; d <= 6; d++) { off = 25 * H + d * 23 * H; r = await api(cookie); assert.equal(r.status, 200, '第 ' + d + ' 次'); cookie = cookieOf(r) || cookie; }
+    off = 6.9 * 24 * H;
+    r = await api(cookie);
+    assert.equal(r.status, 200);
+    if (r.headers.get('Set-Cookie')) { assert.ok(maxAge(r) <= 0.1 * 24 * 3600 + 2, '续期不超过登录后 7 天'); cookie = cookieOf(r); }
+    off = 7 * 24 * H + 60 * 1000;
+    assert.equal((await api(cookie)).status, 403, '登录满 7 天必须重新登录');
+    // 旧格式（过期时间.签名）令牌不再接受
+    off = 0;
+    assert.equal((await api('cfnext_auth=' + (realNow() + H) + '.deadbeef')).status, 403);
+    // 退出登录：响应自己的清除 Cookie 不被续期覆盖
+    cookie = await login(env);
+    off = 2 * H;
+    const out = await call(env, `/${UUID}/api/logout`, { method: 'POST', cookie });
+    assert.match(out.headers.get('Set-Cookie'), /cfnext_auth=; .*Max-Age=0/);
+  } finally { Date.now = realNow; }
+});
+
 test('环境变量锁定的字段在面板只读、保存时忽略（问题 3）', async () => {
   const env = baseEnv({ D: 'panel' });
   const cookie = await login(env, 'pw', 'panel');
