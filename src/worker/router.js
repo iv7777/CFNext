@@ -207,11 +207,13 @@ async function handleRequest(request, env) {
     return new Response(loginHTML, { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8' } });
   }
 
-  // 自定义订阅路径（基础配置中设置）作为订阅别名入口：/AAZ/sub 同样命中订阅处理；
-  // 面板入口、管理 API 与代理入口只认 panelPath，别名下不开放面板与管理接口
+  // 订阅入口：自定义订阅路径（如 /AAZ/sub），留空则为 /<UUID>/sub（面板路径自定义时也是 UUID）；
+  // 面板路径下的 /sub 继续可用（兼容已导入的旧订阅地址）。
+  // 面板入口、管理 API 与代理入口只认 panelPath，订阅入口下不开放面板与管理接口
   const subAlias = String(cfg.subUrl || '').trim().replace(/^\/+/, '').replace(/\/+$/, '');
+  const subRoot = subAlias || cfg.uuid;
   const isPanelRoot = segs[0] === panelPath;
-  const isSubRoot = isPanelRoot || (!!subAlias && segs[0] === subAlias);
+  const isSubRoot = isPanelRoot || segs[0] === subRoot;
 
   // 根路径不跳转到面板入口（否则会把面板路径 / UUID 告诉任何访问者）
   if (segs[0] === '') {

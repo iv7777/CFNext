@@ -18,7 +18,7 @@
 // ============================================================================
 import { connect } from 'cloudflare:sockets';
 
-const VERSION = '2.1.6';
+const VERSION = '2.1.7';
 
 // 更新检测：点击版本号后拉取仓库代码比对版本号；有新版本时返回最新代码供面板复制
 // 版本基准为仓库 main 分支根目录的 CFNext.js（由 build.mjs 生成的部署文件）
@@ -503,7 +503,7 @@ const CONFIG_SCHEMA = [
   // 面板路径：留空使用 UUID
   { key: 'path', type: 'string', def: '', el: 'a-path', label: '面板路径', maxLen: 128, strip: ['^/+', '/+$'],
     pattern: PATH_SEG_PATTERN, hint: '只能包含字母、数字及 . _ ~ -（不含 /）', reserved: RESERVED_PATHS, envLock: ['D', 'PATH'] },
-  // 自定义订阅路径别名：/<别名>/sub 同样输出订阅（不开放面板与管理接口）
+  // 自定义订阅路径：/<别名>/sub 输出订阅（不开放面板与管理接口）；留空为 /<UUID>/sub
   { key: 'subUrl', type: 'string', def: '', el: 'a-suburl', label: '自定义订阅路径', maxLen: 128, strip: ['^/+', '/+$', '/sub$', '/+$'],
     pattern: PATH_SEG_PATTERN, hint: '只填一段别名，如 AAZ（字母、数字及 . _ ~ -）', reserved: RESERVED_PATHS },
   // 管理用户名：登录时与管理密码一起校验（区分大小写）；留空取默认 admin
@@ -4609,10 +4609,11 @@ bindFormEvents();
 /* ===== 订阅 ===== */
 function subUrlOf(fmt){
   // 自定义订阅路径优先：自动保留当前域名（location.origin），只替换路径段；
-  // 用户只填 UUID/别名段（如 AAZ），拼成 https://当前域名/AAZ/sub；留空用面板路径。
+  // 用户只填 UUID/别名段（如 AAZ），拼成 https://当前域名/AAZ/sub；留空用 UUID（https://当前域名/<UUID>/sub）。
   // 填了 /sub 结尾或带前后斜杠时自动归一，格式后缀（clash/singbox 等）拼为 /sub/<格式>
   var custom = (window.CFG && CFG.subUrl) ? String(CFG.subUrl).trim().replace(/^\/+/, '').replace(/\/sub$/, '').replace(/\/+$/, '') : '';
-  var base = custom ? (location.origin + '/' + custom) : (location.origin + APIPATH);
+  var seg = custom || (window.CFG && CFG.uuid) || '';
+  var base = seg ? (location.origin + '/' + seg) : (location.origin + APIPATH);
   var u = base + '/sub';
   return fmt ? (u + '/' + fmt) : u;
 }
@@ -5215,11 +5216,13 @@ async function handleRequest(request, env) {
     return new Response(loginHTML, { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8' } });
   }
 
-  // 自定义订阅路径（基础配置中设置）作为订阅别名入口：/AAZ/sub 同样命中订阅处理；
-  // 面板入口、管理 API 与代理入口只认 panelPath，别名下不开放面板与管理接口
+  // 订阅入口：自定义订阅路径（如 /AAZ/sub），留空则为 /<UUID>/sub（面板路径自定义时也是 UUID）；
+  // 面板路径下的 /sub 继续可用（兼容已导入的旧订阅地址）。
+  // 面板入口、管理 API 与代理入口只认 panelPath，订阅入口下不开放面板与管理接口
   const subAlias = String(cfg.subUrl || '').trim().replace(/^\/+/, '').replace(/\/+$/, '');
+  const subRoot = subAlias || cfg.uuid;
   const isPanelRoot = segs[0] === panelPath;
-  const isSubRoot = isPanelRoot || (!!subAlias && segs[0] === subAlias);
+  const isSubRoot = isPanelRoot || segs[0] === subRoot;
 
   // 根路径不跳转到面板入口（否则会把面板路径 / UUID 告诉任何访问者）
   if (segs[0] === '') {
