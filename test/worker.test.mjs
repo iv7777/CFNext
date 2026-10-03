@@ -54,7 +54,7 @@ const NODE_LISTS = new Map();
 const fixedNodes = (lines, extra = {}) => {
   const url = 'https://nodes.test/' + createHash('md5').update(lines).digest('hex') + '.txt';
   NODE_LISTS.set(url, lines);
-  return { src: { prefDomain: false }, ipsrc: { hostmonit: false, uouin: false, api1: true, api1Url: url }, filter: { ipType: ['IPv4'] }, ...extra };
+  return { src: { prefDomain: false }, ipsrc: { hostmonit: false, uouin: false, api1: true, api1Url: url }, filter: { ipType: ['IPv4'] }, enableXhttp: false, ...extra };
 };
 const nodesFetch = (u) => NODE_LISTS.has(u) ? new Response(NODE_LISTS.get(u)) : new Response('Not Found', { status: 404 });
 
@@ -64,12 +64,12 @@ test('GET /api/config 返回字段表默认值（与旧 DEFAULT_CONFIG 一致）
   const r = await (await call(env, `/${UUID}/api/config`, { cookie })).json();
   assert.equal(r.ok, true);
   const d = r.data;
-  // 旧 DEFAULT_CONFIG 的取值（filter.region 由 'all' 改为等价的 ['all']，src 为面板保存的地址来源默认值）
+  // 默认值（filter.region 为 ['all']，src 为面板保存的地址来源默认值）；XHTTP 默认开启，IP 类型默认只有 IPv4
   const legacy = {
-    host: '', enableVless: true, enableTrojan: false, trojanPassword: '', enableXhttp: false,
+    host: '', enableVless: true, enableTrojan: false, trojanPassword: '', enableXhttp: true,
     alpn: '', ech: false, echHost: 'cloudflare-ech.com', echDns: '', tlsOnly: true,
     proxyIP: '', outboundProxy: '', outboundMode: '',
-    filter: { region: ['all'], ipType: ['IPv4', 'IPv6'], isp: ['移动', '联通', '电信'] },
+    filter: { region: ['all'], ipType: ['IPv4'], isp: ['移动', '联通', '电信'] },
     src: { native: false, prefDomain: true, prefIp: true },
   };
   for (const [k, v] of Object.entries(legacy)) assert.deepEqual(d[k], v, k);
@@ -224,6 +224,13 @@ test('登录会话：使用面板时顺延 24 小时（10 分钟内不重复签�
     const out = await call(env, `/${UUID}/api/logout`, { method: 'POST', cookie });
     assert.match(out.headers.get('Set-Cookie'), /cfnext_auth=; .*Max-Age=0/);
   } finally { Date.now = realNow; }
+});
+
+test('默认配置的订阅：含 XHTTP 节点（.X），不含 IPv6 地址', async () => {
+  const env = baseEnv({ K: kv({ config: fixedNodes('104.16.9.1:443#a\n[2606:4700::1]:443#v6', { enableXhttp: undefined, filter: undefined }) }) });
+  const links = await withFetch(nodesFetch, async () => (await (await call(env, `/${UUID}/sub`, { ua: 'v2rayN/7.0' })).text()).split('\n').filter(Boolean));
+  assert.deepEqual(links.map(nameOf), ['a', 'a.X']);
+  assert.ok(/type=xhttp/.test(links[1]));
 });
 
 test('环境变量锁定的字段在面板只读、保存时忽略（问题 3）', async () => {
@@ -384,7 +391,7 @@ test('默认模式（IPv4+IPv6）子请求数不超过免费版 50 个上限，D
 });
 
 test('HostMonit 优选改为调用数据接口：按运营商命名、只保留 CF 段并去重；运营商筛选保留通用节点', async () => {
-  const env = baseEnv({ K: kv({ config: { filter: { ipType: ['IPv4'], isp: ['移动'] } } }) });
+  const env = baseEnv({ K: kv({ config: { enableXhttp: false, filter: { ipType: ['IPv4'], isp: ['移动'] } } }) });
   const offline = globalThis.fetch;
   const calls = [];
   globalThis.fetch = async (url, opts = {}) => {
@@ -434,7 +441,7 @@ test('uouin 来源：签名与文档一致，按线路命名、只保留 CF 段�
   const handler = (url) => url.startsWith('https://api.uouin.com/') ? new Response(JSON.stringify(uouinData)) : notFound();
   // 默认开启
   await withFetch(handler, async (calls) => {
-    const links = await subLinks(baseEnv());
+    const links = await subLinks(baseEnv({ K: kv({ config: { enableXhttp: false, filter: { ipType: ['IPv4', 'IPv6'] } } }) }));
     const u = new URL(calls.find(x => x.includes('uouin')));
     assert.equal(u.searchParams.get('key'), md5(md5('DdlTxtN0sUOu') + '70cloudflareapikey' + u.searchParams.get('time')));
     assert.match(u.searchParams.get('time'), /^\d{13}$/);
@@ -448,7 +455,7 @@ test('uouin 来源：签名与文档一致，按线路命名、只保留 CF 段�
   });
   // 关闭：不请求 uouin，也不下发其（已缓存的）节点
   await withFetch(handler, async (calls) => {
-    const links = await subLinks(baseEnv({ K: kv({ config: { ipsrc: { uouin: false } } }) }));
+    const links = await subLinks(baseEnv({ K: kv({ config: { enableXhttp: false, ipsrc: { uouin: false } } }) }));
     assert.equal(calls.filter(u => u.includes('uouin')).length, 0);
     assert.ok(!links.some(l => /-U\d+$/.test(nameOf(l))));
   });
@@ -459,10 +466,10 @@ test('自定义优选 API 1/2：开关控制、只保留 CF 段；开启但未�
     ? new Response('104.16.5.5:443#自有-A\n104.16.5.6\n8.8.8.8:443#外部')
     : notFound();
   await withFetch(handler, async (calls) => {
-    const off = await subLinks(baseEnv({ K: kv({ config: { filter: { ipType: ['IPv4'] }, ipsrc: { api1Url: 'https://mine.example.com/ips.txt' } } }) }));
+    const off = await subLinks(baseEnv({ K: kv({ config: { enableXhttp: false, filter: { ipType: ['IPv4'] }, ipsrc: { api1Url: 'https://mine.example.com/ips.txt' } } }) }));
     assert.ok(!off.some(l => hostOf(l) === '104.16.5.5'), '开关关闭时不使用');
     assert.equal(calls.filter(u => u.includes('mine.example.com')).length, 0);
-    const on = await subLinks(baseEnv({ K: kv({ config: { filter: { ipType: ['IPv4'] }, ipsrc: { api2: true, api2Url: 'https://mine.example.com/ips.txt' } } }) }));
+    const on = await subLinks(baseEnv({ K: kv({ config: { enableXhttp: false, filter: { ipType: ['IPv4'] }, ipsrc: { api2: true, api2Url: 'https://mine.example.com/ips.txt' } } }) }));
     const byHost = Object.fromEntries(on.map(l => [hostOf(l), nameOf(l)]));
     assert.equal(byHost['104.16.5.5'], '自有-A');
     assert.ok('104.16.5.6' in byHost);
@@ -555,16 +562,16 @@ test('分线路来源：某条线路的 IP 全部与其它线路重复时，该�
 
 test('不再内置静态 IP 池；所有来源都没有产出时用官方域名兜底，订阅不为空', async () => {
   // 默认模式：在线来源关闭 / 离线（前面的测试已写入 HostMonit / uouin 缓存，这里显式关闭）、优选域名关闭 → 官方域名兜底
-  const a = await subLinks(baseEnv({ K: kv({ config: { src: { prefDomain: false }, ipsrc: { hostmonit: false, uouin: false } } }) }));
+  const a = await subLinks(baseEnv({ K: kv({ config: { enableXhttp: false, src: { prefDomain: false }, ipsrc: { hostmonit: false, uouin: false } } }) }));
   assert.deepEqual(a.map(hostOf), ['cloudflare.com', 'www.cloudflare.com', 'speed.cloudflare.com']);
   // 默认模式（优选域名开启、在线来源离线）：只有优选域名节点，没有任何 IP 节点
-  const b = await subLinks(baseEnv({ K: kv({ config: { filter: { ipType: ['IPv4'] }, ipsrc: { hostmonit: false, uouin: false } } }) }));
+  const b = await subLinks(baseEnv({ K: kv({ config: { enableXhttp: false, filter: { ipType: ['IPv4'] }, ipsrc: { hostmonit: false, uouin: false } } }) }));
   assert.ok(b.length > 0 && b.every(l => !/^\d+\.\d+\.\d+\.\d+$/.test(hostOf(l))), '无内置静态 IP');
 });
 
 test('节点命名：优选域名节点为「优选域名-NN」，优选 IP 来源中不带名称的为「优选IP-NN」，两者编号各自独立、不再互相撞名', async () => {
   const url = 'https://names.example.com/list.txt';
-  const config = { filter: { ipType: ['IPv4'] }, prefDomains: 'a.example.com\nb.example.com',
+  const config = { enableXhttp: false, filter: { ipType: ['IPv4'] }, prefDomains: 'a.example.com\nb.example.com',
     ipsrc: { hostmonit: false, uouin: false, api1: true, api1Url: url } };
   const names = await withFetch((u) => u === url ? new Response('104.16.1.1\n104.16.1.2') : notFound(), async () => {
     const t = await (await call(baseEnv({ K: kv({ config }) }), `/${UUID}/sub`, { ua: 'v2rayN/7.0' })).text();
@@ -576,7 +583,7 @@ test('节点命名：优选域名节点为「优选域名-NN」，优选 IP 来�
 test('仅 TLS 端口：默认开启；关闭后 443 节点追加 80 明文节点，自定义域名同样生效；ECH 强制仅 TLS', async () => {
   const url = 'https://ports.example.com/list.txt';
   const handler = (u) => u === url ? new Response('104.16.1.1\n104.16.1.2:8080#p8080\n104.16.1.3:8443#p8443') : notFound();
-  const cfg = (extra) => ({ filter: { ipType: ['IPv4'] }, src: { prefDomain: false },
+  const cfg = (extra) => ({ enableXhttp: false, filter: { ipType: ['IPv4'] }, src: { prefDomain: false },
     ipsrc: { hostmonit: false, uouin: false, api1: true, api1Url: url }, ...extra });
   const portsOf = async (config) => withFetch(   // node.example.com：自定义域名
   handler, async () => {
@@ -1543,7 +1550,7 @@ test('优选域名校验：只接受纯主机名；规范化（小写、去重�
 });
 
 test('优选域名：填写后整体替换内置列表（默认模式域名节点、IPv6 解析），留空用内置列表', async () => {
-  const base = { filter: { ipType: ['IPv4'] }, ipsrc: { hostmonit: false, uouin: false } };
+  const base = { enableXhttp: false, filter: { ipType: ['IPv4'] }, ipsrc: { hostmonit: false, uouin: false } };
   // 默认模式：域名节点的 server 就是配置的域名
   const own = await domainsOfSub({ ...base, prefDomains: 'one.example.com\ntwo.example.org' });
   assert.deepEqual(own.filter(h => /example\.(com|org)$/.test(h)), ['one.example.com', 'two.example.org']);
@@ -1660,7 +1667,7 @@ test('优选域名测试接口：解析输入框中尚未保存的域名，标�
 });
 
 test('自定义订阅 / 随机优选已移除：旧 KV 中的相关字段与 YX 环境变量被忽略，订阅按默认来源生成，面板不再有对应控件', async () => {
-  const legacy = { filter: { ipType: ['IPv4'] }, ipsrc: { hostmonit: false, uouin: false },
+  const legacy = { enableXhttp: false, filter: { ipType: ['IPv4'] }, ipsrc: { hostmonit: false, uouin: false },
     optimizer: { subMode: 'custom', subIncludeDefault: true, subRandomCount: 5 }, preferredDomains: 'my.custom.example\n104.16.0.9:443#MINE',
     preferredIPs: [{ ip: '104.16.0.10', port: 443, name: 'MINE2' }] };
   const env = baseEnv({ YX: '104.16.0.11:443#ENV', K: kv({ config: legacy }) });
@@ -1678,7 +1685,7 @@ test('自定义订阅 / 随机优选已移除：旧 KV 中的相关字段与 YX 
 });
 
 test('节点测活已移除：旧 KV 的 probeAlive 与 PROBE_ALIVE 环境变量被忽略，订阅不再对优选域名做任何预检解析，面板无对应开关', async () => {
-  const env = baseEnv({ PROBE_ALIVE: '1', K: kv({ config: { probeAlive: true, filter: { ipType: ['IPv4'] }, ipsrc: { hostmonit: false, uouin: false } } }) });
+  const env = baseEnv({ PROBE_ALIVE: '1', K: kv({ config: { enableXhttp: false, probeAlive: true, filter: { ipType: ['IPv4'] }, ipsrc: { hostmonit: false, uouin: false } } }) });
   const calls = [];
   const links = await withFetch((u) => { calls.push(u); return nodesFetch(u); }, async () =>
     (await (await call(env, `/${UUID}/sub/plain`, { ua: 'x' })).text()).split('\n').filter(Boolean));
@@ -1735,8 +1742,8 @@ test('XHTTP：Xray 风格请求（路径带结尾 / 与 x_padding 查询串）�
   await until(() => log.some(s => s.written.length));
   assert.equal(log[0].hostname, 'slash.example');
   assert.deepEqual([...log[0].written[0]], TLS_HELLO);
-  // 未开启 XHTTP 时不接受代理请求
-  const off = await xhttpPost(baseEnv(), `/${UUID}/`, vlessReq('slash.example', 443, TLS_HELLO));
+  // 关闭 XHTTP 时不接受代理请求
+  const off = await xhttpPost(baseEnv({ K: kv({ config: { enableXhttp: false } }) }), `/${UUID}/`, vlessReq('slash.example', 443, TLS_HELLO));
   assert.notEqual(off.headers.get('content-type'), 'application/octet-stream');
 });
 

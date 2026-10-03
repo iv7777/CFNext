@@ -18,7 +18,7 @@
 // ============================================================================
 import { connect } from 'cloudflare:sockets';
 
-const VERSION = '2.1.8';
+const VERSION = '2.1.9';
 
 // 更新检测：点击版本号后拉取仓库代码比对版本号；有新版本时返回最新代码供面板复制
 // 版本基准为仓库 main 分支根目录的 CFNext.js（由 build.mjs 生成的部署文件）
@@ -517,7 +517,7 @@ const CONFIG_SCHEMA = [
   { key: 'enableVless', type: 'bool', def: true, el: 'en-vless', label: 'VLESS 协议' },
   { key: 'enableTrojan', type: 'bool', def: false, el: 'en-trojan', label: 'Trojan 协议' },
   { key: 'trojanPassword', type: 'string', def: '', el: 'tp-pass', label: 'Trojan 密码', trim: false, maxLen: 256, noExport: true },   // noExport：面板「导出配置」不含此项（与管理密码一样不落进备份文件）
-  { key: 'enableXhttp', type: 'bool', def: false, el: 'en-xhttp', label: 'XHTTP 协议' },
+  { key: 'enableXhttp', type: 'bool', def: true, el: 'en-xhttp', label: 'XHTTP 协议' },
   // ---- 传输参数 ----
   { key: 'alpn', type: 'string', def: '', el: 'alpn', label: 'ALPN', maxLen: 64,
     pattern: '^[A-Za-z0-9./-]+(\\s*,\\s*[A-Za-z0-9./-]+)*$', hint: '以逗号分隔，如 h2,http/1.1' },
@@ -548,7 +548,7 @@ const CONFIG_SCHEMA = [
     exclusive: 'all', emptyValue: ['all'],
     els: { all: 'fl-region-all', HK: 'fl-region-HK', TW: 'fl-region-TW', US: 'fl-region-US', SG: 'fl-region-SG', JP: 'fl-region-JP', KR: 'fl-region-KR', DE: 'fl-region-DE' } },
   // 勾选的 IP 类型集合（全选或空 = 不过滤）
-  { key: 'filter.ipType', type: 'list', def: ['IPv4', 'IPv6'], label: 'IP 类型', options: ['IPv4', 'IPv6'],
+  { key: 'filter.ipType', type: 'list', def: ['IPv4'], label: 'IP 类型', options: ['IPv4', 'IPv6'],
     els: { IPv4: 'fl-ip4', IPv6: 'fl-ip6' } },
   // 勾选的运营商集合（全选 = 不过滤）
   { key: 'filter.isp', type: 'list', def: ['移动', '联通', '电信'], label: '运营商偏好', options: ['移动', '联通', '电信'],
@@ -3837,7 +3837,7 @@ pre.code{background:var(--bg2);border:1px solid var(--border);border-radius:8px;
             <div class="filter-group-title">IP 类型</div>
             <div class="pills">
               <label class="spill"><input type="checkbox" id="fl-ip4" checked><span>IPv4</span></label>
-              <label class="spill"><input type="checkbox" id="fl-ip6" checked><span>IPv6</span></label>
+              <label class="spill"><input type="checkbox" id="fl-ip6"><span>IPv6</span></label>
             </div>
           </div>
           <div class="filter-group">
@@ -3874,7 +3874,7 @@ pre.code{background:var(--bg2);border:1px solid var(--border);border-radius:8px;
           <h3><span class="tick"></span>协议开关</h3>
           <div class="proto-row"><label class="switch"><input type="checkbox" id="en-vless" checked><span class="sl"></span></label><span>VLESS 协议（默认开启）</span></div>
           <div class="proto-row"><label class="switch"><input type="checkbox" id="en-trojan"><span class="sl"></span></label><span>Trojan 协议</span></div>
-          <div class="proto-row"><label class="switch"><input type="checkbox" id="en-xhttp"><span class="sl"></span></label><span>XHTTP 协议（需 Mihomo / Xray 内核，Sing-box、Surge 等不支持；须绑定自定义域名并开启gRPC）</span></div>
+          <div class="proto-row"><label class="switch"><input type="checkbox" id="en-xhttp" checked><span class="sl"></span></label><span>XHTTP 协议（需 Mihomo / Xray 内核，Sing-box、Surge 等不支持；须绑定自定义域名并开启gRPC）</span></div>
           <div class="field" style="margin-top:12px"><label>Trojan 密码（留空使用 UUID）</label><input type="text" id="tp-pass" placeholder="Trojan 密码" autocomplete="off"></div>
         </div>
         <div class="card">

@@ -6,6 +6,16 @@
 
 ---
 
+# 更新日志 _V2.1.9
+
+### ⚙️ 默认值调整
+
+- **XHTTP 协议默认开启**，**IP 类型默认只有 IPv4**（IPv6 默认不勾选）
+- 只影响从未在面板保存过配置的部署（以及未绑定 KV 的部署）：面板保存时会把每一项的当前取值写入 KV，已保存过的部署保持原有设置不变
+- 新增测试：默认配置的订阅含 XHTTP 节点、不含 IPv6 地址（测试 86 → 87 项）
+
+---
+
 # 更新日志 _V2.1.8
 
 ### ✨ 改进
@@ -533,7 +543,7 @@
 | 项 | 内容 |
 |---|---|
 | 项目名称 | **CFNext · Cloudflare 代理订阅面板** |
-| 当前版本 | v2.1.8 |
+| 当前版本 | v2.1.9 |
 | 运行环境 | Cloudflare Workers / Pages |
 | 部署形态 | 单文件 Worker/Pages（`CFNext.js`，由 `src/` 构建生成，见「九、开发与构建」） |
 | 数据存储 | Cloudflare KV（绑定变量 **K**）；未绑定时面板无法保存，仅环境变量生效 |
@@ -635,12 +645,12 @@
 |---|---|
 | `uuid` / `path` / `admin` / `host` | 基础配置（同环境变量，面板可视化编辑；`path` 留空跟随 UUID） |
 | `subUrl` | 自定义订阅路径：`/<别名>/sub` 输出订阅（别名下不开放面板与管理接口）；留空为 `/<UUID>/sub`。面板路径下的 `/sub` 始终可用 |
-| `enableVless` / `enableTrojan` / `enableXhttp` | 协议开关（默认 VLESS 开、其余关） |
+| `enableVless` / `enableTrojan` / `enableXhttp` | 协议开关（默认 VLESS 与 XHTTP 开、Trojan 关） |
 | `trojanPassword` | Trojan 密码 |
 | `alpn` / `tlsOnly` | ALPN 协商 / 仅 TLS 端口节点（默认开启；关闭后 443 节点追加 80 明文节点，来源自带的明文端口原样下发） |
 | `ech` / `echHost` / `echDns` | ECH 开关 / 自定义 ECH 域名 / ECH DoH |
 | `filter.region` | 地区（多选数组）：`['all']` 或 HK / TW / US / SG / JP / KR / DE 的组合 |
-| `filter.ipType` | IPv4 / IPv6 |
+| `filter.ipType` | IPv4 / IPv6（默认只有 IPv4） |
 | `filter.isp` | 移动 / 联通 / 电信 |
 | `src.native` / `src.prefDomain` / `src.prefIp` | 地址来源：原生地址 / 优选域名 / 优选 IP |
 | `ipsrc.hostmonit` / `ipsrc.uouin` / `ipsrc.api1` / `ipsrc.api1Url` / `ipsrc.api2` / `ipsrc.api2Url` | 优选 IP 来源开关与两个自定义优选 API 地址（默认：HostMonit 开、uouin 开、自定义 API 关；开启 API 但未填地址时保存会报错） |

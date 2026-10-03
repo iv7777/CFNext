@@ -47,7 +47,7 @@ const CONFIG_SCHEMA = [
   { key: 'enableVless', type: 'bool', def: true, el: 'en-vless', label: 'VLESS 协议' },
   { key: 'enableTrojan', type: 'bool', def: false, el: 'en-trojan', label: 'Trojan 协议' },
   { key: 'trojanPassword', type: 'string', def: '', el: 'tp-pass', label: 'Trojan 密码', trim: false, maxLen: 256, noExport: true },   // noExport：面板「导出配置」不含此项（与管理密码一样不落进备份文件）
-  { key: 'enableXhttp', type: 'bool', def: false, el: 'en-xhttp', label: 'XHTTP 协议' },
+  { key: 'enableXhttp', type: 'bool', def: true, el: 'en-xhttp', label: 'XHTTP 协议' },
   // ---- 传输参数 ----
   { key: 'alpn', type: 'string', def: '', el: 'alpn', label: 'ALPN', maxLen: 64,
     pattern: '^[A-Za-z0-9./-]+(\\s*,\\s*[A-Za-z0-9./-]+)*$', hint: '以逗号分隔，如 h2,http/1.1' },
@@ -78,7 +78,7 @@ const CONFIG_SCHEMA = [
     exclusive: 'all', emptyValue: ['all'],
     els: { all: 'fl-region-all', HK: 'fl-region-HK', TW: 'fl-region-TW', US: 'fl-region-US', SG: 'fl-region-SG', JP: 'fl-region-JP', KR: 'fl-region-KR', DE: 'fl-region-DE' } },
   // 勾选的 IP 类型集合（全选或空 = 不过滤）
-  { key: 'filter.ipType', type: 'list', def: ['IPv4', 'IPv6'], label: 'IP 类型', options: ['IPv4', 'IPv6'],
+  { key: 'filter.ipType', type: 'list', def: ['IPv4'], label: 'IP 类型', options: ['IPv4', 'IPv6'],
     els: { IPv4: 'fl-ip4', IPv6: 'fl-ip6' } },
   // 勾选的运营商集合（全选 = 不过滤）
   { key: 'filter.isp', type: 'list', def: ['移动', '联通', '电信'], label: '运营商偏好', options: ['移动', '联通', '电信'],
