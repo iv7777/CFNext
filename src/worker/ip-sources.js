@@ -19,7 +19,7 @@ function decodeUtf8OrGbk(buf) {
 // 调用其数据接口（key 为社区项目通用的公开 key，接口失效时由其它来源兜底）。
 // 节点名带运营商（如「移动-01」），面板「运营商偏好」筛选据此生效。失败时沿用上次成功结果，都没有则返回 null
 // 机房内共享缓存（Cache API）：第三方优选来源的结果放进 caches.default，同一机房的所有实例共用，10 分钟内只请求一次（内存缓存则每个新实例 / 冷启动都要重新请求）。Cache API 不可用（本地测试 / 部分域名下 put 不生效）时静默退回内存缓存
-const SHARED_CACHE_BASE = 'https://cfnext-cache.invalid/';
+const SHARED_CACHE_BASE = 'https://hopline-cache.invalid/';
 async function sharedCacheGet(key) {
   try {
     if (typeof caches === 'undefined' || !caches.default) return null;

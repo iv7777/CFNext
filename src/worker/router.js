@@ -26,6 +26,7 @@ async function hmacHex(key, msg) {
 // 迭代次数写在摘要里，日后可调高而不影响已保存的密码；取 1 万次是为了控制免费版 10ms CPU 限制下的登录开销。
 // 由环境变量 ADMIN 提供的密码仍是明文（环境变量本身即密钥存储），按常量时间比较。
 // KV 中若存有明文密码同样可用，下次在面板保存任意配置时自动改存摘要。
+// 前缀沿用项目旧名 CFNext：它是 KV 中已保存摘要的格式标识，改名会使已部署实例的密码失效
 const ADMIN_HASH_PREFIX = 'cfnext-pbkdf2$';
 const ADMIN_HASH_ITER = 10000;
 const toHex = (u8) => Array.from(u8).map(b => b.toString(16).padStart(2, '0')).join('');
@@ -57,7 +58,7 @@ const AUTH_REFRESH_MIN_MS = 10 * 60 * 1000;   // 新有效期至少比当前晚 
 // 当前生效的管理用户名（KV 中为空等异常情况回落默认 admin）
 function adminUserOf(cfg) { return String(cfg.adminUser || '') || 'admin'; }
 // 会话签名密钥含用户名：修改用户名与修改密码一样，使其它浏览器的登录态失效
-function authKey(cfg) { return 'cfnext-auth|' + String(cfg.admin) + '|' + String(cfg.uuid) + '|' + adminUserOf(cfg); }
+function authKey(cfg) { return 'hopline-auth|' + String(cfg.admin) + '|' + String(cfg.uuid) + '|' + adminUserOf(cfg); }
 // iat：登录时间（续期时沿用，保证 7 天上限从首次登录算起）；返回 { token, exp }
 async function makeAuthToken(cfg, iat) {
   const now = Date.now();
@@ -70,7 +71,7 @@ async function makeAuthToken(cfg, iat) {
 async function requireAuth(request, cfg, state) {
   if (!cfg.admin) return false;
   const cookies = request.headers.get('Cookie') || '';
-  const m = cookies.match(/(?:^|;\s*)cfnext_auth=([^;]+)/);
+  const m = cookies.match(/(?:^|;\s*)hopline_auth=([^;]+)/);
   if (!m) return false;
   const parts = m[1].split('.');
   if (parts.length !== 3 || !/^\d+$/.test(parts[0]) || !/^\d+$/.test(parts[1]) || !parts[2]) return false;
@@ -130,7 +131,7 @@ function safeNext(next, panelPath) {
 // Cookie 有效期与令牌的过期时间一致
 function authCookie(token, exp) {
   const maxAge = Math.max(0, Math.floor((exp - Date.now()) / 1000));
-  return `cfnext_auth=${token}; Path=/; Max-Age=${maxAge}; HttpOnly; Secure; SameSite=Lax`;
+  return `hopline_auth=${token}; Path=/; Max-Age=${maxAge}; HttpOnly; Secure; SameSite=Lax`;
 }
 // 返回给面板的配置：只含字段表登记的配置项，不下发管理密码明文；附带面板需要的派生信息
 function publicConfig(cfg, env) {
@@ -164,9 +165,9 @@ let PANEL_PAGE = null;
 function panelPage() {
   if (!PANEL_PAGE) {
     PANEL_PAGE = PANEL_HTML
-      .replace('/*@CFNEXT_SCHEMA@*/null', () => JSON.stringify(clientSchema()).replace(/</g, '\\u003c'))
-      .replace('/*@CFNEXT_CHECK@*/null', () => '(' + checkFieldValue.toString() + ')')
-      .replace('/*@CFNEXT_HTTP_PORTS@*/null', () => JSON.stringify([...HTTP_PORTS]));
+      .replace('/*@HOPLINE_SCHEMA@*/null', () => JSON.stringify(clientSchema()).replace(/</g, '\\u003c'))
+      .replace('/*@HOPLINE_CHECK@*/null', () => '(' + checkFieldValue.toString() + ')')
+      .replace('/*@HOPLINE_HTTP_PORTS@*/null', () => JSON.stringify([...HTTP_PORTS]));
   }
   return PANEL_PAGE;
 }
@@ -178,7 +179,7 @@ function setupProblems(env, cfg) {
   if (!cfg.path) {
     lines.push(cfg._pathError
       ? '环境变量 PATH 的值不正确：' + cfg._pathError + '。'
-      : 'CFNext 尚未完成配置：请在 Worker 环境变量中设置 PATH（面板、订阅与节点共用的访问路径，如 mypanel）和 ADMIN（管理密码），然后重新访问。从旧版升级时：旧版的默认路径就是 UUID，把 PATH 设为原来的 UUID（或之前用 D 设置的路径）即可保持节点与订阅地址不变。');
+      : 'Hopline 尚未完成配置：请在 Worker 环境变量中设置 PATH（面板、订阅与节点共用的访问路径，如 mypanel）和 ADMIN（管理密码），然后重新访问。从旧版升级时：旧版的默认路径就是 UUID，把 PATH 设为原来的 UUID（或之前用 D 设置的路径）即可保持节点与订阅地址不变。');
   }
   if (cfg._uuidUnsaved) lines.push('未绑定 KV 命名空间（绑定变量名 CONFIG_KV）时，必须设置环境变量 UUID（节点用户 ID）；绑定 KV 后可留空，系统会自动生成并保存。');
   return lines.join('\n');
@@ -274,7 +275,7 @@ async function handleRequest(request, env, state) {
     const fmt = segs.length >= 3 ? segs[2] : '';
     try {
       const sub = await serveSubscription(request, env, cfg, fmt);
-      return new Response(sub.body, { status: 200, headers: { 'Content-Type': sub.type + '; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Disposition': 'attachment; filename="CFNext"; filename*=utf-8\'\'CFNext' } });
+      return new Response(sub.body, { status: 200, headers: { 'Content-Type': sub.type + '; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Disposition': 'attachment; filename="Hopline"; filename*=utf-8\'\'Hopline' } });
     } catch (e) {
       return new Response('订阅生成失败: ' + (e && e.message || e), { status: 500, headers: { 'Content-Type': 'text/plain; charset=utf-8' } });
     }
@@ -342,7 +343,7 @@ async function handleRequest(request, env, state) {
       if (request.method !== 'POST') return json({ ok: false, msg: '仅支持 POST' }, 405);
       // 会话令牌是无状态的签名令牌，无法在服务端单独吊销：这里清除浏览器中的 Cookie。
       // 要让已签发的令牌全部失效，修改管理密码、管理用户名或 UUID 即可（签名密钥随之变化）
-      return json({ ok: true, msg: '已退出登录' }, 200, { 'Set-Cookie': 'cfnext_auth=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax' });
+      return json({ ok: true, msg: '已退出登录' }, 200, { 'Set-Cookie': 'hopline_auth=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax' });
     }
 
     if (apiName === 'reset') {

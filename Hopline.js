@@ -1,6 +1,6 @@
 // ⚠ 本文件由 build.mjs 自动生成：请修改 src/ 下的源文件后运行 `node build.mjs`，不要直接编辑本文件。
 // ============================================================================
-//  CFNext —— Cloudflare 代理订阅面板 · 全新独立编写
+//  Hopline —— Cloudflare 代理订阅面板 · 全新独立编写
 //  ----------------------------------------------------------------------------
 //  环境变量（必填 2 项，其余可选；旧版短变量名 U / D / S / K / ECH / TROJAN 仍然兼容）：
 //    PATH            【必填】面板、订阅与节点（WebSocket / XHTTP）共用的访问路径，如 mypanel（旧名 D）
@@ -18,12 +18,12 @@
 // ============================================================================
 import { connect } from 'cloudflare:sockets';
 
-const VERSION = '2.2.0';
+const VERSION = '2.2.1';
 
 // 更新检测：点击版本号后拉取仓库代码比对版本号；有新版本时返回最新代码供面板复制
-// 版本基准为仓库 main 分支根目录的 CFNext.js（由 build.mjs 生成的部署文件）
-const UPDATE_REPO = 'iv7777/CFNext';
-const UPDATE_FILE = 'CFNext.js';
+// 版本基准为仓库 main 分支根目录的 Hopline.js（由 build.mjs 生成的部署文件）
+const UPDATE_REPO = 'iv7777/Hopline';
+const UPDATE_FILE = 'Hopline.js';
 let UPDATE_CACHE = null; // { t, r } 60 秒缓存
 
 function parseVer(v){
@@ -37,7 +37,7 @@ function cmpVer(a, b){
   return 0;
 }
 function extractVersion(txt){
-  // 版本号与 CFNext 源码同一位置：const VERSION = 'x.y.z ...'
+  // 版本号与 Hopline 源码同一位置：const VERSION = 'x.y.z ...'
   const m = txt.match(/const\s+VERSION\s*=\s*['"]([^'"]+)['"]/);
   return m ? m[1] : null;
 }
@@ -47,7 +47,7 @@ function updateFileUrl(name){
 // 拉取仓库文件：返回 { txt, version }，失败返回 { error }
 async function fetchRepoFile(name){
   try {
-    const res = await fetch(updateFileUrl(name), { headers: { 'User-Agent': 'Mozilla/5.0 (CFNext)' } });
+    const res = await fetch(updateFileUrl(name), { headers: { 'User-Agent': 'Mozilla/5.0 (Hopline)' } });
     if (!res.ok) return { error: name + ' HTTP ' + res.status };
     const txt = await res.text();
     return { txt, version: extractVersion(txt) };
@@ -56,7 +56,7 @@ async function fetchRepoFile(name){
 async function checkUpdate(){
   const now = Date.now();
   if (UPDATE_CACHE && now - UPDATE_CACHE.t < 60000) return UPDATE_CACHE.r;
-  // 拉取仓库 CFNext.js：比对版本号，有更新时直接把这次拉取的内容作为最新代码返回
+  // 拉取仓库 Hopline.js：比对版本号，有更新时直接把这次拉取的内容作为最新代码返回
   const r = await fetchRepoFile(UPDATE_FILE);
   if (!r.version) return { current: VERSION, latest: null, hasUpdate: false, code: '', error: r.error || '未在仓库中找到版本信息' };
   UPDATE_CACHE = { t: now, r: { current: VERSION, latest: r.version, hasUpdate: cmpVer(r.version, VERSION) > 0, code: r.txt, checkedAt: now } };
@@ -77,9 +77,9 @@ FilterTW: &FilterTW '^(?=.*(?i)(台|🇹🇼|TW|tai|TPE|TSA|KHH))(?!.*5x).*$'
 
 # ==================== 监听器 ====================
 listeners:
-  # Shadowsocks监听器 - 远程连接家庭网络。密码由 CFNext 按 UUID 为本部署派生（每个部署不同），不再使用公开的默认密码；
+  # Shadowsocks监听器 - 远程连接家庭网络。密码由 Hopline 按 UUID 为本部署派生（每个部署不同），不再使用公开的默认密码；
   # 如需对外开放请自行修改端口与密码
-  - {name: SS-IN,  type: shadowsocks, listen: '::', port: 10000, udp: true, password: "__CFNEXT_SS_PASSWORD__", cipher: aes-256-gcm}
+  - {name: SS-IN,  type: shadowsocks, listen: '::', port: 10000, udp: true, password: "__HOPLINE_SS_PASSWORD__", cipher: aes-256-gcm}
   # Mixed监听器 - 分地区专用端口 玩法：本地浏览器插件或手机APP配置代理，实现分地区访问
   - {name: MIXED-SG, type: mixed, port: 50000, proxy: 新加坡节点}
   - {name: MIXED-US, type: mixed, port: 50001, proxy: 美国节点}
@@ -105,9 +105,9 @@ find-process-mode: 'always'
 keep-alive-interval: 15
 keep-alive-idle: 600
 
-# 认证配置：密码由 CFNext 按 UUID 为本部署派生（每个部署不同），不再使用公开的默认凭据
+# 认证配置：密码由 Hopline 按 UUID 为本部署派生（每个部署不同），不再使用公开的默认凭据
 authentication:
-  - "mihomo:__CFNEXT_AUTH_PASSWORD__"
+  - "mihomo:__HOPLINE_AUTH_PASSWORD__"
 skip-auth-prefixes:
   - 192.168.1.0/24
   - 192.168.31.0/24
@@ -123,7 +123,7 @@ external-ui-url: https://github.com/Zephyruso/zashboard/releases/latest/download
 external-ui-name: zashboard
 external-ui: ui
 external-controller: 127.0.0.1:9090
-secret: "__CFNEXT_API_SECRET__"    # 由 CFNext 按 UUID 为本部署派生，可自行修改
+secret: "__HOPLINE_API_SECRET__"    # 由 Hopline 按 UUID 为本部署派生，可自行修改
 # 允许跨域访问的面板来源（不再使用 "*"：任意网页都不能借浏览器访问本机控制接口）。使用其它在线面板时在此追加其域名
 external-controller-cors:
   allow-origins:
@@ -2402,7 +2402,7 @@ function decodeUtf8OrGbk(buf) {
 // 调用其数据接口（key 为社区项目通用的公开 key，接口失效时由其它来源兜底）。
 // 节点名带运营商（如「移动-01」），面板「运营商偏好」筛选据此生效。失败时沿用上次成功结果，都没有则返回 null
 // 机房内共享缓存（Cache API）：第三方优选来源的结果放进 caches.default，同一机房的所有实例共用，10 分钟内只请求一次（内存缓存则每个新实例 / 冷启动都要重新请求）。Cache API 不可用（本地测试 / 部分域名下 put 不生效）时静默退回内存缓存
-const SHARED_CACHE_BASE = 'https://cfnext-cache.invalid/';
+const SHARED_CACHE_BASE = 'https://hopline-cache.invalid/';
 async function sharedCacheGet(key) {
   try {
     if (typeof caches === 'undefined' || !caches.default) return null;
@@ -3264,12 +3264,13 @@ function generateClash(cfg, nodes) {
   // 节点排序：443端口优先（非标准端口如8443在mihomo下HTTPS握手易被GFW干扰，放后面避免默认选中）
   proxies.sort((a, b) => (a.port === 443 ? 0 : 1) - (b.port === 443 ? 0 : 1));
   // 模板中的本地凭据按 UUID 派生（同一部署每次订阅结果稳定，不同部署互不相同），避免所有人共用公开的默认密码
+  // 派生前缀沿用项目旧名 CFNext：改名会改变已部署实例下发给客户端的本地密码
   const derive = (purpose) => sha224hex('cfnext-clash|' + purpose + '|' + cfg.uuid).slice(0, 20);
   const template = CLASH_TEMPLATE
-    .split('__CFNEXT_SS_PASSWORD__').join(derive('ss'))
-    .split('__CFNEXT_AUTH_PASSWORD__').join(derive('auth'))
-    .split('__CFNEXT_API_SECRET__').join(derive('api'));
-  const yaml = `# CFNext 订阅
+    .split('__HOPLINE_SS_PASSWORD__').join(derive('ss'))
+    .split('__HOPLINE_AUTH_PASSWORD__').join(derive('auth'))
+    .split('__HOPLINE_API_SECRET__').join(derive('api'));
+  const yaml = `# Hopline 订阅
 test-url: 'http://www.gstatic.com/generate_204'
 proxies:
 ${proxies.map(p => clashProxyYaml(p)).join('\n')}
@@ -3630,7 +3631,7 @@ const PANEL_HTML = String.raw`
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>CFNext · Cloudflare 代理订阅面板</title>
+<title>Hopline · Cloudflare 代理订阅面板</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect x='3' y='3' width='18' height='18' rx='5' fill='%232563eb'/%3E%3Cpath d='M8 15V9l8 6V9' stroke='%23ffffff' stroke-width='2' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
 <script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.js" integrity="sha384-8FWZA6BGMXhsfO+BLtrJK0We6gg5o1JyO8xQm6peWDEUs17ACA5ziE/NIAkl9z2k" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
 <style>
@@ -3868,7 +3869,7 @@ pre.code{background:var(--bg2);border:1px solid var(--border);border-radius:8px;
 <aside class="sidebar" id="sidebar">
   <div class="brand">
     <div class="mark"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12h4l3-7 4 14 3-7h2"/></svg></div>
-    <div class="bt"><b>CFNext</b><span>Cloudflare 代理订阅面板</span></div>
+    <div class="bt"><b>Hopline</b><span>Cloudflare 代理订阅面板</span></div>
   </div>
   <nav class="nav" id="nav"></nav>
   <div class="side-foot">
@@ -4139,7 +4140,7 @@ pre.code{background:var(--bg2);border:1px solid var(--border);border-radius:8px;
     </section>
 
     <!-- ===== 视图：关于 ===== -->
-    <section class="view" data-view="about" data-title="关于项目" data-sub="CFNext — Cloudflare 代理订阅面板（独立界面 + 独立实现）">
+    <section class="view" data-view="about" data-title="关于项目" data-sub="Hopline — Cloudflare 代理订阅面板（独立界面 + 独立实现）">
       <div class="card">
         <h3><span class="tick"></span>相关链接</h3>
         <p style="font-size:13px;color:var(--dim)">YouTube @数字派：<a href="https://www.youtube.com/@PAI_CN" target="_blank" rel="noopener">youtube.com/@PAI_CN</a></p>
@@ -4177,7 +4178,7 @@ pre.code{background:var(--bg2);border:1px solid var(--border);border-radius:8px;
             <tr><td>自定义优选 API 1 / 2、优选域名测试</td><td>你填写的地址 / 域名</td></tr>
             <tr><td>DoH 解析（优选域名、反代域名、UDP DNS）</td><td class="mono">cloudflare-dns.com / dns.google / dns.alidns.com / doh.pub</td></tr>
             <tr><td>内置地区反代（直连不通时使用）</td><td class="mono">proxyip.*.cmliussss.net</td></tr>
-            <tr><td>版本更新检测</td><td class="mono">raw.githubusercontent.com/iv7777/CFNext/...</td></tr>
+            <tr><td>版本更新检测</td><td class="mono">raw.githubusercontent.com/iv7777/Hopline/...</td></tr>
             <tr><td>面板二维码库（浏览器加载）</td><td class="mono">cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.js（SRI 校验）</td></tr>
             <tr><td>订阅内的规则集与图标（由客户端下载）</td><td class="mono">cdn.jsdelivr.net（MetaCubeX、blackmatrix7）/ github.com（666OS、DustinWin）/ raw.githubusercontent.com（AWAvenue）/ rule.kelee.one</td></tr>
           </tbody>
@@ -4439,8 +4440,8 @@ function renderAll(){
  * SCHEMA（字段表）与 sharedCheck（字段校验函数）由服务端下发页面时注入，与服务端保存接口使用同一份定义与校验代码。
  * 新增配置项：在 worker 的 CONFIG_SCHEMA 加一行，并在本页面放置 id 与该行 el 对应的控件即可，
  * 回填 / 收集 / 未保存标记 / 字段级错误提示 / 环境变量只读均自动生效。 */
-var SCHEMA = /*@CFNEXT_SCHEMA@*/null || [];
-var sharedCheck = /*@CFNEXT_CHECK@*/null;
+var SCHEMA = /*@HOPLINE_SCHEMA@*/null || [];
+var sharedCheck = /*@HOPLINE_CHECK@*/null;
 var SCHEMA_BY_KEY = {};
 SCHEMA.forEach(function(d){ SCHEMA_BY_KEY[d.key] = d; });
 function checkValue(def, v){
@@ -4671,7 +4672,7 @@ function exportConfig(){
     a.href = URL.createObjectURL(blob);
     var ts = new Date();
     var pad = function(n){ return String(n).padStart(2, '0'); };
-    a.download = 'cfnext-backup-' + ts.getFullYear() + pad(ts.getMonth()+1) + pad(ts.getDate()) + '-' + pad(ts.getHours()) + pad(ts.getMinutes()) + '.json';
+    a.download = 'hopline-backup-' + ts.getFullYear() + pad(ts.getMonth()+1) + pad(ts.getDate()) + '-' + pad(ts.getHours()) + pad(ts.getMinutes()) + '.json';
     document.body.appendChild(a); a.click(); document.body.removeChild(a);
     setTimeout(function(){ URL.revokeObjectURL(a.href); }, 1000);
     toast('配置已导出为 JSON', 'ok');
@@ -4773,14 +4774,14 @@ function showQRCode(url){
   } catch(e) { w.textContent = ''; w.appendChild(mkEl('div', 'hint', '二维码生成失败：' + e.message)); }
 }
 // 二维码内容随订阅格式（客户端）联动：
-// Clash/Mihomo、Stash → clash://install-config（FlyClash / Clash Verge / Stash 扫码装订阅，配置名取订阅响应头 filename=CFNext）
-// Sing-box → sing-box://import-remote-profile?url=...#CFNext（官方 scheme，# 后为配置文件名称）
+// Clash/Mihomo、Stash → clash://install-config（FlyClash / Clash Verge / Stash 扫码装订阅，配置名取订阅响应头 filename=Hopline）
+// Sing-box → sing-box://import-remote-profile?url=...#Hopline（官方 scheme，# 后为配置文件名称）
 // Surge → surge:///install-config（Surge 官方 scheme）
 // auto / v2rayN+Shadowrocket / Loon / Quantumult X / 明文 → 直接使用订阅链接（Shadowrocket / Loon / QuanX 扫码识别）
 function qrPayloadOf(fmt, url){
   var enc = encodeURIComponent(url);
   if (fmt === 'clash' || fmt === 'stash') return 'clash://install-config?url=' + enc;
-  if (fmt === 'singbox') return 'sing-box://import-remote-profile?url=' + enc + '#CFNext';
+  if (fmt === 'singbox') return 'sing-box://import-remote-profile?url=' + enc + '#Hopline';
   if (fmt === 'surge') return 'surge:///install-config?url=' + enc;
   return url;
 }
@@ -4788,7 +4789,7 @@ function downloadSub(){
   var fmt = $('subFmt').value;
   var a = document.createElement('a');
   a.href = subUrlOf(fmt === 'auto' ? '' : fmt);
-  a.download = 'cfnext-sub.txt';
+  a.download = 'hopline-sub.txt';
   document.body.appendChild(a);
   a.click();
   a.remove();
@@ -4943,7 +4944,7 @@ function testIpSource(src){
 }
 // 测试结果按「仅 TLS 端口」当前状态（含未保存的修改）展示实际会下发的节点，规则与服务端 buildNodes 一致：
 // 开启（或开启 ECH）时跳过明文端口；关闭时 443 节点另追加「名称·80」的 80 明文节点
-var HTTP_PORTS = /*@CFNEXT_HTTP_PORTS@*/null || [80, 8080, 8880, 2052, 2082, 2086, 2095];   // 服务端下发同一份明文端口表，这里的默认值仅作兜底
+var HTTP_PORTS = /*@HOPLINE_HTTP_PORTS@*/null || [80, 8080, 8880, 2052, 2082, 2086, 2095];   // 服务端下发同一份明文端口表，这里的默认值仅作兜底
 var LAST_IPTEST = null;
 function tlsOnlyNow(){ return $('tls-only').checked || $('ech-on').checked; }
 function rerenderIpTest(){ if (LAST_IPTEST) renderIpTest(LAST_IPTEST.src, LAST_IPTEST.r); }
@@ -5066,7 +5067,7 @@ const loginHTML = String.raw`
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>CFNext · 登录</title>
+<title>Hopline · 登录</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect x='3' y='3' width='18' height='18' rx='5' fill='%232563eb'/%3E%3Cpath d='M8 15V9l8 6V9' stroke='%23ffffff' stroke-width='2' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
@@ -5096,7 +5097,7 @@ button:disabled{opacity:.6;cursor:not-allowed}
 <div class="box">
   <div class="brand">
     <div class="mark"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12h4l3-7 4 14 3-7h2"/></svg></div>
-    <div class="bt"><b>CFNext</b><span>Cloudflare 代理订阅面板</span></div>
+    <div class="bt"><b>Hopline</b><span>Cloudflare 代理订阅面板</span></div>
   </div>
   <h1>登录</h1>
   <p>请输入管理用户名与密码以继续</p>
@@ -5165,6 +5166,7 @@ async function hmacHex(key, msg) {
 // 迭代次数写在摘要里，日后可调高而不影响已保存的密码；取 1 万次是为了控制免费版 10ms CPU 限制下的登录开销。
 // 由环境变量 ADMIN 提供的密码仍是明文（环境变量本身即密钥存储），按常量时间比较。
 // KV 中若存有明文密码同样可用，下次在面板保存任意配置时自动改存摘要。
+// 前缀沿用项目旧名 CFNext：它是 KV 中已保存摘要的格式标识，改名会使已部署实例的密码失效
 const ADMIN_HASH_PREFIX = 'cfnext-pbkdf2$';
 const ADMIN_HASH_ITER = 10000;
 const toHex = (u8) => Array.from(u8).map(b => b.toString(16).padStart(2, '0')).join('');
@@ -5196,7 +5198,7 @@ const AUTH_REFRESH_MIN_MS = 10 * 60 * 1000;   // 新有效期至少比当前晚 
 // 当前生效的管理用户名（KV 中为空等异常情况回落默认 admin）
 function adminUserOf(cfg) { return String(cfg.adminUser || '') || 'admin'; }
 // 会话签名密钥含用户名：修改用户名与修改密码一样，使其它浏览器的登录态失效
-function authKey(cfg) { return 'cfnext-auth|' + String(cfg.admin) + '|' + String(cfg.uuid) + '|' + adminUserOf(cfg); }
+function authKey(cfg) { return 'hopline-auth|' + String(cfg.admin) + '|' + String(cfg.uuid) + '|' + adminUserOf(cfg); }
 // iat：登录时间（续期时沿用，保证 7 天上限从首次登录算起）；返回 { token, exp }
 async function makeAuthToken(cfg, iat) {
   const now = Date.now();
@@ -5209,7 +5211,7 @@ async function makeAuthToken(cfg, iat) {
 async function requireAuth(request, cfg, state) {
   if (!cfg.admin) return false;
   const cookies = request.headers.get('Cookie') || '';
-  const m = cookies.match(/(?:^|;\s*)cfnext_auth=([^;]+)/);
+  const m = cookies.match(/(?:^|;\s*)hopline_auth=([^;]+)/);
   if (!m) return false;
   const parts = m[1].split('.');
   if (parts.length !== 3 || !/^\d+$/.test(parts[0]) || !/^\d+$/.test(parts[1]) || !parts[2]) return false;
@@ -5269,7 +5271,7 @@ function safeNext(next, panelPath) {
 // Cookie 有效期与令牌的过期时间一致
 function authCookie(token, exp) {
   const maxAge = Math.max(0, Math.floor((exp - Date.now()) / 1000));
-  return `cfnext_auth=${token}; Path=/; Max-Age=${maxAge}; HttpOnly; Secure; SameSite=Lax`;
+  return `hopline_auth=${token}; Path=/; Max-Age=${maxAge}; HttpOnly; Secure; SameSite=Lax`;
 }
 // 返回给面板的配置：只含字段表登记的配置项，不下发管理密码明文；附带面板需要的派生信息
 function publicConfig(cfg, env) {
@@ -5303,9 +5305,9 @@ let PANEL_PAGE = null;
 function panelPage() {
   if (!PANEL_PAGE) {
     PANEL_PAGE = PANEL_HTML
-      .replace('/*@CFNEXT_SCHEMA@*/null', () => JSON.stringify(clientSchema()).replace(/</g, '\\u003c'))
-      .replace('/*@CFNEXT_CHECK@*/null', () => '(' + checkFieldValue.toString() + ')')
-      .replace('/*@CFNEXT_HTTP_PORTS@*/null', () => JSON.stringify([...HTTP_PORTS]));
+      .replace('/*@HOPLINE_SCHEMA@*/null', () => JSON.stringify(clientSchema()).replace(/</g, '\\u003c'))
+      .replace('/*@HOPLINE_CHECK@*/null', () => '(' + checkFieldValue.toString() + ')')
+      .replace('/*@HOPLINE_HTTP_PORTS@*/null', () => JSON.stringify([...HTTP_PORTS]));
   }
   return PANEL_PAGE;
 }
@@ -5317,7 +5319,7 @@ function setupProblems(env, cfg) {
   if (!cfg.path) {
     lines.push(cfg._pathError
       ? '环境变量 PATH 的值不正确：' + cfg._pathError + '。'
-      : 'CFNext 尚未完成配置：请在 Worker 环境变量中设置 PATH（面板、订阅与节点共用的访问路径，如 mypanel）和 ADMIN（管理密码），然后重新访问。从旧版升级时：旧版的默认路径就是 UUID，把 PATH 设为原来的 UUID（或之前用 D 设置的路径）即可保持节点与订阅地址不变。');
+      : 'Hopline 尚未完成配置：请在 Worker 环境变量中设置 PATH（面板、订阅与节点共用的访问路径，如 mypanel）和 ADMIN（管理密码），然后重新访问。从旧版升级时：旧版的默认路径就是 UUID，把 PATH 设为原来的 UUID（或之前用 D 设置的路径）即可保持节点与订阅地址不变。');
   }
   if (cfg._uuidUnsaved) lines.push('未绑定 KV 命名空间（绑定变量名 CONFIG_KV）时，必须设置环境变量 UUID（节点用户 ID）；绑定 KV 后可留空，系统会自动生成并保存。');
   return lines.join('\n');
@@ -5413,7 +5415,7 @@ async function handleRequest(request, env, state) {
     const fmt = segs.length >= 3 ? segs[2] : '';
     try {
       const sub = await serveSubscription(request, env, cfg, fmt);
-      return new Response(sub.body, { status: 200, headers: { 'Content-Type': sub.type + '; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Disposition': 'attachment; filename="CFNext"; filename*=utf-8\'\'CFNext' } });
+      return new Response(sub.body, { status: 200, headers: { 'Content-Type': sub.type + '; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Disposition': 'attachment; filename="Hopline"; filename*=utf-8\'\'Hopline' } });
     } catch (e) {
       return new Response('订阅生成失败: ' + (e && e.message || e), { status: 500, headers: { 'Content-Type': 'text/plain; charset=utf-8' } });
     }
@@ -5481,7 +5483,7 @@ async function handleRequest(request, env, state) {
       if (request.method !== 'POST') return json({ ok: false, msg: '仅支持 POST' }, 405);
       // 会话令牌是无状态的签名令牌，无法在服务端单独吊销：这里清除浏览器中的 Cookie。
       // 要让已签发的令牌全部失效，修改管理密码、管理用户名或 UUID 即可（签名密钥随之变化）
-      return json({ ok: true, msg: '已退出登录' }, 200, { 'Set-Cookie': 'cfnext_auth=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax' });
+      return json({ ok: true, msg: '已退出登录' }, 200, { 'Set-Cookie': 'hopline_auth=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax' });
     }
 
     if (apiName === 'reset') {

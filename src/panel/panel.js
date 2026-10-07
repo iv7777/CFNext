@@ -233,8 +233,8 @@ function renderAll(){
  * SCHEMA（字段表）与 sharedCheck（字段校验函数）由服务端下发页面时注入，与服务端保存接口使用同一份定义与校验代码。
  * 新增配置项：在 worker 的 CONFIG_SCHEMA 加一行，并在本页面放置 id 与该行 el 对应的控件即可，
  * 回填 / 收集 / 未保存标记 / 字段级错误提示 / 环境变量只读均自动生效。 */
-var SCHEMA = /*@CFNEXT_SCHEMA@*/null || [];
-var sharedCheck = /*@CFNEXT_CHECK@*/null;
+var SCHEMA = /*@HOPLINE_SCHEMA@*/null || [];
+var sharedCheck = /*@HOPLINE_CHECK@*/null;
 var SCHEMA_BY_KEY = {};
 SCHEMA.forEach(function(d){ SCHEMA_BY_KEY[d.key] = d; });
 function checkValue(def, v){
@@ -465,7 +465,7 @@ function exportConfig(){
     a.href = URL.createObjectURL(blob);
     var ts = new Date();
     var pad = function(n){ return String(n).padStart(2, '0'); };
-    a.download = 'cfnext-backup-' + ts.getFullYear() + pad(ts.getMonth()+1) + pad(ts.getDate()) + '-' + pad(ts.getHours()) + pad(ts.getMinutes()) + '.json';
+    a.download = 'hopline-backup-' + ts.getFullYear() + pad(ts.getMonth()+1) + pad(ts.getDate()) + '-' + pad(ts.getHours()) + pad(ts.getMinutes()) + '.json';
     document.body.appendChild(a); a.click(); document.body.removeChild(a);
     setTimeout(function(){ URL.revokeObjectURL(a.href); }, 1000);
     toast('配置已导出为 JSON', 'ok');
@@ -567,14 +567,14 @@ function showQRCode(url){
   } catch(e) { w.textContent = ''; w.appendChild(mkEl('div', 'hint', '二维码生成失败：' + e.message)); }
 }
 // 二维码内容随订阅格式（客户端）联动：
-// Clash/Mihomo、Stash → clash://install-config（FlyClash / Clash Verge / Stash 扫码装订阅，配置名取订阅响应头 filename=CFNext）
-// Sing-box → sing-box://import-remote-profile?url=...#CFNext（官方 scheme，# 后为配置文件名称）
+// Clash/Mihomo、Stash → clash://install-config（FlyClash / Clash Verge / Stash 扫码装订阅，配置名取订阅响应头 filename=Hopline）
+// Sing-box → sing-box://import-remote-profile?url=...#Hopline（官方 scheme，# 后为配置文件名称）
 // Surge → surge:///install-config（Surge 官方 scheme）
 // auto / v2rayN+Shadowrocket / Loon / Quantumult X / 明文 → 直接使用订阅链接（Shadowrocket / Loon / QuanX 扫码识别）
 function qrPayloadOf(fmt, url){
   var enc = encodeURIComponent(url);
   if (fmt === 'clash' || fmt === 'stash') return 'clash://install-config?url=' + enc;
-  if (fmt === 'singbox') return 'sing-box://import-remote-profile?url=' + enc + '#CFNext';
+  if (fmt === 'singbox') return 'sing-box://import-remote-profile?url=' + enc + '#Hopline';
   if (fmt === 'surge') return 'surge:///install-config?url=' + enc;
   return url;
 }
@@ -582,7 +582,7 @@ function downloadSub(){
   var fmt = $('subFmt').value;
   var a = document.createElement('a');
   a.href = subUrlOf(fmt === 'auto' ? '' : fmt);
-  a.download = 'cfnext-sub.txt';
+  a.download = 'hopline-sub.txt';
   document.body.appendChild(a);
   a.click();
   a.remove();
@@ -737,7 +737,7 @@ function testIpSource(src){
 }
 // 测试结果按「仅 TLS 端口」当前状态（含未保存的修改）展示实际会下发的节点，规则与服务端 buildNodes 一致：
 // 开启（或开启 ECH）时跳过明文端口；关闭时 443 节点另追加「名称·80」的 80 明文节点
-var HTTP_PORTS = /*@CFNEXT_HTTP_PORTS@*/null || [80, 8080, 8880, 2052, 2082, 2086, 2095];   // 服务端下发同一份明文端口表，这里的默认值仅作兜底
+var HTTP_PORTS = /*@HOPLINE_HTTP_PORTS@*/null || [80, 8080, 8880, 2052, 2082, 2086, 2095];   // 服务端下发同一份明文端口表，这里的默认值仅作兜底
 var LAST_IPTEST = null;
 function tlsOnlyNow(){ return $('tls-only').checked || $('ech-on').checked; }
 function rerenderIpTest(){ if (LAST_IPTEST) renderIpTest(LAST_IPTEST.src, LAST_IPTEST.r); }

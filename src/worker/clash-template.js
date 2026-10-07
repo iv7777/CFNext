@@ -12,9 +12,9 @@ FilterTW: &FilterTW '^(?=.*(?i)(台|🇹🇼|TW|tai|TPE|TSA|KHH))(?!.*5x).*$'
 
 # ==================== 监听器 ====================
 listeners:
-  # Shadowsocks监听器 - 远程连接家庭网络。密码由 CFNext 按 UUID 为本部署派生（每个部署不同），不再使用公开的默认密码；
+  # Shadowsocks监听器 - 远程连接家庭网络。密码由 Hopline 按 UUID 为本部署派生（每个部署不同），不再使用公开的默认密码；
   # 如需对外开放请自行修改端口与密码
-  - {name: SS-IN,  type: shadowsocks, listen: '::', port: 10000, udp: true, password: "__CFNEXT_SS_PASSWORD__", cipher: aes-256-gcm}
+  - {name: SS-IN,  type: shadowsocks, listen: '::', port: 10000, udp: true, password: "__HOPLINE_SS_PASSWORD__", cipher: aes-256-gcm}
   # Mixed监听器 - 分地区专用端口 玩法：本地浏览器插件或手机APP配置代理，实现分地区访问
   - {name: MIXED-SG, type: mixed, port: 50000, proxy: 新加坡节点}
   - {name: MIXED-US, type: mixed, port: 50001, proxy: 美国节点}
@@ -40,9 +40,9 @@ find-process-mode: 'always'
 keep-alive-interval: 15
 keep-alive-idle: 600
 
-# 认证配置：密码由 CFNext 按 UUID 为本部署派生（每个部署不同），不再使用公开的默认凭据
+# 认证配置：密码由 Hopline 按 UUID 为本部署派生（每个部署不同），不再使用公开的默认凭据
 authentication:
-  - "mihomo:__CFNEXT_AUTH_PASSWORD__"
+  - "mihomo:__HOPLINE_AUTH_PASSWORD__"
 skip-auth-prefixes:
   - 192.168.1.0/24
   - 192.168.31.0/24
@@ -58,7 +58,7 @@ external-ui-url: https://github.com/Zephyruso/zashboard/releases/latest/download
 external-ui-name: zashboard
 external-ui: ui
 external-controller: 127.0.0.1:9090
-secret: "__CFNEXT_API_SECRET__"    # 由 CFNext 按 UUID 为本部署派生，可自行修改
+secret: "__HOPLINE_API_SECRET__"    # 由 Hopline 按 UUID 为本部署派生，可自行修改
 # 允许跨域访问的面板来源（不再使用 "*"：任意网页都不能借浏览器访问本机控制接口）。使用其它在线面板时在此追加其域名
 external-controller-cors:
   allow-origins:

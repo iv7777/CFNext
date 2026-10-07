@@ -1,4 +1,4 @@
-// 管理面板与配置接口测试（node:test，无第三方依赖）：直接加载构建产物 CFNext.js，
+// 管理面板与配置接口测试（node:test，无第三方依赖）：直接加载构建产物 Hopline.js，
 // 用内存 Map 模拟 KV、桩替换 cloudflare:sockets 与外网 fetch。运行：npm test
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -17,7 +17,7 @@ register('data:text/javascript,' + encodeURIComponent(hooks));
 // 订阅生成会拉取外部优选源：测试环境一律离线，走各处的失败兜底
 globalThis.fetch = async () => { throw new Error('offline in tests'); };
 
-const worker = (await import('../CFNext.js')).default;
+const worker = (await import('../Hopline.js')).default;
 
 const UUID = '11111111-2222-4333-8444-555555555555';
 const UUID2 = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
@@ -172,7 +172,7 @@ test('修改 UUID：重新签发登录态；面板路径来自 PATH，不随 UUI
   assert.equal(r.data.uuid, UUID2);
   assert.equal(r.data.panelPath, UUID, '面板路径来自 PATH，不随 UUID 变化');
   const newCookie = res.headers.get('Set-Cookie');
-  assert.ok(newCookie && newCookie.startsWith('cfnext_auth='));
+  assert.ok(newCookie && newCookie.startsWith('hopline_auth='));
   const again = await call(env, `/${UUID}/api/config`, { cookie: newCookie.split(';')[0] });
   assert.equal(again.status, 200, '新令牌可直接访问面板');
   const old = await call(env, `/${UUID}/api/config`, { cookie });
@@ -218,12 +218,12 @@ test('登录会话：使用面板时顺延 24 小时（10 分钟内不重复签�
     assert.equal((await api(cookie)).status, 403, '登录满 7 天必须重新登录');
     // 旧格式（过期时间.签名）令牌不再接受
     off = 0;
-    assert.equal((await api('cfnext_auth=' + (realNow() + H) + '.deadbeef')).status, 403);
+    assert.equal((await api('hopline_auth=' + (realNow() + H) + '.deadbeef')).status, 403);
     // 退出登录：响应自己的清除 Cookie 不被续期覆盖
     cookie = await login(env);
     off = 2 * H;
     const out = await call(env, `/${UUID}/api/logout`, { method: 'POST', cookie });
-    assert.match(out.headers.get('Set-Cookie'), /cfnext_auth=; .*Max-Age=0/);
+    assert.match(out.headers.get('Set-Cookie'), /hopline_auth=; .*Max-Age=0/);
   } finally { Date.now = realNow; }
 });
 
@@ -398,7 +398,7 @@ test('面板页面注入字段表与共用校验函数', async () => {
   const res = await call(env, `/${UUID}`, { cookie });
   assert.equal(res.status, 200);
   const html = await res.text();
-  assert.equal(html.includes('@CFNEXT_'), false, '占位符均已替换');
+  assert.equal(html.includes('@HOPLINE_'), false, '占位符均已替换');
   const schemaJson = html.match(/var SCHEMA = (\[.*?\]) \|\| \[\];/s);
   assert.ok(schemaJson, '字段表已注入');
   const schema = JSON.parse(schemaJson[1]);
@@ -417,14 +417,14 @@ test('面板页面注入字段表与共用校验函数', async () => {
   }
 });
 
-test('检测更新：以仓库 CFNext.js 为基准，有更新时直接返回其内容，60 秒内走缓存', async () => {
+test('检测更新：以仓库 Hopline.js 为基准，有更新时直接返回其内容，60 秒内走缓存', async () => {
   const env = baseEnv();
   const cookie = await login(env);
   const offline = globalThis.fetch;
   const seen = [];
   globalThis.fetch = async (url) => {
     seen.push(String(url));
-    if (String(url) === 'https://raw.githubusercontent.com/iv7777/CFNext/main/CFNext.js') {
+    if (String(url) === 'https://raw.githubusercontent.com/iv7777/Hopline/main/Hopline.js') {
       return new Response("// banner\nconst VERSION = '9.9.9';\n// …\n");
     }
     return new Response('Not Found', { status: 404 });
@@ -435,7 +435,7 @@ test('检测更新：以仓库 CFNext.js 为基准，有更新时直接返回其
     assert.equal(r.data.latest, '9.9.9');
     assert.equal(r.data.hasUpdate, true);
     assert.match(r.data.code, /const VERSION = '9\.9\.9'/);
-    assert.deepEqual(seen, ['https://raw.githubusercontent.com/iv7777/CFNext/main/CFNext.js'], '只请求一次 CFNext.js');
+    assert.deepEqual(seen, ['https://raw.githubusercontent.com/iv7777/Hopline/main/Hopline.js'], '只请求一次 Hopline.js');
     const again = await (await call(env, `/${UUID}/api/update`, { cookie })).json();
     assert.equal(again.data.latest, '9.9.9');
     assert.equal(seen.length, 1, '60 秒内复用缓存');
@@ -1226,7 +1226,7 @@ const nextQs = (path) => '?next=' + encodeURIComponent('/' + path);
 test('Clash 模板不再包含公开的默认凭据：SS 密码 / 认证 / API 密钥按 UUID 派生且稳定，CORS 不再是 *，DNS 只监听本机', async () => {
   const get = async (env) => (await subOf(env, 'clash')).text();
   const a = await get(baseEnv({ CONFIG_KV: kv({ config: customCfg() }) }));
-  assert.ok(!/yyds666|Xf3#Lp9WqZ|__CFNEXT_/.test(a), '无默认密码 / 未替换的占位符');
+  assert.ok(!/yyds666|Xf3#Lp9WqZ|__HOPLINE_/.test(a), '无默认密码 / 未替换的占位符');
   const d = (purpose, uuid = UUID) => createHash('sha224').update(`cfnext-clash|${purpose}|${uuid}`).digest('hex').slice(0, 20);
   assert.ok(a.includes(`password: "${d('ss')}"`) && a.includes(`- "mihomo:${d('auth')}"`) && a.includes(`secret: "${d('api')}"`), '与 UUID 派生一致（同时校验 SHA-224 实现）');
   assert.equal(await get(baseEnv({ CONFIG_KV: kv({ config: customCfg() }) })), a, '同一部署每次订阅结果稳定');
@@ -1367,7 +1367,7 @@ test('页面安全头：面板 / 登录页带 CSP、frame-ancestors、nosniff；
   // 退出登录：清除 Cookie
   const out = await call(env, `/${UUID}/api/logout`, { method: 'POST', cookie });
   assert.equal(out.status, 200);
-  assert.match(out.headers.get('Set-Cookie'), /cfnext_auth=; .*Max-Age=0/);
+  assert.match(out.headers.get('Set-Cookie'), /hopline_auth=; .*Max-Age=0/);
   assert.equal((await call(env, `/${UUID}/api/logout`)).status, 403, '未登录不可调用');
 });
 
@@ -1512,11 +1512,11 @@ test('机房共享缓存：优选 API 结果写入 / 读取 Cache API；命中�
     const urlA = 'https://shared-a.example.com/ips.txt';
     const a = await linksFor(urlA, (u) => u === urlA ? new Response('104.16.8.8') : notFound());
     assert.ok(a.hosts.includes('104.16.8.8'));
-    const key = 'https://cfnext-cache.invalid/url-' + md5('url:' + urlA);
+    const key = 'https://hopline-cache.invalid/url-' + md5('url:' + urlA);
     assert.deepEqual(puts.filter(p => p.url === key).map(p => p.cc), ['max-age=600']);
     // 2) 共享缓存命中（模拟另一个实例写入的结果）：完全不请求对方
     const urlB = 'https://shared-b.example.com/ips.txt';
-    store.set('https://cfnext-cache.invalid/url-' + md5('url:' + urlB), JSON.stringify([{ ip: '104.16.7.7', port: 443, name: '共享-01' }]));
+    store.set('https://hopline-cache.invalid/url-' + md5('url:' + urlB), JSON.stringify([{ ip: '104.16.7.7', port: 443, name: '共享-01' }]));
     const b = await linksFor(urlB, (u) => { if (u === urlB) throw new Error('不应请求对方'); return notFound(); });
     assert.ok(b.hosts.includes('104.16.7.7'));
     assert.ok(!b.calls.includes(urlB));
@@ -1533,7 +1533,7 @@ import { readFileSync } from 'node:fs';
 import { createHmac, hkdfSync, createCipheriv, createDecipheriv, randomBytes } from 'node:crypto';
 // 构建产物里的内部函数不对外导出：去掉 import / export default 后在函数作用域内求值，取出要测的纯函数
 const internals = (() => {
-  const src = readFileSync(new URL('../CFNext.js', import.meta.url), 'utf8')
+  const src = readFileSync(new URL('../Hopline.js', import.meta.url), 'utf8')
     .replace(/^import .*$/m, '').replace('export default {', 'const __default = {');
   return new Function('connect', src + '\n;return { md5hex, sha224hex, sha1Bytes, hmacSha1, hkdfSha1, poly1305, chacha20Poly1305Seal, chacha20Poly1305Open, parseVlessHeader, parseTrojanHeader, HTTP_PORTS, ipInCidrV6, isValidIp, parseProxyAddress, loginRateKey, relayPlan, RELAY_DOMAINS, SERVER_CHECKS, effectivePrefDomains, DEFAULT_PREFERRED_DOMAINS };')(() => { throw new Error('no sockets'); });
 })();
@@ -1613,7 +1613,7 @@ test('面板注入服务端的明文端口表（不再各存一份）', async ()
   const env = baseEnv();
   const html = await (await call(env, `/${UUID}`, { cookie: await login(env) })).text();
   assert.ok(html.includes('var HTTP_PORTS = ' + JSON.stringify([...internals.HTTP_PORTS])), '注入值与服务端 HTTP_PORTS 一致');
-  assert.ok(!html.includes('/*@CFNEXT_HTTP_PORTS@*/'), '占位符已替换');
+  assert.ok(!html.includes('/*@HOPLINE_HTTP_PORTS@*/'), '占位符已替换');
 });
 
 // ---------------- Shadowsocks AEAD 出站：对照 node:crypto 实现的参考服务端 ----------------
@@ -1873,7 +1873,7 @@ test('节点测活已移除：旧 KV 的 probeAlive 与 PROBE_ALIVE 环境变量
 test('Stash 手动选择格式时输出 Clash 配置（与按 UA 识别一致），不再是明文链接', async () => {
   const env = baseEnv({ CONFIG_KV: kv({ config: customCfg() }) });
   const forced = await (await subOf(env, 'stash')).text();
-  assert.match(forced, /^# CFNext 订阅\ntest-url:/);
+  assert.match(forced, /^# Hopline 订阅\ntest-url:/);
   assert.match(forced, /\nproxies:\n/);
   const byUa = await (await withFetch(nodesFetch, () => call(env, `/${UUID}/sub`, { ua: 'Stash/2.7 Clash/1.9' }))).text();
   assert.equal(forced, byUa, '手动选 Stash 与 Stash 客户端自动识别得到同一份配置');

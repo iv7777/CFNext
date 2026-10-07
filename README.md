@@ -1,8 +1,20 @@
-# CFNext · Cloudflare 代理订阅面板
+# Hopline · Cloudflare 代理订阅面板
 
-> **CFNext —— 部署在 Cloudflare Workers / Pages 的代理订阅面板**，单文件同时实现 VLESS / Trojan / XHTTP 多协议代理与图形化配置：`/<PATH>` 进入面板，`/sub` 输出订阅；内置优选域名与在线优选 IP 来源、ECH 加密、落地与出站代理（含可配置的地区反代）及地区 / 运营商 / IP 版本多维筛选，只需设置 `PATH` 与 `ADMIN` 两个环境变量即可部署（UUID 等其余均可选），绑定 KV 后改完即生效。
+> **Hopline —— 部署在 Cloudflare Workers / Pages 的代理订阅面板**，单文件同时实现 VLESS / Trojan / XHTTP 多协议代理与图形化配置：`/<PATH>` 进入面板，`/sub` 输出订阅；内置优选域名与在线优选 IP 来源、ECH 加密、落地与出站代理（含可配置的地区反代）及地区 / 运营商 / IP 版本多维筛选，只需设置 `PATH` 与 `ADMIN` 两个环境变量即可部署（UUID 等其余均可选），绑定 KV 后改完即生效。
 >
 > **[Telegram 交流群](https://t.me/SZ_PAI)**　**[YouTube 频道](https://www.youtube.com/@PAI_CN)**
+
+---
+
+# 更新日志 _V2.2.1
+
+### 📝 项目更名：CFNext → Hopline
+
+- 仓库更名为 **[iv7777/Hopline](https://github.com/iv7777/Hopline)**，部署文件由 `CFNext.js` 改为 **`Hopline.js`**（内容与用法不变，部署时粘贴 `Hopline.js` 即可）
+- 面板标题、登录页、关于页、订阅配置名（Clash / Sing-box 导入后显示为 Hopline）、备份与订阅下载文件名统一改为 Hopline
+- 版本更新检测改为读取 `raw.githubusercontent.com/iv7777/Hopline/main/Hopline.js`。**V2.2.0 及更早的部署仍会去找旧文件名 `CFNext.js`，面板里的「检测更新」会失败**，请手动把 `Hopline.js` 粘贴到 Worker 完成这一次升级，之后即可正常检测
+- 登录 Cookie 更名为 `hopline_auth`：升级后需重新登录一次
+- **以下保持不变，升级无需任何操作**：环境变量与 KV 中的配置、已保存的管理密码摘要（格式标识 `cfnext-pbkdf2$` 保留）、节点与订阅地址、Clash 订阅中按 UUID 派生的本地凭据（Shadowsocks 入站、mihomo 认证与 API secret 不变）
 
 ---
 
@@ -586,10 +598,10 @@
 
 | 项 | 内容 |
 |---|---|
-| 项目名称 | **CFNext · Cloudflare 代理订阅面板** |
-| 当前版本 | v2.2.0 |
+| 项目名称 | **Hopline · Cloudflare 代理订阅面板** |
+| 当前版本 | v2.2.1 |
 | 运行环境 | Cloudflare Workers / Pages |
-| 部署形态 | 单文件 Worker/Pages（`CFNext.js`，由 `src/` 构建生成，见「九、开发与构建」） |
+| 部署形态 | 单文件 Worker/Pages（`Hopline.js`，由 `src/` 构建生成，见「九、开发与构建」） |
 | 数据存储 | Cloudflare KV（绑定变量 **CONFIG_KV**）；未绑定时面板无法保存，仅环境变量生效，且必须设置 `UUID` |
 | 面板入口 | `https://你的域名/<PATH>`（`PATH` 为必填环境变量；面板、订阅与节点共用此路径） |
 | 订阅入口 | `https://你的域名/<UUID>/sub`（按客户端 UA 自动识别格式；也可追加格式后缀强制指定，如 `/sub/clash`、`/sub/singbox`） |
@@ -628,7 +640,7 @@
 ### Worker 部署
 
 1. 登录 Cloudflare 控制台 → Workers 和 Pages → 新建 Worker
-2. 将仓库中的 `CFNext.js` 全文粘贴到 Worker 代码编辑器
+2. 将仓库中的 `Hopline.js` 全文粘贴到 Worker 代码编辑器
 3. 设置两个**必填**环境变量：**`PATH`** = 面板、订阅与节点共用的访问路径（如 `mypanel`，只能含字母、数字及 `. _ ~ -`），**`ADMIN`** = 管理密码（未设置时面板与管理接口一律禁用）。其余变量均可选；`UUID` 留空时首次访问自动随机生成并保存到 KV
 4. （推荐）创建 **KV 命名空间** 并在 Worker 设置中绑定，变量名设为 **`CONFIG_KV`**——配置面板保存后持久化，也用于保存自动生成的 UUID（不绑定 KV 则必须设置 `UUID` 变量）
 5. 部署后访问 `https://你的域名/<PATH>` 进入图形化配置面板
@@ -636,7 +648,7 @@
 ### Pages 部署
 
 1. 登录 Cloudflare 控制台 → Workers 和 Pages → 新建 Pages 项目
-2. 将 `CFNext.js` 放到项目目录（或压缩为 zip 上传），框架选择「无」
+2. 将 `Hopline.js` 放到项目目录（或压缩为 zip 上传），框架选择「无」
 3. 设置 **环境变量 `PATH`** 与 **`ADMIN`**（同上）
 4. （推荐）创建 KV 命名空间并在 Pages 设置中绑定，变量名设为 **`CONFIG_KV`**
 5. 部署后访问 `https://你的域名/<PATH>` 进入图形化配置面板
@@ -784,7 +796,7 @@
 
 ## 九、开发与构建
 
-`CFNext.js` 是构建产物（部署时直接粘贴它即可），源码位于 `src/`：
+`Hopline.js` 是构建产物（部署时直接粘贴它即可），源码位于 `src/`：
 
 | 路径 | 内容 |
 |---|---|
@@ -794,17 +806,17 @@
 | `src/panel/panel.css` | 面板样式（日间 / 夜间主题） |
 | `src/panel/panel.js` | 面板前端脚本（由字段表驱动的表单回填、收集、校验与错误提示） |
 | `src/panel/login.html` | 登录页 |
-| `build.mjs` | 零依赖构建脚本：拼接 `src/worker/*.js`、内联面板页面，输出 `CFNext.js` |
+| `build.mjs` | 零依赖构建脚本：拼接 `src/worker/*.js`、内联面板页面，输出 `Hopline.js` |
 | `eslint.config.mjs` | 静态检查配置（`npm run lint`，CI 中运行） |
 | `test/` | `node:test` 测试（模拟 KV 与 Workers 运行时，无需安装依赖） |
 
 ```bash
-node build.mjs          # 修改 src/ 后重新生成 CFNext.js（需 Node.js 20.6+，CI 使用 22）
-npm test                # 校验 CFNext.js 与 src/ 同步，并运行测试
+node build.mjs          # 修改 src/ 后重新生成 Hopline.js（需 Node.js 20.6+，CI 使用 22）
+npm test                # 校验 Hopline.js 与 src/ 同步，并运行测试
 npm run lint            # eslint 静态检查（通过 npx 获取，仓库本身仍无依赖）
 ```
 
 **新增一个面板配置项**：在 `src/worker/config-schema.js` 的 `CONFIG_SCHEMA` 中加一行（字段路径、类型、默认值、面板控件 id、校验规则），再在 `src/panel/panel.html` 放一个同 id 的控件即可——默认值、KV 读写白名单、保存校验、面板回填 / 收集 / 未保存标记 / 字段级错误提示都会自动生效；服务端通过 `cfg.<字段>` 读取。
 
-> 请勿直接编辑 `CFNext.js`：CI 会检查它是否与 `src/` 同步。
+> 请勿直接编辑 `Hopline.js`：CI 会检查它是否与 `src/` 同步。
 

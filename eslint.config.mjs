@@ -12,7 +12,7 @@ const rules = {
 };
 export default [
   {   // 构建产物：Cloudflare Workers 运行时
-    files: ['CFNext.js'],
+    files: ['Hopline.js'],
     languageOptions: { ...common, sourceType: 'module', globals: {
       crypto: 'readonly', fetch: 'readonly', Request: 'readonly', Response: 'readonly', Headers: 'readonly', URL: 'readonly',
       URLSearchParams: 'readonly', TextEncoder: 'readonly', TextDecoder: 'readonly', AbortController: 'readonly', AbortSignal: 'readonly',

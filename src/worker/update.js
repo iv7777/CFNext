@@ -1,9 +1,9 @@
-const VERSION = '2.2.0';
+const VERSION = '2.2.1';
 
 // 更新检测：点击版本号后拉取仓库代码比对版本号；有新版本时返回最新代码供面板复制
-// 版本基准为仓库 main 分支根目录的 CFNext.js（由 build.mjs 生成的部署文件）
-const UPDATE_REPO = 'iv7777/CFNext';
-const UPDATE_FILE = 'CFNext.js';
+// 版本基准为仓库 main 分支根目录的 Hopline.js（由 build.mjs 生成的部署文件）
+const UPDATE_REPO = 'iv7777/Hopline';
+const UPDATE_FILE = 'Hopline.js';
 let UPDATE_CACHE = null; // { t, r } 60 秒缓存
 
 function parseVer(v){
@@ -17,7 +17,7 @@ function cmpVer(a, b){
   return 0;
 }
 function extractVersion(txt){
-  // 版本号与 CFNext 源码同一位置：const VERSION = 'x.y.z ...'
+  // 版本号与 Hopline 源码同一位置：const VERSION = 'x.y.z ...'
   const m = txt.match(/const\s+VERSION\s*=\s*['"]([^'"]+)['"]/);
   return m ? m[1] : null;
 }
@@ -27,7 +27,7 @@ function updateFileUrl(name){
 // 拉取仓库文件：返回 { txt, version }，失败返回 { error }
 async function fetchRepoFile(name){
   try {
-    const res = await fetch(updateFileUrl(name), { headers: { 'User-Agent': 'Mozilla/5.0 (CFNext)' } });
+    const res = await fetch(updateFileUrl(name), { headers: { 'User-Agent': 'Mozilla/5.0 (Hopline)' } });
     if (!res.ok) return { error: name + ' HTTP ' + res.status };
     const txt = await res.text();
     return { txt, version: extractVersion(txt) };
@@ -36,7 +36,7 @@ async function fetchRepoFile(name){
 async function checkUpdate(){
   const now = Date.now();
   if (UPDATE_CACHE && now - UPDATE_CACHE.t < 60000) return UPDATE_CACHE.r;
-  // 拉取仓库 CFNext.js：比对版本号，有更新时直接把这次拉取的内容作为最新代码返回
+  // 拉取仓库 Hopline.js：比对版本号，有更新时直接把这次拉取的内容作为最新代码返回
   const r = await fetchRepoFile(UPDATE_FILE);
   if (!r.version) return { current: VERSION, latest: null, hasUpdate: false, code: '', error: r.error || '未在仓库中找到版本信息' };
   UPDATE_CACHE = { t: now, r: { current: VERSION, latest: r.version, hasUpdate: cmpVer(r.version, VERSION) > 0, code: r.txt, checkedAt: now } };

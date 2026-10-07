@@ -1,8 +1,8 @@
 #!/usr/bin/env node
-// 构建脚本：把 src/ 下的源文件合并为可直接粘贴部署的单文件 CFNext.js
+// 构建脚本：把 src/ 下的源文件合并为可直接粘贴部署的单文件 Hopline.js
 //
-//   node build.mjs          生成 CFNext.js
-//   node build.mjs --check  仅校验 CFNext.js 是否与 src/ 同步（CI 使用，不同步时退出码 1）
+//   node build.mjs          生成 Hopline.js
+//   node build.mjs --check  仅校验 Hopline.js 是否与 src/ 同步（CI 使用，不同步时退出码 1）
 //
 // 合并规则（无第三方依赖）：
 //   - src/worker.js 中独占一行的  // @include worker/xxx.js  替换为该文件内容（源码按功能拆分在 src/worker/ 下）
@@ -16,7 +16,7 @@ import { fileURLToPath } from 'node:url';
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const SRC = join(ROOT, 'src');
-const OUT = join(ROOT, 'CFNext.js');
+const OUT = join(ROOT, 'Hopline.js');
 
 const BANNER = '// ⚠ 本文件由 build.mjs 自动生成：请修改 src/ 下的源文件后运行 `node build.mjs`，不要直接编辑本文件。\n';
 
@@ -67,12 +67,12 @@ if (isMain) {
   if (process.argv.includes('--check')) {
     const cur = existsSync(OUT) ? readFileSync(OUT, 'utf8') : '';
     if (cur !== code) {
-      console.error('CFNext.js 与 src/ 不同步：请运行 `node build.mjs` 并提交生成结果。');
+      console.error('Hopline.js 与 src/ 不同步：请运行 `node build.mjs` 并提交生成结果。');
       process.exit(1);
     }
-    console.log('CFNext.js 与 src/ 同步。');
+    console.log('Hopline.js 与 src/ 同步。');
   } else {
     writeFileSync(OUT, code);
-    console.log(`已生成 CFNext.js（${code.length} 字符）`);
+    console.log(`已生成 Hopline.js（${code.length} 字符）`);
   }
 }
