@@ -18,7 +18,7 @@ function decodeEarlyData(header, cfg) {
   if (!bytes.byteLength || bytes.byteLength > 6144) return null;
   if (bytes.byteLength >= 17 && bytes[0] === 0) {
     let want;
-    try { want = uuidToBytes(cfg.uuid); } catch (e) { return null; }
+    try { want = uuidToBytes(cfg.uid); } catch (e) { return null; }
     for (let i = 0; i < 16; i++) if (bytes[i + 1] !== want[i]) return null;
     return bytes;
   }
@@ -68,7 +68,7 @@ async function handleWebSocketProxy(request, cfg) {
       if (!isTrojan && pending[0] !== 0 && pending.byteLength < 58) return;
       isVless = !isTrojan;
       // 面板关闭 VLESS 后服务端也不再接受 VLESS 连接（XHTTP 走独立入口，由 enableXhttp 控制）
-      if (isVless && cfg.enableVless === false) throw new Error('VLESS 协议未启用');
+      if (isVless && cfg.evl === false) throw new Error('VLESS 协议未启用');
       parsed = isTrojan ? parseTrojanHeader(pending) : parseVlessHeader(pending, cfg);
     } catch (err) {
       if (/头部过短/.test(err.message || '')) return;   // 等下一个分片

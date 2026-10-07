@@ -22,7 +22,7 @@ async function loadConfig(env) {
   }
   const cfg = buildConfig(env, kvCfg);
   if (kvError) cfg._kvError = kvError;
-  if (!cfg.uuid && !kvError) await provisionUuid(env, kvCfg, cfg);
+  if (!cfg.uid && !kvError) await provisionUuid(env, kvCfg, cfg);
   return cfg;
 }
 
@@ -43,11 +43,11 @@ async function provisionUuid(env, kvCfg, cfg) {
   let uuid = AUTO_UUIDS.get(kv);
   if (!uuid) {
     uuid = uuidv4();
-    try { await kv.put('config', JSON.stringify(Object.assign({}, kvCfg || {}, { uuid }))); }
+    try { await kv.put('config', JSON.stringify(Object.assign({}, kvCfg || {}, { uid: uuid }))); }
     catch (e) { cfg._kvError = 'unavailable'; return; }
     AUTO_UUIDS.set(kv, uuid);
   }
-  cfg.uuid = uuid;
+  cfg.uid = uuid;
 }
 
 // 面板路径（环境变量 PATH）：去掉首尾 /，只允许 字母 数字 . _ ~ -，且不能是保留路径。返回 { value, error }
@@ -60,19 +60,19 @@ function normalizePanelPath(raw) {
 }
 
 // 由「默认值 < 环境变量 < KV 配置 < 锁定的环境变量」组装完整配置（纯函数：保存接口用刚写入的数据直接组装，
-// 不经 KV 边缘缓存，避免保存后回读到旧配置）。cfg.uuid 为空表示尚未设置（loadConfig 负责生成），cfg.path 为空表示 PATH 未设置 / 非法
+// 不经 KV 边缘缓存，避免保存后回读到旧配置）。cfg.uid 为空表示尚未设置（loadConfig 负责生成），cfg.pth 为空表示 PATH 未设置 / 非法
 function buildConfig(env, kvCfg) {
   const cfg = schemaDefaults();
   const flag = (v) => v === true || v === 'true' || v === '1' || v === 1;
   // 环境变量
-  if (envVar(env, 'uuid')) cfg.uuid = String(envVar(env, 'uuid')).toLowerCase();
-  if (env.HOST) cfg.host = String(env.HOST).replace(/^https?:\/\//, '').split('/')[0];
-  if (env.PROXYIP) cfg.proxyIP = String(env.PROXYIP);
-  if (envVar(env, 'outbound')) cfg.outboundProxy = String(envVar(env, 'outbound'));
-  if (flag(envVar(env, 'ech'))) cfg.ech = true;
-  if (flag(envVar(env, 'trojan'))) cfg.enableTrojan = true;
-  if (env.TROJAN_PASSWORD) cfg.trojanPassword = String(env.TROJAN_PASSWORD);
-  if (env.ALPN) cfg.alpn = String(env.ALPN);
+  if (envVar(env, 'uuid')) cfg.uid = String(envVar(env, 'uuid')).toLowerCase();
+  if (env.HOST) cfg.hst = String(env.HOST).replace(/^https?:\/\//, '').split('/')[0];
+  if (env.PROXYIP) cfg.pxy = String(env.PROXYIP);
+  if (envVar(env, 'outbound')) cfg.obp = String(envVar(env, 'outbound'));
+  if (flag(envVar(env, 'ech'))) cfg.ecn = true;
+  if (flag(envVar(env, 'trojan'))) cfg.etr = true;
+  if (env.TROJAN_PASSWORD) cfg.trp = String(env.TROJAN_PASSWORD);
+  if (env.ALPN) cfg.apn = String(env.ALPN);
   // KV 图形化配置（更高优先级）：按字段表逐项合并，未登记的字段自动忽略
   if (kvCfg && typeof kvCfg === 'object') {
     for (const d of CONFIG_SCHEMA) {
@@ -89,11 +89,11 @@ function buildConfig(env, kvCfg) {
     setPath(cfg, key, v);
   }
   // UUID：KV 中为空或非法时回退环境变量；仍无效则留空（loadConfig 生成并保存）
-  cfg.uuid = String(cfg.uuid || '').toLowerCase();
-  if (!isUUID(cfg.uuid)) cfg.uuid = envUuid(env);
+  cfg.uid = String(cfg.uid || '').toLowerCase();
+  if (!isUUID(cfg.uid)) cfg.uid = envUuid(env);
   // 面板路径只认环境变量 PATH（不再回退 UUID）；非法值按未设置处理并记下原因
-  const np = normalizePanelPath(locked.path ? env[locked.path] : '');
-  cfg.path = np.value;
+  const np = normalizePanelPath(locked.pth ? env[locked.pth] : '');
+  cfg.pth = np.value;
   if (np.error) cfg._pathError = np.error;
   return cfg;
 }

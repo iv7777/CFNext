@@ -6,6 +6,17 @@
 
 ---
 
+# 更新日志 _V2.3.0
+
+### 🔧 构建与命名调整（全新独立实现，不兼容旧部署）
+
+- **部署文件 `Hopline.js` 现为压缩产物**：`build.mjs` 用 terser 压缩合并后的 worker 代码——所有函数 / 变量名精简重命名、位置重排、注释全部删除；面板代码（HTML/CSS/JS）也去除注释（面板对外的函数名因由 HTML 内联事件调用而保留）。顶部保留一行 `/*!Hopline vX.Y.Z*/` 版本横幅，供「检测更新」解析版本号
+- **KV 配置字段 / 接口字段名全部更名**（如 `uuid`→`uid`、`relay.mode`→`rl.md` 等）：面板由字段表驱动，使用上无差别，但**旧版导出的备份 JSON 无法再导入**，旧 KV 中的配置键名也不再识别
+- 环境变量名（`PATH` / `ADMIN` / `UUID` / `PROXYIP` …）与对外路径（`/<PATH>`、`/sub`）、协议与客户端订阅格式（VLESS / Trojan / XHTTP、Clash / sing-box 等）**保持不变**
+- 构建改为依赖 terser（通过 npx 获取，与 eslint 一致，仓库本身仍无第三方依赖）；`node build.mjs --check` 可复现校验
+
+---
+
 # 更新日志 _V2.2.1
 
 ### 📝 项目更名为 Hopline
@@ -597,7 +608,7 @@
 | 项 | 内容 |
 |---|---|
 | 项目名称 | **Hopline · Cloudflare 代理订阅面板** |
-| 当前版本 | v2.2.1 |
+| 当前版本 | v2.3.0 |
 | 运行环境 | Cloudflare Workers / Pages |
 | 部署形态 | 单文件 Worker/Pages（`Hopline.js`，由 `src/` 构建生成，见「九、开发与构建」） |
 | 数据存储 | Cloudflare KV（绑定变量 **CONFIG_KV**）；未绑定时面板无法保存，仅环境变量生效，且必须设置 `UUID` |
@@ -804,12 +815,12 @@
 | `src/panel/panel.css` | 面板样式（日间 / 夜间主题） |
 | `src/panel/panel.js` | 面板前端脚本（由字段表驱动的表单回填、收集、校验与错误提示） |
 | `src/panel/login.html` | 登录页 |
-| `build.mjs` | 零依赖构建脚本：拼接 `src/worker/*.js`、内联面板页面，输出 `Hopline.js` |
+| `build.mjs` | 构建脚本：拼接 `src/worker/*.js`、内联面板页面（去注释），再用 terser 压缩 worker 代码（精简并重命名所有名称、删除注释），输出 `Hopline.js`；terser 通过 npx 获取（与 eslint 一致，仓库本身仍无依赖） |
 | `eslint.config.mjs` | 静态检查配置（`npm run lint`，CI 中运行） |
 | `test/` | `node:test` 测试（模拟 KV 与 Workers 运行时，无需安装依赖） |
 
 ```bash
-node build.mjs          # 修改 src/ 后重新生成 Hopline.js（需 Node.js 20.6+，CI 使用 22）
+node build.mjs          # 修改 src/ 后重新生成 Hopline.js（需 Node.js 20.6+，CI 使用 22；首次会通过 npx 拉取 terser）
 npm test                # 校验 Hopline.js 与 src/ 同步，并运行测试
 npm run lint            # eslint 静态检查（通过 npx 获取，仓库本身仍无依赖）
 ```

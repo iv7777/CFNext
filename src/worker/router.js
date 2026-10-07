@@ -55,9 +55,9 @@ const AUTH_TTL_MS = 24 * 60 * 60 * 1000;
 const AUTH_MAX_MS = 7 * 24 * 60 * 60 * 1000;
 const AUTH_REFRESH_MIN_MS = 10 * 60 * 1000;   // 新有效期至少比当前晚 10 分钟才重新签发（连续操作时不必每个请求都换 Cookie）
 // 当前生效的管理用户名（KV 中为空等异常情况回落默认 admin）
-function adminUserOf(cfg) { return String(cfg.adminUser || '') || 'admin'; }
+function adminUserOf(cfg) { return String(cfg.adu || '') || 'admin'; }
 // 会话签名密钥含用户名：修改用户名与修改密码一样，使其它浏览器的登录态失效
-function authKey(cfg) { return 'hopline-auth|' + String(cfg.admin) + '|' + String(cfg.uuid) + '|' + adminUserOf(cfg); }
+function authKey(cfg) { return 'hopline-auth|' + String(cfg.adp) + '|' + String(cfg.uid) + '|' + adminUserOf(cfg); }
 // iat：登录时间（续期时沿用，保证 7 天上限从首次登录算起）；返回 { token, exp }
 async function makeAuthToken(cfg, iat) {
   const now = Date.now();
@@ -68,7 +68,7 @@ async function makeAuthToken(cfg, iat) {
 // 校验登录 Cookie：有效时返回会话 { exp, iat }，否则 false。
 // 传入 state 时顺便判断是否需要续期，需要则把新 Cookie 放到 state.setCookie（由 fetch 入口附加到响应上）
 async function requireAuth(request, cfg, state) {
-  if (!cfg.admin) return false;
+  if (!cfg.adp) return false;
   const cookies = request.headers.get('Cookie') || '';
   const m = cookies.match(/(?:^|;\s*)hopline_auth=([^;]+)/);
   if (!m) return false;
@@ -136,10 +136,10 @@ function authCookie(token, exp) {
 function publicConfig(cfg, env) {
   const out = pickSchema(cfg);
   out.version = VERSION;
-  out.adminSet = !!cfg.admin;
-  delete out.admin;
-  out.path = cfg.path;                              // 环境变量 PATH 提供（面板中只读）
-  out.panelPath = cfg.path;                         // 当前生效的面板路径
+  out.adpSet = !!cfg.adp;
+  delete out.adp;
+  out.pth = cfg.pth;                              // 环境变量 PATH 提供（面板中只读）
+  out.panelPath = cfg.pth;                         // 当前生效的面板路径
   out.envLocked = envLockedFields(env);             // { 字段: 环境变量名 }：面板中只读
   out.kv = !!(kvStore(env) && typeof kvStore(env).put === 'function');
   out.builtinPrefDomains = DEFAULT_PREFERRED_DOMAINS.split('\n');   // 面板「载入内置列表」使用
@@ -175,7 +175,7 @@ function panelPage() {
 // UUID 可选——未绑定 KV 时没有地方保存自动生成的 UUID，此时必须手动设置
 function setupProblems(env, cfg) {
   const lines = [];
-  if (!cfg.path) {
+  if (!cfg.pth) {
     lines.push(cfg._pathError
       ? '环境变量 PATH 的值不正确：' + cfg._pathError + '。'
       : 'Hopline 尚未完成配置：请在 Worker 环境变量中设置 PATH（面板、订阅与节点共用的访问路径，如 mypanel）和 ADMIN（管理密码），然后重新访问。从旧版升级时：旧版的默认路径就是 UUID，把 PATH 设为原来的 UUID（或之前用 D 设置的路径）即可保持节点与订阅地址不变。');
@@ -202,7 +202,7 @@ async function handleRequest(request, env, state) {
   // 必填项缺失：PATH（面板 / 订阅 / 节点的访问路径）未设置或非法，或没有 UUID 又无处保存。没有路径就无法路由任何请求，统一返回设置说明
   const setupMsg = setupProblems(env, cfg);
   if (setupMsg) return new Response(setupMsg, { status: 503, headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' } });
-  const panelPath = cfg.path;
+  const panelPath = cfg.pth;
   const path = url.pathname.replace(/^\/+|\/+$/g, '');
   const segs = path.split('/');
 
@@ -215,7 +215,7 @@ async function handleRequest(request, env, state) {
   // ---------- 登录 ----------
   if (segs[0] === 'login') {
     // 未设置 ADMIN 时登录页不存在（避免暴露面板路径）
-    if (!cfg.admin) return new Response('Not Found', { status: 404 });
+    if (!cfg.adp) return new Response('Not Found', { status: 404 });
     if (request.method === 'POST') {
       const clientIp = request.headers.get('CF-Connecting-IP') || 'unknown';
       const body = await request.text();
@@ -224,7 +224,7 @@ async function handleRequest(request, env, state) {
       if (loginBlocked(clientIp)) return json({ ok: false, msg: '尝试次数过多，请 15 分钟后再试' }, 429);
       // 用户名与密码都校验完再判定（密码校验总会执行，不因用户名错误提前返回），错误提示不区分是哪一项
       const userOk = timingSafeEqual(params.get('username') || '', adminUserOf(cfg));
-      const passOk = await verifyAdminPassword(cfg.admin, params.get('password') || '');
+      const passOk = await verifyAdminPassword(cfg.adp, params.get('password') || '');
       if (userOk && passOk) {
         loginSuccess(clientIp);
         const t = await makeAuthToken(cfg);
@@ -246,8 +246,8 @@ async function handleRequest(request, env, state) {
   // 订阅入口：自定义订阅路径（如 /AAZ/sub），留空则为 /<UUID>/sub（面板路径自定义时也是 UUID）；
   // 面板路径下的 /sub 继续可用（兼容已导入的旧订阅地址）。
   // 面板入口、管理 API 与代理入口只认 panelPath，订阅入口下不开放面板与管理接口
-  const subAlias = String(cfg.subUrl || '').trim().replace(/^\/+/, '').replace(/\/+$/, '');
-  const subRoot = subAlias || cfg.uuid;
+  const subAlias = String(cfg.sbu || '').trim().replace(/^\/+/, '').replace(/\/+$/, '');
+  const subRoot = subAlias || cfg.uid;
   const isPanelRoot = segs[0] === panelPath;
   const isSubRoot = isPanelRoot || segs[0] === subRoot;
 
@@ -262,7 +262,7 @@ async function handleRequest(request, env, state) {
       return handleWebSocketProxy(request, cfg);
     }
     if (request.method === 'POST') {
-      if (cfg.enableXhttp) {
+      if (cfg.exh) {
         try { return await handleXhttpProxy(request, cfg); }
         catch (e) { return json({ ok: false, msg: 'xhttp 代理错误: ' + (e.message || e) }, 500); }
       }
@@ -282,7 +282,7 @@ async function handleRequest(request, env, state) {
 
   // ---------- 面板（浏览器访问） ----------
   if (isPanelRoot && segs.length === 1 && isBrowserUA(UA)) {
-    if (!cfg.admin) {
+    if (!cfg.adp) {
       return new Response('面板已禁用：请先在 Worker 环境变量中设置 ADMIN（管理密码），然后重新访问。', { status: 403, headers: { 'Content-Type': 'text/plain; charset=utf-8' } });
     }
     if (!(await requireAuth(request, cfg, state))) {
@@ -324,14 +324,14 @@ async function handleRequest(request, env, state) {
           const crossErrors = crossCheckConfig(merged);
           if (crossErrors.length) return json({ ok: false, msg: formatConfigErrors(crossErrors), errors: crossErrors, ignored }, 400);
           // KV 里的管理密码只存摘要：面板新设的密码（以及 KV 中已有的明文密码）都在这里转成摘要
-          if (merged.admin && !isAdminHash(merged.admin) && !envLockedFields(env).admin) merged.admin = await hashAdminPassword(merged.admin);
+          if (merged.adp && !isAdminHash(merged.adp) && !envLockedFields(env).adp) merged.adp = await hashAdminPassword(merged.adp);
           const stored = await saveConfig(env, merged);
           // 直接用刚写入的数据组装新配置（不回读 KV：边缘缓存可能仍是旧值）
           const fresh = buildConfig(env, stored);
           // UUID / 管理密码 / 管理用户名变更会使登录态签名失效：当前会话已通过鉴权，直接签发新令牌，面板无需重新登录
           // （沿用原登录时间，7 天上限不因此重置）
           const headers = {};
-          if (fresh.admin && authKey(fresh) !== authKey(cfg)) { const t = await makeAuthToken(fresh, authed.iat); headers['Set-Cookie'] = authCookie(t.token, t.exp); }
+          if (fresh.adp && authKey(fresh) !== authKey(cfg)) { const t = await makeAuthToken(fresh, authed.iat); headers['Set-Cookie'] = authCookie(t.token, t.exp); }
           return json({ ok: true, data: publicConfig(fresh, env), ignored, msg: '已保存：本地区立即生效，其他地区约 1 分钟内同步' }, 200, headers);
         } catch (e) { return json({ ok: false, msg: '保存失败: ' + (e.message || e) }, 500); }
       }
@@ -388,7 +388,7 @@ async function handleRequest(request, env, state) {
         r = await domainsFetch(chk.value ? chk.value.split('\n') : DEFAULT_PREFERRED_DOMAINS.split('\n'));
       }
       else if (source === 'api1' || source === 'api2') {
-        const chk = checkFieldValue(SCHEMA_BY_KEY.get('ipsrc.' + source + 'Url'), body.url);
+        const chk = checkFieldValue(SCHEMA_BY_KEY.get('ix.a' + source.slice(3) + 'u'), body.url);
         if (chk.error || !chk.value) return json({ ok: false, msg: chk.error || '请先填写 API 地址' }, 400);
         r = await customApiFetch(chk.value);
       } else return json({ ok: false, msg: '未知来源：' + source }, 400);
