@@ -82,6 +82,7 @@ test('GET /api/config 返回字段表默认值（与旧 DEFAULT_CONFIG 一致）
   assert.deepEqual(d.envLocked, { admin: 'ADMIN' });
   for (const k of ['nodeLimit', 'nodeLimitCount', 'polling', 'cfAccountId', 'cfApiToken', 'cfApiTokenSet', 'quotaAuto', 'caps']) assert.equal(k in d, false, `已移除的配额安全字段 ${k}`);
   assert.equal(d.ipsrc.uouin, true, 'uouin 默认开启');
+  assert.equal(d.ipsrc.wetest, false, '微测网默认关闭');
 });
 
 test('保存空 / 非法 UUID 被拒绝并返回字段级错误（问题 1）', async () => {
@@ -458,6 +459,72 @@ test('uouin 来源：签名与文档一致，按线路命名、只保留 CF 段�
     const links = await subLinks(baseEnv({ K: kv({ config: { enableXhttp: false, ipsrc: { uouin: false } } }) }));
     assert.equal(calls.filter(u => u.includes('uouin')).length, 0);
     assert.ok(!links.some(l => /-U\d+$/.test(nameOf(l))));
+  });
+});
+
+// 微测网页面：服务端渲染的 HTML 表格（data-label 单元格）
+const WETEST_V4 = 'https://www.wetest.vip/page/cloudflare/address_v4.html';
+const WETEST_V6 = 'https://www.wetest.vip/page/cloudflare/address_v6.html';
+const wetestPage = (rows) => '<html><body><table><tr><th>线路名称</th><th>优选地址</th></tr>' + rows.map(([line, ip, colo]) =>
+  `<tr><td data-label="线路名称">${line}</td><td data-label="优选地址">${ip}</td><td data-label="数据中心">${colo}</td></tr>`).join('') + '</table></body></html>';
+
+test('微测网来源：默认关闭；开启后只拉取所选 IP 类型的页面、按线路命名、只保留 CF 段，同一 IP 的多条线路合并', async () => {
+  const handler = (url) => url === WETEST_V4
+    ? new Response(wetestPage([['移动', '104.17.171.3', 'HKG'], ['联通', '104.17.154.27', 'SJC'], ['电信', '8.8.8.8', 'FRA']]))
+    : url === WETEST_V6
+      ? new Response(wetestPage([['移动', '2606:4700:24::2a95:c83b', 'SEA'], ['电信', '2606:4700:24::2a95:c83b', 'SEA'], ['联通', '2001:db8::1', 'LAX']]))
+      : notFound();
+  const cfg = (ipType) => baseEnv({ K: kv({ config: { enableXhttp: false, src: { prefDomain: false }, ipsrc: { hostmonit: false, uouin: false, wetest: true }, filter: { ipType } } }) });
+  const byName = (links) => Object.fromEntries(links.map(l => [nameOf(l), hostOf(l)]));
+  await withFetch(handler, async (calls) => {
+    // 默认关闭：不请求微测网
+    await subLinks(baseEnv({ K: kv({ config: { enableXhttp: false, src: { prefDomain: false }, ipsrc: { hostmonit: false, uouin: false }, filter: { ipType: ['IPv4'] } } }) }));
+    assert.equal(calls.filter(u => u.includes('wetest')).length, 0);
+    // 仅 IPv4：只拉 v4 页面
+    const v4 = await subLinks(cfg(['IPv4']));
+    assert.deepEqual(calls.filter(u => u.includes('wetest')), [WETEST_V4]);
+    assert.deepEqual(byName(v4), { '移动-W01': '104.17.171.3', '联通-W01': '104.17.154.27' }, '非 CF 段的 8.8.8.8 被丢弃');
+    // 仅 IPv6：只拉 v6 页面；同一 IPv6 出现在移动与电信两条线路时合并为一个节点
+    const v6 = await subLinks(cfg(['IPv6']));
+    assert.deepEqual(calls.filter(u => u.includes('wetest')), [WETEST_V4, WETEST_V6]);
+    assert.deepEqual(byName(v6), { '移动/电信-W6-01': '[2606:4700:24::2a95:c83b]' }, '非 CF 段的 2001:db8::1 被丢弃');
+    // IPv4 + IPv6：两页都已缓存（10 分钟），不再请求
+    const both = await subLinks(cfg(['IPv4', 'IPv6']));
+    assert.equal(calls.filter(u => u.includes('wetest')).length, 2);
+    assert.equal(both.length, 3);
+  });
+});
+
+test('微测网测试接口：返回两页合并结果、丢弃项与行摘要；一页版式变化时另一页仍可用并带回错误；需登录', async () => {
+  const env = baseEnv();
+  const cookie = await login(env);
+  const post = () => call(env, `/${UUID}/api/ipsrc-test`, { method: 'POST', cookie, body: { source: 'wetest' } });
+  assert.equal((await call(env, `/${UUID}/api/ipsrc-test`, { method: 'POST', body: { source: 'wetest' } })).status, 403, '未登录');
+  await withFetch((url) => url === WETEST_V4
+    ? new Response(wetestPage([['移动', '104.17.171.3', 'HKG'], ['电信', '8.8.8.8', 'FRA']]))
+    : url === WETEST_V6 ? new Response(wetestPage([['联通', '[2606:4700:24::2a95:c83b]:8443', 'SEA']])) : notFound(), async () => {
+    const d = (await (await post()).json()).data;
+    assert.equal(d.count, 2);
+    assert.deepEqual(d.items.map(x => [x.name, x.ip, x.port]), [['移动-W01', '104.17.171.3', 443], ['联通-W6-01', '2606:4700:24::2a95:c83b', 443]]);
+    assert.deepEqual(d.dropped, ['8.8.8.8']);
+    assert.equal(d.error, '');
+    assert.match(d.raw, /IPv4 页面\n移动  104\.17\.171\.3  HKG/);
+  });
+  await withFetch((url) => url === WETEST_V4 ? new Response(wetestPage([['移动', '104.17.171.3', 'HKG']])) : new Response('<html>改版了</html>'), async () => {
+    const d = (await (await post()).json()).data;
+    assert.equal(d.count, 1, 'v4 页面仍可用');
+    assert.match(d.error, /IPv6：页面中没有解析到 IP/);
+  });
+});
+
+test('HTML 线路表解析支持 IPv6：自定义优选 API 可直接使用微测网 IPv6 页面（含 [IPv6]:端口 与裸 IPv6），非法地址跳过', async () => {
+  const page = wetestPage([['移动', '2606:4700:24::2a95:c83b', 'SEA'], ['联通', '[2606:4700:23::6acf:9b0c]:8443', 'SEA'], ['电信', '2606:4700:zz::1', 'SIN'], ['电信', '2001:db8::1', 'SIN']]);
+  await withFetch((url) => url === 'https://mine.example.com/v6.html' ? new Response(page) : notFound(), async () => {
+    const links = await subLinks(baseEnv({ K: kv({ config: { enableXhttp: false, src: { prefDomain: false }, ipsrc: { hostmonit: false, uouin: false, api1: true, api1Url: 'https://mine.example.com/v6.html' }, filter: { ipType: ['IPv6'] } } }) }));
+    assert.deepEqual(links.map(l => [nameOf(l), hostOf(l), l.match(/\]:(\d+)\?/)[1]]), [
+      ['移动-01', '[2606:4700:24::2a95:c83b]', '443'],
+      ['联通-01', '[2606:4700:23::6acf:9b0c]', '8443'],
+    ]);
   });
 });
 

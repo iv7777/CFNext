@@ -60,6 +60,30 @@ function mergeIpLines(entries) {
 }
 // 读取响应正文（失败返回空串）
 async function readText(res) { try { return await res.text(); } catch (e) { return ''; } }
+// 解析 HTML 线路表（wetest 等页面）：每个 <tr> 中形如 <td data-label="线路名称">…</td><td data-label="优选地址">…</td> 的单元格。
+// 返回 [{ ip, port, cells }]（cells 为 data-label → 文本）。优选地址支持 IPv4[:端口]、[IPv6]:端口 与裸 IPv6，无端口时为 443；地址无效的行跳过
+function parseLineTableRows(content) {
+  const out = [];
+  for (const row of content.match(/<tr[\s\S]*?<\/tr>/g) || []) {
+    const cells = {};
+    for (const td of row.match(/<td[^>]*>[\s\S]*?<\/td>/g) || []) {
+      const lm = td.match(/data-label="([^"]*)"[^>]*>([\s\S]*?)<\/td>/);
+      if (lm) cells[lm[1]] = lm[2].replace(/<[^>]+>/g, '').trim();
+    }
+    const addr = (cells['优选地址'] || '').trim();
+    let m, ip, port;
+    if (addr.indexOf(':') !== addr.lastIndexOf(':')) {   // 两个以上冒号：IPv6
+      m = addr.match(/^\[([0-9a-fA-F:]+)\](?::(\d{1,5}))?$/) || addr.match(/^([0-9a-fA-F:]+)$/);
+      if (!m || !isValidIp(m[1])) continue;
+    } else {
+      m = addr.match(/(\d{1,3}(?:\.\d{1,3}){3})(?::(\d{1,5}))?/);
+      if (!m) continue;
+    }
+    ip = m[1]; port = m[2] ? parseInt(m[2], 10) : 443;
+    out.push({ ip, port, cells });
+  }
+  return out;
+}
 // 单次拉取 HostMonit 并解析（不读写缓存；面板「测试」按钮与订阅生成共用）。
 // 返回 { status, raw, items: 保留的 CF 段节点, dropped: 丢弃的非 CF 段 IP, error }
 async function hostmonitFetch(maxCount) {
@@ -160,6 +184,55 @@ async function customApiFetch(url) {
   for (const x of all) (isValidIp(x.ip) && isCloudflareIP(x.ip) ? r.items : r.dropped).push(isValidIp(x.ip) && isCloudflareIP(x.ip) ? x : x.ip);
   if (!r.items.length && !r.error) r.error = r.dropped.length ? '解析到的地址都不是 Cloudflare 段 IP' : '未能从响应中解析出 IP';
   return r;
+}
+
+// 微测网（wetest.vip）优选：服务端渲染的公开页面，IPv4 / IPv6 各一页，移动 / 联通 / 电信各 5 个实测 Cloudflare IP，约每 15 分钟更新；
+// 按线路命名并带来源后缀（IPv4「移动-W01」，IPv6「移动-W6-01」），运营商筛选按线路生效。
+// 页面是 HTML 表格而非开放 API：版式变化时该来源静默失效、由其它来源兜底；10 分钟缓存，且只拉取当前 IP 类型筛选需要的页面
+const WETEST_PAGES = {
+  v4: { url: 'https://www.wetest.vip/page/cloudflare/address_v4.html', tag: 'W' },
+  v6: { url: 'https://www.wetest.vip/page/cloudflare/address_v6.html', tag: 'W6-' },
+};
+const WETEST_CACHE = { v4: { t: 0, ips: null }, v6: { t: 0, ips: null } };
+// 单次拉取并解析一页（不读写缓存），返回格式同 hostmonitFetch；raw 为解析出的行摘要（HTML 前部全是页头，原文没有排查价值）
+async function wetestPageFetch(fam) {
+  const r = { status: 0, raw: '', items: [], dropped: [], error: '' };
+  const res = await fetchTimeout(WETEST_PAGES[fam].url, { headers: { 'User-Agent': 'Mozilla/5.0' } }, 6000);
+  if (!res) { r.error = '请求失败或超时'; return r; }
+  r.status = res.status;
+  const html = await readText(res);
+  if (!res.ok) { r.error = 'HTTP ' + res.status; r.raw = html; return r; }
+  const rows = parseLineTableRows(html);
+  if (!rows.length) { r.error = '页面中没有解析到 IP（版式可能已变化）'; r.raw = html; return r; }
+  r.raw = rows.map(x => [x.cells['线路名称'], x.ip, x.cells['数据中心'], x.cells['往返延迟'], x.cells['更新时间']].filter(Boolean).join('  ')).join('\n');
+  const entries = rows.map(x => ({ ip: x.ip, line: x.cells['线路名称'] || '优选' }));
+  for (const g of mergeIpLines(entries)) {
+    if (!isCloudflareIP(g.ip)) { r.dropped.push(g.ip); continue; }
+    r.items.push({ ip: g.ip, port: 443, name: g.label + '-' + WETEST_PAGES[fam].tag + g.seq });
+  }
+  if (!r.items.length) r.error = '页面中没有 Cloudflare 段 IP';
+  return r;
+}
+// 面板「测试」：两页都拉取并合并（不读写缓存）
+async function wetestFetch() {
+  const [a, b] = await Promise.all([wetestPageFetch('v4'), wetestPageFetch('v6')]);
+  const r = { status: a.status || b.status, raw: 'IPv4 页面\n' + a.raw + '\n\nIPv6 页面\n' + b.raw, items: [...a.items, ...b.items], dropped: [...a.dropped, ...b.dropped], error: '' };
+  const errs = [a.error && 'IPv4：' + a.error, b.error && 'IPv6：' + b.error].filter(Boolean);
+  if (errs.length) r.error = errs.join('；');
+  return r;
+}
+async function fetchWetestIPs(wantV4, wantV6) {
+  const fams = [wantV4 && 'v4', wantV6 && 'v6'].filter(Boolean);
+  const lists = await Promise.all(fams.map(async (fam) => {
+    const c = WETEST_CACHE[fam];
+    if (c.ips && Date.now() - c.t < 10 * 60 * 1000) return c.ips;
+    const shared = await sharedCacheGet('wetest-' + fam);
+    if (shared && shared.length) { c.t = Date.now(); c.ips = shared; return shared; }
+    const r = await wetestPageFetch(fam);
+    if (r.items.length) { c.t = Date.now(); c.ips = r.items; await sharedCachePut('wetest-' + fam, r.items); }
+    return c.ips || [];   // 本次失败：沿用上次成功结果
+  }));
+  return lists.flat();
 }
 
 // 面板「优选域名 → 测试」：逐个解析域名的 A 记录，看是否落在 Cloudflare 段。

@@ -217,19 +217,10 @@ async function resolvePreferredDomains(domainsStr, limitPerDomain = 100, maxTota
             return rec.slice();
           }
         }
-        // HTML 线路表解析（wetest 等页面）：<td data-label="线路名称">…</td><td data-label="优选地址">IP[:端口]</td>…
+        // HTML 线路表解析（wetest 等页面，IPv4 / IPv6 均可）：<td data-label="线路名称">…</td><td data-label="优选地址">IP[:端口]</td>…
         if (content.includes('<tr') && content.includes('data-label')) {
-          for (const row of content.match(/<tr[\s\S]*?<\/tr>/g) || []) {
+          for (const { ip, port, cells } of parseLineTableRows(content)) {
             if (rec.length >= limitPerDomain) break;
-            const cells = {};
-            for (const td of row.match(/<td[^>]*>[\s\S]*?<\/td>/g) || []) {
-              const lm = td.match(/data-label="([^"]*)"[^>]*>([\s\S]*?)<\/td>/);
-              if (lm) cells[lm[1]] = lm[2].replace(/<[^>]+>/g, '').trim();
-            }
-            const ipm = (cells['优选地址'] || '').match(/(\d{1,3}(?:\.\d{1,3}){3})(?::(\d{1,5}))?/);
-            if (!ipm) continue;
-            const ip = ipm[1];
-            const port = ipm[2] ? parseInt(ipm[2]) : 443;
             const key = ip + ':' + port;
             if (seen.has(key)) continue;
             if (!pass(ip)) continue;

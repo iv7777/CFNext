@@ -363,6 +363,7 @@ async function handleRequest(request, env, state) {
       let r;
       if (source === 'hostmonit') r = await hostmonitFetch(150);
       else if (source === 'uouin') r = await uouinFetch();
+      else if (source === 'wetest') r = await wetestFetch();
       else if (source === 'domains') {
         // 测试面板输入框里尚未保存的域名列表；留空则测试内置列表
         const chk = SERVER_CHECKS.domainList(String((body && body.text) || ''));

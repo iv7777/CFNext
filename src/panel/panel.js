@@ -709,7 +709,7 @@ function closeNodeQr(){ $('nodeQr').classList.remove('show'); }
 document.addEventListener('keydown', function(e){ if (e.key === 'Escape') closeNodeQr(); });
 
 /* ===== 优选 IP 来源测试 ===== */
-var IPSRC_LABELS = { hostmonit: 'HostMonit 实时优选', uouin: 'uouin 分线路优选', api1: '自定义优选 API 1', api2: '自定义优选 API 2', domains: '优选域名' };
+var IPSRC_LABELS = { hostmonit: 'HostMonit 实时优选', uouin: 'uouin 分线路优选', wetest: '微测网优选', api1: '自定义优选 API 1', api2: '自定义优选 API 2', domains: '优选域名' };
 function testOutOf(src){ return $(src === 'domains' ? 'pd-test-out' : 'ps-test-out'); }
 // 构造元素（内容一律走 textContent：原始响应来自外部，不能当 HTML 渲染）
 function mkEl(tag, cls, text){

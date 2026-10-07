@@ -17,7 +17,7 @@ async function generateSubscription(cfg, requestUrl, format, ua) {
   // 节点池由「地址来源」三项组装（rc.preferredDomains / rc.preferredIPs 只是本次订阅的内部中间结果，不是配置项）——
   // 1) 原生地址（src.native）：工作器域名直接作为节点 server 下发（默认关闭）；
   // 2) 优选域名（src.prefDomain）：第三方优选域名直接作为节点 server 下发（客户端连接时动态 DNS 解析，拿到当前最优 CF 边缘 IP）；
-  // 3) 优选 IP（src.prefIp）：自定义优选 API / HostMonit / uouin 等在线来源（「优选配置 → 优选 IP 来源」）。
+  // 3) 优选 IP（src.prefIp）：自定义优选 API / HostMonit / uouin / 微测网等在线来源（「优选配置 → 优选 IP 来源」）。
   // 这些来源都是 Cloudflare 任播 IP / 域名，大多不带地区标记（任播 IP 的落地机房取决于客户端所在网络），
   // 因此面板「节点地区」筛选通常不改变节点构成；来源一律只保留 Cloudflare 段，非 CF 段 IP 无法转发到 Worker
   const src = cfg.src || {};
@@ -34,7 +34,7 @@ async function generateSubscription(cfg, requestUrl, format, ua) {
     rc.preferredDomains = (rc.preferredDomains ? rc.preferredDomains + '\n' : '') + prefList;
   }
   // 「优选 IP」的在线来源（面板「优选配置 → 优选 IP 来源」开关控制，并行拉取，每个来源 1 个子请求、缓存 10 分钟）：
-  // 自定义优选 API 1 / 2（用户自选来源排最前）→ HostMonit → uouin。HostMonit 为纯 IPv4，仅勾选 IPv6 时跳过
+  // 自定义优选 API 1 / 2（用户自选来源排最前）→ HostMonit → uouin → 微测网。HostMonit 为纯 IPv4，仅勾选 IPv6 时跳过；微测网只拉取所选 IP 类型对应的页面
   if (useIp) {
     const ps = cfg.ipsrc || {};
     const apiSrc = (n) => (ps['api' + n] && ps['api' + n + 'Url'])
@@ -45,6 +45,7 @@ async function generateSubscription(cfg, requestUrl, format, ua) {
       apiSrc(2),
       (ps.hostmonit !== false && !onlyV6) ? fetchLatestPreferredIPs(150).catch(() => null) : null,
       ps.uouin === true ? fetchUouinIPs(!onlyV6, wantV6).catch(() => []) : null,
+      ps.wetest === true ? fetchWetestIPs(!onlyV6, wantV6).catch(() => []) : null,
     ]);
     for (const list of results) if (list && list.length) rc.preferredIPs.push(...list);
   }

@@ -18,7 +18,7 @@
 // ============================================================================
 import { connect } from 'cloudflare:sockets';
 
-const VERSION = '2.1.9';
+const VERSION = '2.1.10';
 
 // 更新检测：点击版本号后拉取仓库代码比对版本号；有新版本时返回最新代码供面板复制
 // 版本基准为仓库 main 分支根目录的 CFNext.js（由 build.mjs 生成的部署文件）
@@ -561,6 +561,8 @@ const CONFIG_SCHEMA = [
   { key: 'ipsrc.hostmonit', type: 'bool', def: true, el: 'ps-hostmonit', label: 'HostMonit 实时优选' },
   // uouin 分线路优选：借用 api.uouin.com 网站内部接口（非开放 API，对方可能随时更换签名或封禁），默认开启
   { key: 'ipsrc.uouin', type: 'bool', def: true, el: 'ps-uouin', label: 'uouin 分线路优选' },
+  // 微测网优选：wetest.vip 公开页面（IPv4 / IPv6 各一页，移动 / 联通 / 电信各 5 个，约每 15 分钟更新），默认关闭
+  { key: 'ipsrc.wetest', type: 'bool', def: false, el: 'ps-wetest', label: '微测网优选' },
   // 两个自定义优选 API：填写返回 IP 列表的地址（纯 IP 行 / CSV / HTML 线路表 / base64 订阅 / vless 链接，支持 sub://）
   { key: 'ipsrc.api1', type: 'bool', def: false, el: 'ps-api1-on', label: '自定义优选 API 1' },
   { key: 'ipsrc.api1Url', type: 'string', def: '', el: 'ps-api1-url', label: '自定义优选 API 1 地址', maxLen: 1024,
@@ -2381,6 +2383,30 @@ function mergeIpLines(entries) {
 }
 // 读取响应正文（失败返回空串）
 async function readText(res) { try { return await res.text(); } catch (e) { return ''; } }
+// 解析 HTML 线路表（wetest 等页面）：每个 <tr> 中形如 <td data-label="线路名称">…</td><td data-label="优选地址">…</td> 的单元格。
+// 返回 [{ ip, port, cells }]（cells 为 data-label → 文本）。优选地址支持 IPv4[:端口]、[IPv6]:端口 与裸 IPv6，无端口时为 443；地址无效的行跳过
+function parseLineTableRows(content) {
+  const out = [];
+  for (const row of content.match(/<tr[\s\S]*?<\/tr>/g) || []) {
+    const cells = {};
+    for (const td of row.match(/<td[^>]*>[\s\S]*?<\/td>/g) || []) {
+      const lm = td.match(/data-label="([^"]*)"[^>]*>([\s\S]*?)<\/td>/);
+      if (lm) cells[lm[1]] = lm[2].replace(/<[^>]+>/g, '').trim();
+    }
+    const addr = (cells['优选地址'] || '').trim();
+    let m, ip, port;
+    if (addr.indexOf(':') !== addr.lastIndexOf(':')) {   // 两个以上冒号：IPv6
+      m = addr.match(/^\[([0-9a-fA-F:]+)\](?::(\d{1,5}))?$/) || addr.match(/^([0-9a-fA-F:]+)$/);
+      if (!m || !isValidIp(m[1])) continue;
+    } else {
+      m = addr.match(/(\d{1,3}(?:\.\d{1,3}){3})(?::(\d{1,5}))?/);
+      if (!m) continue;
+    }
+    ip = m[1]; port = m[2] ? parseInt(m[2], 10) : 443;
+    out.push({ ip, port, cells });
+  }
+  return out;
+}
 // 单次拉取 HostMonit 并解析（不读写缓存；面板「测试」按钮与订阅生成共用）。
 // 返回 { status, raw, items: 保留的 CF 段节点, dropped: 丢弃的非 CF 段 IP, error }
 async function hostmonitFetch(maxCount) {
@@ -2481,6 +2507,55 @@ async function customApiFetch(url) {
   for (const x of all) (isValidIp(x.ip) && isCloudflareIP(x.ip) ? r.items : r.dropped).push(isValidIp(x.ip) && isCloudflareIP(x.ip) ? x : x.ip);
   if (!r.items.length && !r.error) r.error = r.dropped.length ? '解析到的地址都不是 Cloudflare 段 IP' : '未能从响应中解析出 IP';
   return r;
+}
+
+// 微测网（wetest.vip）优选：服务端渲染的公开页面，IPv4 / IPv6 各一页，移动 / 联通 / 电信各 5 个实测 Cloudflare IP，约每 15 分钟更新；
+// 按线路命名并带来源后缀（IPv4「移动-W01」，IPv6「移动-W6-01」），运营商筛选按线路生效。
+// 页面是 HTML 表格而非开放 API：版式变化时该来源静默失效、由其它来源兜底；10 分钟缓存，且只拉取当前 IP 类型筛选需要的页面
+const WETEST_PAGES = {
+  v4: { url: 'https://www.wetest.vip/page/cloudflare/address_v4.html', tag: 'W' },
+  v6: { url: 'https://www.wetest.vip/page/cloudflare/address_v6.html', tag: 'W6-' },
+};
+const WETEST_CACHE = { v4: { t: 0, ips: null }, v6: { t: 0, ips: null } };
+// 单次拉取并解析一页（不读写缓存），返回格式同 hostmonitFetch；raw 为解析出的行摘要（HTML 前部全是页头，原文没有排查价值）
+async function wetestPageFetch(fam) {
+  const r = { status: 0, raw: '', items: [], dropped: [], error: '' };
+  const res = await fetchTimeout(WETEST_PAGES[fam].url, { headers: { 'User-Agent': 'Mozilla/5.0' } }, 6000);
+  if (!res) { r.error = '请求失败或超时'; return r; }
+  r.status = res.status;
+  const html = await readText(res);
+  if (!res.ok) { r.error = 'HTTP ' + res.status; r.raw = html; return r; }
+  const rows = parseLineTableRows(html);
+  if (!rows.length) { r.error = '页面中没有解析到 IP（版式可能已变化）'; r.raw = html; return r; }
+  r.raw = rows.map(x => [x.cells['线路名称'], x.ip, x.cells['数据中心'], x.cells['往返延迟'], x.cells['更新时间']].filter(Boolean).join('  ')).join('\n');
+  const entries = rows.map(x => ({ ip: x.ip, line: x.cells['线路名称'] || '优选' }));
+  for (const g of mergeIpLines(entries)) {
+    if (!isCloudflareIP(g.ip)) { r.dropped.push(g.ip); continue; }
+    r.items.push({ ip: g.ip, port: 443, name: g.label + '-' + WETEST_PAGES[fam].tag + g.seq });
+  }
+  if (!r.items.length) r.error = '页面中没有 Cloudflare 段 IP';
+  return r;
+}
+// 面板「测试」：两页都拉取并合并（不读写缓存）
+async function wetestFetch() {
+  const [a, b] = await Promise.all([wetestPageFetch('v4'), wetestPageFetch('v6')]);
+  const r = { status: a.status || b.status, raw: 'IPv4 页面\n' + a.raw + '\n\nIPv6 页面\n' + b.raw, items: [...a.items, ...b.items], dropped: [...a.dropped, ...b.dropped], error: '' };
+  const errs = [a.error && 'IPv4：' + a.error, b.error && 'IPv6：' + b.error].filter(Boolean);
+  if (errs.length) r.error = errs.join('；');
+  return r;
+}
+async function fetchWetestIPs(wantV4, wantV6) {
+  const fams = [wantV4 && 'v4', wantV6 && 'v6'].filter(Boolean);
+  const lists = await Promise.all(fams.map(async (fam) => {
+    const c = WETEST_CACHE[fam];
+    if (c.ips && Date.now() - c.t < 10 * 60 * 1000) return c.ips;
+    const shared = await sharedCacheGet('wetest-' + fam);
+    if (shared && shared.length) { c.t = Date.now(); c.ips = shared; return shared; }
+    const r = await wetestPageFetch(fam);
+    if (r.items.length) { c.t = Date.now(); c.ips = r.items; await sharedCachePut('wetest-' + fam, r.items); }
+    return c.ips || [];   // 本次失败：沿用上次成功结果
+  }));
+  return lists.flat();
 }
 
 // 面板「优选域名 → 测试」：逐个解析域名的 A 记录，看是否落在 Cloudflare 段。
@@ -2723,19 +2798,10 @@ async function resolvePreferredDomains(domainsStr, limitPerDomain = 100, maxTota
             return rec.slice();
           }
         }
-        // HTML 线路表解析（wetest 等页面）：<td data-label="线路名称">…</td><td data-label="优选地址">IP[:端口]</td>…
+        // HTML 线路表解析（wetest 等页面，IPv4 / IPv6 均可）：<td data-label="线路名称">…</td><td data-label="优选地址">IP[:端口]</td>…
         if (content.includes('<tr') && content.includes('data-label')) {
-          for (const row of content.match(/<tr[\s\S]*?<\/tr>/g) || []) {
+          for (const { ip, port, cells } of parseLineTableRows(content)) {
             if (rec.length >= limitPerDomain) break;
-            const cells = {};
-            for (const td of row.match(/<td[^>]*>[\s\S]*?<\/td>/g) || []) {
-              const lm = td.match(/data-label="([^"]*)"[^>]*>([\s\S]*?)<\/td>/);
-              if (lm) cells[lm[1]] = lm[2].replace(/<[^>]+>/g, '').trim();
-            }
-            const ipm = (cells['优选地址'] || '').match(/(\d{1,3}(?:\.\d{1,3}){3})(?::(\d{1,5}))?/);
-            if (!ipm) continue;
-            const ip = ipm[1];
-            const port = ipm[2] ? parseInt(ipm[2]) : 443;
             const key = ip + ':' + port;
             if (seen.has(key)) continue;
             if (!pass(ip)) continue;
@@ -3406,7 +3472,7 @@ async function generateSubscription(cfg, requestUrl, format, ua) {
   // 节点池由「地址来源」三项组装（rc.preferredDomains / rc.preferredIPs 只是本次订阅的内部中间结果，不是配置项）——
   // 1) 原生地址（src.native）：工作器域名直接作为节点 server 下发（默认关闭）；
   // 2) 优选域名（src.prefDomain）：第三方优选域名直接作为节点 server 下发（客户端连接时动态 DNS 解析，拿到当前最优 CF 边缘 IP）；
-  // 3) 优选 IP（src.prefIp）：自定义优选 API / HostMonit / uouin 等在线来源（「优选配置 → 优选 IP 来源」）。
+  // 3) 优选 IP（src.prefIp）：自定义优选 API / HostMonit / uouin / 微测网等在线来源（「优选配置 → 优选 IP 来源」）。
   // 这些来源都是 Cloudflare 任播 IP / 域名，大多不带地区标记（任播 IP 的落地机房取决于客户端所在网络），
   // 因此面板「节点地区」筛选通常不改变节点构成；来源一律只保留 Cloudflare 段，非 CF 段 IP 无法转发到 Worker
   const src = cfg.src || {};
@@ -3423,7 +3489,7 @@ async function generateSubscription(cfg, requestUrl, format, ua) {
     rc.preferredDomains = (rc.preferredDomains ? rc.preferredDomains + '\n' : '') + prefList;
   }
   // 「优选 IP」的在线来源（面板「优选配置 → 优选 IP 来源」开关控制，并行拉取，每个来源 1 个子请求、缓存 10 分钟）：
-  // 自定义优选 API 1 / 2（用户自选来源排最前）→ HostMonit → uouin。HostMonit 为纯 IPv4，仅勾选 IPv6 时跳过
+  // 自定义优选 API 1 / 2（用户自选来源排最前）→ HostMonit → uouin → 微测网。HostMonit 为纯 IPv4，仅勾选 IPv6 时跳过；微测网只拉取所选 IP 类型对应的页面
   if (useIp) {
     const ps = cfg.ipsrc || {};
     const apiSrc = (n) => (ps['api' + n] && ps['api' + n + 'Url'])
@@ -3434,6 +3500,7 @@ async function generateSubscription(cfg, requestUrl, format, ua) {
       apiSrc(2),
       (ps.hostmonit !== false && !onlyV6) ? fetchLatestPreferredIPs(150).catch(() => null) : null,
       ps.uouin === true ? fetchUouinIPs(!onlyV6, wantV6).catch(() => []) : null,
+      ps.wetest === true ? fetchWetestIPs(!onlyV6, wantV6).catch(() => []) : null,
     ]);
     for (const list of results) if (list && list.length) rc.preferredIPs.push(...list);
   }
@@ -3957,11 +4024,13 @@ pre.code{background:var(--bg2);border:1px solid var(--border);border-radius:8px;
         <div class="proto-row"><label class="switch"><input type="checkbox" id="ps-hostmonit"><span class="sl"></span></label><span>HostMonit 实时优选（按移动 / 联通 / 电信分线路实测，节点名如「移动-01」）</span><span style="flex:1"></span><button type="button" class="btn sm" id="ps-test-hostmonit" onclick="testIpSource('hostmonit')">测试</button></div>
         <div class="proto-row"><label class="switch"><input type="checkbox" id="ps-uouin"><span class="sl"></span></label><span>uouin 分线路优选（电信 / 联通 / 移动 / 多线 / IPv6，节点名如「电信-U01」）</span><span style="flex:1"></span><button type="button" class="btn sm" id="ps-test-uouin" onclick="testIpSource('uouin')">测试</button></div>
         <p class="hint" style="margin:4px 0 10px">uouin 使用的是对方网站的内部接口（非开放 API），对方可能随时更换签名或封禁，届时该来源静默失效、由其它来源兜底；默认开启，如不需要可关闭。</p>
+        <div class="proto-row"><label class="switch"><input type="checkbox" id="ps-wetest"><span class="sl"></span></label><span>微测网优选（wetest.vip：移动 / 联通 / 电信各 5 个，IPv4 与 IPv6 各一页，节点名如「移动-W01」「移动-W6-01」）</span><span style="flex:1"></span><button type="button" class="btn sm" id="ps-test-wetest" onclick="testIpSource('wetest')">测试</button></div>
+        <p class="hint" style="margin:4px 0 10px">微测网读取的是对方的公开页面（HTML 表格，非开放 API），约每 15 分钟更新；版式变化或不可达时该来源静默失效、由其它来源兜底。默认关闭；只拉取当前「IP 类型」筛选需要的页面（IPv4 / IPv6 各占 1 个子请求）。</p>
         <div class="proto-row"><label class="switch"><input type="checkbox" id="ps-api1-on"><span class="sl"></span></label><span>自定义优选 API 1</span><span style="flex:1"></span><button type="button" class="btn sm" id="ps-test-api1" onclick="testIpSource('api1')">测试</button></div>
         <div class="field"><input type="text" id="ps-api1-url" placeholder="https://example.com/ips.txt（纯 IP 行 / CSV / HTML 线路表 / base64 订阅 / sub://）" autocomplete="off"></div>
         <div class="proto-row"><label class="switch"><input type="checkbox" id="ps-api2-on"><span class="sl"></span></label><span>自定义优选 API 2</span><span style="flex:1"></span><button type="button" class="btn sm" id="ps-test-api2" onclick="testIpSource('api2')">测试</button></div>
         <div class="field"><input type="text" id="ps-api2-url" placeholder="https://example.com/ips.csv" autocomplete="off"></div>
-        <p class="hint">仅在「仪表盘 → 地址来源 → 优选 IP」开启时生效。所有来源只保留 Cloudflare 段 IP，结果缓存 10 分钟（绑定自定义域名时，同一机房的实例共享缓存），缓存未命中时每个开启的来源占用 1 个子请求。排列顺序：自定义 API 1 / 2 → HostMonit → uouin。「测试」会立即重新拉取该来源（不影响订阅缓存，开关关闭时也可测试；自定义 API 使用输入框当前地址，无需先保存）。</p>
+        <p class="hint">仅在「仪表盘 → 地址来源 → 优选 IP」开启时生效。所有来源只保留 Cloudflare 段 IP，结果缓存 10 分钟（绑定自定义域名时，同一机房的实例共享缓存），缓存未命中时每个开启的来源占用 1 个子请求。排列顺序：自定义 API 1 / 2 → HostMonit → uouin → 微测网。「测试」会立即重新拉取该来源（不影响订阅缓存，开关关闭时也可测试；自定义 API 使用输入框当前地址，无需先保存）。</p>
         <div id="ps-test-out" class="ipt-out" style="display:none"></div>
       </div>
     </section>
@@ -4044,6 +4113,7 @@ pre.code{background:var(--bg2);border:1px solid var(--border);border-radius:8px;
           <tbody>
             <tr><td>HostMonit 优选（分运营商实测）</td><td class="mono">api.hostmonit.com/get_optimization_ip</td></tr>
             <tr><td>uouin 分线路优选（对方网站内部接口）</td><td class="mono">api.uouin.com/index.php/index/Cloudflare</td></tr>
+            <tr><td>微测网优选（对方公开页面）</td><td class="mono">www.wetest.vip/page/cloudflare/address_v4.html · address_v6.html</td></tr>
             <tr><td>自定义优选 API 1 / 2、优选域名测试</td><td>你填写的地址 / 域名</td></tr>
             <tr><td>DoH 解析（优选域名、反代域名、UDP DNS）</td><td class="mono">cloudflare-dns.com / dns.google / dns.alidns.com / doh.pub</td></tr>
             <tr><td>内置地区反代（直连不通时使用）</td><td class="mono">proxyip.*.cmliussss.net</td></tr>
@@ -4785,7 +4855,7 @@ function closeNodeQr(){ $('nodeQr').classList.remove('show'); }
 document.addEventListener('keydown', function(e){ if (e.key === 'Escape') closeNodeQr(); });
 
 /* ===== 优选 IP 来源测试 ===== */
-var IPSRC_LABELS = { hostmonit: 'HostMonit 实时优选', uouin: 'uouin 分线路优选', api1: '自定义优选 API 1', api2: '自定义优选 API 2', domains: '优选域名' };
+var IPSRC_LABELS = { hostmonit: 'HostMonit 实时优选', uouin: 'uouin 分线路优选', wetest: '微测网优选', api1: '自定义优选 API 1', api2: '自定义优选 API 2', domains: '优选域名' };
 function testOutOf(src){ return $(src === 'domains' ? 'pd-test-out' : 'ps-test-out'); }
 // 构造元素（内容一律走 textContent：原始响应来自外部，不能当 HTML 渲染）
 function mkEl(tag, cls, text){
@@ -5372,6 +5442,7 @@ async function handleRequest(request, env, state) {
       let r;
       if (source === 'hostmonit') r = await hostmonitFetch(150);
       else if (source === 'uouin') r = await uouinFetch();
+      else if (source === 'wetest') r = await wetestFetch();
       else if (source === 'domains') {
         // 测试面板输入框里尚未保存的域名列表；留空则测试内置列表
         const chk = SERVER_CHECKS.domainList(String((body && body.text) || ''));
