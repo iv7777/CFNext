@@ -1,64 +1,158 @@
 #!/usr/bin/env node
-// 构建脚本：把 src/ 下的源文件合并为可直接粘贴部署的单文件 Hopline.js
+// 构建脚本：把 src/ 下的源文件合并、压缩为可直接粘贴部署的单文件 Hopline.js
 //
 //   node build.mjs          生成 Hopline.js
 //   node build.mjs --check  仅校验 Hopline.js 是否与 src/ 同步（CI 使用，不同步时退出码 1）
 //
-// 合并规则（无第三方依赖）：
-//   - src/worker.js 中独占一行的  // @include worker/xxx.js  替换为该文件内容（源码按功能拆分在 src/worker/ 下）
-//   - 合并后的代码中形如  const X = /* @inline panel/panel.html */ '';  的语句，
-//     替换为  const X = String.raw`<文件内容>`;
-//   - 被内联的 HTML 文件中独占一行的  @include 文件名  替换为同目录下该文件的内容
-//   - 输出统一使用 CRLF 换行（与仓库历史版本保持一致，便于网页端对比）
-import { readFileSync, writeFileSync, existsSync } from 'node:fs';
+// 处理流程：
+//   1. 合并 src/worker.js 中的  // @include worker/xxx.js  （保持模块级顺序）
+//   2. 把面板 HTML / CSS / JS 内联进来，内联前按语言各自去掉注释（保留 @HOPLINE_ 占位注释）
+//   3. 用 terser 压缩合并后的 worker 代码：精简并重命名所有顶层与局部名称、删除全部注释；
+//      面板代码位于 String.raw 模板字符串内，terser 不会改动其内容（注释已在第 2 步去除）
+//   4. 顶部保留一行版本横幅 /*!Hopline vX.Y.Z*/，供旧版「检测更新」从远端文件解析版本号
+//
+// terser 通过 npx 调用（与 `npm run lint` 使用 eslint 的方式一致），版本固定以保证 --check 可复现。
+import { readFileSync, writeFileSync, existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { tmpdir } from 'node:os';
+import { execFileSync } from 'node:child_process';
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const SRC = join(ROOT, 'src');
 const OUT = join(ROOT, 'Hopline.js');
-
-const BANNER = '// ⚠ 本文件由 build.mjs 自动生成：请修改 src/ 下的源文件后运行 `node build.mjs`，不要直接编辑本文件。\n';
+const TERSER = 'terser@5.51.2';            // 固定版本：保证不同机器 / CI 产出一致
+const KEEP_COMMENT = /@HOPLINE_/;          // 内联面板代码时唯一保留的注释（运行时占位符）
 
 function read(path) {
   return readFileSync(path, 'utf8').replace(/\r\n/g, '\n');
 }
 
-function expandIncludes(file) {
+// --- 去注释（保留 KEEP_COMMENT，其余原样保留空白与换行，不改变代码布局） -------------
+
+// JavaScript：逐字符扫描，正确跳过字符串与正则字面量，避免误删其中的 // 与 /*
+const REGEX_KW = new Set(['return', 'typeof', 'instanceof', 'in', 'of', 'new', 'delete',
+  'void', 'throw', 'else', 'do', 'yield', 'case', 'await']);
+function stripJsComments(code) {
+  const n = code.length;
+  let out = '', i = 0, prevChar = '', prevWord = '', word = '';
+  const markWord = (ch) => {
+    if (/[\w$]/.test(ch)) { word += ch; } else { if (word) prevWord = word; word = ''; }
+    if (!/\s/.test(ch)) prevChar = ch;
+  };
+  const emit = (s) => { for (const ch of s) markWord(ch); out += s; };
+  while (i < n) {
+    const c = code[i], d = code[i + 1];
+    if (c === '/' && d === '/') {                       // 行注释
+      let j = i + 2; while (j < n && code[j] !== '\n') j++;
+      const text = code.slice(i, j);
+      if (KEEP_COMMENT.test(text)) out += text;
+      i = j; continue;
+    }
+    if (c === '/' && d === '*') {                       // 块注释
+      let j = i + 2; while (j < n && !(code[j] === '*' && code[j + 1] === '/')) j++;
+      j = Math.min(n, j + 2);
+      const text = code.slice(i, j);
+      if (KEEP_COMMENT.test(text)) out += text;         // 占位注释原样保留（含紧邻的 null）
+      i = j; continue;
+    }
+    if (c === '"' || c === "'") {                       // 字符串
+      let j = i + 1;
+      while (j < n) { const e = code[j]; if (e === '\\') { j += 2; continue; } if (e === c) { j++; break; } if (e === '\n') break; j++; }
+      emit(code.slice(i, j)); i = j; continue;
+    }
+    if (c === '`') {                                    // 模板字符串（面板无，稳妥起见仍处理）
+      let j = i + 1;
+      while (j < n) { const e = code[j]; if (e === '\\') { j += 2; continue; } if (e === '`') { j++; break; } j++; }
+      emit(code.slice(i, j)); i = j; continue;
+    }
+    if (c === '/') {                                    // 正则字面量 or 除号
+      let valueEnding;
+      if (/[)\]}]/.test(prevChar)) valueEnding = true;
+      else if (/[\w$]/.test(prevChar)) valueEnding = !REGEX_KW.has(prevWord);
+      else valueEnding = false;
+      if (!valueEnding) {
+        let j = i + 1, inClass = false;
+        while (j < n) { const e = code[j]; if (e === '\\') { j += 2; continue; } if (e === '[') inClass = true; else if (e === ']') inClass = false; else if (e === '/' && !inClass) { j++; break; } else if (e === '\n') break; j++; }
+        emit(code.slice(i, j)); i = j; continue;
+      }
+    }
+    emit(c); i++;
+  }
+  return out;
+}
+function stripCssComments(code) { return code.replace(/\/\*[\s\S]*?\*\//g, ''); }
+function stripHtmlComments(code) { return code.replace(/<!--[\s\S]*?-->/g, ''); }
+
+// --- 面板文件：按扩展名去注释，再展开其中的 @include（子文件已按自身类型去注释） ----------
+function loadPanel(file) {
   const dir = dirname(file);
-  return read(file).replace(/^[ \t]*@include[ \t]+(\S+)[ \t]*\n/gm, (_, name) => {
+  let text = read(file);
+  if (file.endsWith('.js')) text = stripJsComments(text);
+  else if (file.endsWith('.css')) text = stripCssComments(text);
+  else if (file.endsWith('.html')) text = stripHtmlComments(text);
+  return text.replace(/^[ \t]*@include[ \t]+(\S+)[ \t]*\n/gm, (_, name) => {
     const inc = join(dir, name);
     if (!existsSync(inc)) throw new Error(`${file}: @include 的文件不存在：${name}`);
-    const text = expandIncludes(inc);
-    return text.endsWith('\n') ? text : text + '\n';
+    const child = loadPanel(inc);
+    return child.endsWith('\n') ? child : child + '\n';
   });
 }
 
-// 把 src/worker.js 中独占一行的  // @include worker/xxx.js  替换为对应文件内容（可嵌套）。
-// 各文件按在 worker.js 中出现的顺序原样拼接，等价于一个文件：模块级 const 的先后顺序与原来完全一致
-function expandJsIncludes(text, file) {
+// --- worker：按出现顺序拼接 // @include worker/xxx.js（保留注释，terser 稍后统一去除） -------
+function expandWorker(text, file) {
   const dir = dirname(file);
   return text.replace(/^\/\/ @include[ \t]+(\S+)[ \t]*\n/gm, (_, name) => {
     const inc = join(dir, name);
     if (!existsSync(inc)) throw new Error(`${file}: @include 的文件不存在：${name}`);
-    const t = expandJsIncludes(read(inc), inc);
+    const t = expandWorker(read(inc), inc);
     return t.endsWith('\n') ? t : t + '\n';
   });
 }
 
-export function build() {
+// 合并出未压缩的完整源码（含 worker 注释、面板已去注释、保留 import / export）。
+// 测试用它取内部纯函数（压缩产物里名称已被重命名，无法按名取用）。
+export function assemble() {
   const entry = join(SRC, 'worker.js');
-  const worker = expandJsIncludes(read(entry), entry);
+  const worker = expandWorker(read(entry), entry);
   const out = worker.replace(/\/\*\s*@inline\s+(\S+)\s*\*\/\s*''/g, (_, name) => {
-    const file = join(SRC, name);
-    const text = expandIncludes(file);
-    // String.raw 模板内不能出现反引号与 ${，否则会提前结束模板或被当作插值
+    const text = loadPanel(join(SRC, name));
     if (text.includes('`')) throw new Error(`${name}: 内联内容不能包含反引号 \``);
     if (text.includes('${')) throw new Error(`${name}: 内联内容不能包含 \${`);
     return 'String.raw`\n' + text + '`';
   });
   if (/@inline/.test(out.replace(/\/\/.*$/gm, ''))) throw new Error('存在未处理的 @inline 标记');
-  return (BANNER + out).replace(/\n/g, '\r\n');
+  return out;
+}
+
+function versionOf(src) {
+  const m = src.match(/const\s+VERSION\s*=\s*['"]([^'"]+)['"]/);
+  if (!m) throw new Error('未在源码中找到 VERSION');
+  return m[1];
+}
+
+function runTerser(code, opts) {
+  const dir = mkdtempSync(join(tmpdir(), 'hopline-'));
+  try {
+    const inp = join(dir, 'in.js'), cfg = join(dir, 'opts.json');
+    writeFileSync(inp, code);
+    writeFileSync(cfg, JSON.stringify(opts));
+    return execFileSync('npx', ['--yes', TERSER, inp, '--config-file', cfg],
+      { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+}
+
+// 生成压缩后的部署文件（CRLF，与仓库历史一致）
+export function build() {
+  const src = assemble();
+  const version = versionOf(src);
+  const code = runTerser(src, {
+    module: true,
+    compress: { passes: 2 },
+    mangle: { toplevel: true },
+    format: { comments: false, preamble: `/*!Hopline v${version}*/` },
+  }).replace(/\n+$/, '');
+  return (code + '\n').replace(/\n/g, '\r\n');
 }
 
 const isMain = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];

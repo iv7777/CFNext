@@ -404,8 +404,8 @@ test('面板页面注入字段表与共用校验函数', async () => {
   const schema = JSON.parse(schemaJson[1]);
   assert.ok(schema.some(d => d.key === 'uuid' && d.el === 'a-uuid'));
   assert.ok(schema.every(d => !('check' in d)), '仅服务端属性不下发');
-  // 注入的校验函数可在页面独立执行（不依赖外部变量）
-  const src = html.match(/var sharedCheck = (\(function checkFieldValue[\s\S]*?\n\}\));/);
+  // 注入的校验函数可在页面独立执行（不依赖外部变量）；注入内容为单行（terser 压缩），独占一行以 ; 结尾
+  const src = html.match(/^var sharedCheck = (\(function[\s\S]+?\));\s*$/m);
   assert.ok(src, '校验函数已注入');
   const check = new Function('return ' + src[1])();
   assert.deepEqual(check({ type: 'int', min: 1, max: 99 }, '42'), { value: 42 });
@@ -1529,11 +1529,12 @@ test('机房共享缓存：优选 API 结果写入 / 读取 Cache API；命中�
 });
 
 // ---------------- 批次 4：纯函数已知答案 / 协议头模糊测试 / 面板注入 ----------------
-import { readFileSync } from 'node:fs';
 import { createHmac, hkdfSync, createCipheriv, createDecipheriv, randomBytes } from 'node:crypto';
-// 构建产物里的内部函数不对外导出：去掉 import / export default 后在函数作用域内求值，取出要测的纯函数
+import { assemble } from '../build.mjs';
+// 内部函数不对外导出，且构建产物里名称已被 terser 重命名；改用未压缩的合并源码（assemble），
+// 去掉 import / export default 后在函数作用域内求值，取出要测的纯函数
 const internals = (() => {
-  const src = readFileSync(new URL('../Hopline.js', import.meta.url), 'utf8')
+  const src = assemble()
     .replace(/^import .*$/m, '').replace('export default {', 'const __default = {');
   return new Function('connect', src + '\n;return { md5hex, sha224hex, sha1Bytes, hmacSha1, hkdfSha1, poly1305, chacha20Poly1305Seal, chacha20Poly1305Open, parseVlessHeader, parseTrojanHeader, HTTP_PORTS, ipInCidrV6, isValidIp, parseProxyAddress, loginRateKey, relayPlan, RELAY_DOMAINS, SERVER_CHECKS, effectivePrefDomains, DEFAULT_PREFERRED_DOMAINS };')(() => { throw new Error('no sockets'); });
 })();

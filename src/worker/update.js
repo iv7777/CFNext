@@ -1,4 +1,4 @@
-const VERSION = '2.2.1';
+const VERSION = '2.3.0';
 
 // 更新检测：点击版本号后拉取仓库代码比对版本号；有新版本时返回最新代码供面板复制
 // 版本基准为仓库 main 分支根目录的 Hopline.js（由 build.mjs 生成的部署文件）
@@ -17,7 +17,10 @@ function cmpVer(a, b){
   return 0;
 }
 function extractVersion(txt){
-  // 版本号与 Hopline 源码同一位置：const VERSION = 'x.y.z ...'
+  // 压缩后的部署文件顶部横幅：/*!Hopline vX.Y.Z*/（源码里的 const VERSION 已被 terser 内联/改名）
+  const b = txt.match(/Hopline v(\d+\.\d+\.\d+)/);
+  if (b) return b[1];
+  // 回退：未压缩源码里的 const VERSION = 'x.y.z ...'
   const m = txt.match(/const\s+VERSION\s*=\s*['"]([^'"]+)['"]/);
   return m ? m[1] : null;
 }
