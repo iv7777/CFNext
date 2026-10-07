@@ -2,23 +2,23 @@
 // ============================================================================
 //  CFNext —— Cloudflare 代理订阅面板 · 全新独立编写
 //  ----------------------------------------------------------------------------
-//  环境变量：
-//    U            VLESS UUID（必填，同时用作面板访问路径，除非设置了 D）
-//    D / PATH     自定义面板路径（可选）
-//    ADMIN        面板管理密码（必填：未设置时面板与管理 API 一律禁用）
-//    ADMIN_USER   面板管理用户名（可选，默认 admin；登录时与密码一起校验）
-//    HOST         自定义 SNI/Host（可选，默认使用访问所用的域名）
-//    PROXYIP      自定义反代/落地 IP（可选，填写后作为固定出口优先使用；留空则直连失败时由地区反代兜底（面板可配置），格式 host 或 host:port）
-//    S / OUTBOUND 出站代理（可选，socks5:// / http:// / ss:// 或 host:port）
-//    ECH          设为 true/1 开启 ECH 加密（可选）
-//    TROJAN       设为 true/1 开启 Trojan 协议（可选）
-//    TROJAN_PASSWORD  Trojan 密码（可选，留空则使用 UUID）
-//    ALPN         自定义 ALPN 协商（可选）
-//    K            已绑定 KV 命名空间时读取图形化配置
+//  环境变量（必填 2 项，其余可选；旧版短变量名 U / D / S / K / ECH / TROJAN 仍然兼容）：
+//    PATH            【必填】面板、订阅与节点（WebSocket / XHTTP）共用的访问路径，如 mypanel（旧名 D）
+//    ADMIN           【必填】面板管理密码：未设置时面板与管理 API 一律禁用
+//    UUID            VLESS 用户 ID（旧名 U）：留空则首次访问时随机生成并保存到 KV（未绑定 KV 时必须设置）
+//    ADMIN_USER      面板管理用户名（默认 admin；登录时与密码一起校验）
+//    HOST            自定义 SNI/Host（默认使用访问所用的域名）
+//    PROXYIP         自定义反代/落地 IP（填写后作为固定出口优先使用；留空则直连失败时由地区反代兜底（面板可配置），格式 host 或 host:port）
+//    OUTBOUND_PROXY  出站代理（socks5:// / http:// / ss:// 或 host:port；旧名 OUTBOUND、S）
+//    ENABLE_ECH      设为 true/1 开启 ECH 加密（旧名 ECH）
+//    ENABLE_TROJAN   设为 true/1 开启 Trojan 协议（旧名 TROJAN）
+//    TROJAN_PASSWORD Trojan 密码（留空则使用 UUID）
+//    ALPN            自定义 ALPN 协商
+//    CONFIG_KV       KV 命名空间的绑定变量名（旧名 K）：绑定后读取 / 保存图形化配置
 // ============================================================================
 import { connect } from 'cloudflare:sockets';
 
-const VERSION = '2.1.10';
+const VERSION = '2.2.0';
 
 // 更新检测：点击版本号后拉取仓库代码比对版本号；有新版本时返回最新代码供面板复制
 // 版本基准为仓库 main 分支根目录的 CFNext.js（由 build.mjs 生成的部署文件）
@@ -491,6 +491,28 @@ const RELAY_DOMAINS = {
 //   check     仅服务端执行的附加校验（见 SERVER_CHECKS）
 //   custom    面板中由专用代码回填 / 收集（通用逻辑跳过）
 // ---------------------------------------------------------------------------
+// 环境变量名：每项第一个是当前名称，其余是旧版的短变量名（继续兼容，已部署的 Worker 无需改动即可升级）。
+// PATH 与 ADMIN 为必填；其余均可选（UUID 未设置时自动生成，见 config.js）
+const ENV_NAMES = {
+  uuid: ['UUID', 'U'],
+  path: ['PATH', 'D'],
+  admin: ['ADMIN', 'admin'],
+  adminUser: ['ADMIN_USER'],
+  outbound: ['OUTBOUND_PROXY', 'OUTBOUND', 'S'],
+  ech: ['ENABLE_ECH', 'ECH'],
+  trojan: ['ENABLE_TROJAN', 'TROJAN'],
+  kv: ['CONFIG_KV', 'K'],   // KV 命名空间的绑定变量名
+};
+// 读取环境变量（按 ENV_NAMES 顺序取第一个非空的）；未设置返回 undefined
+function envVar(env, key) {
+  for (const n of ENV_NAMES[key]) if (env && env[n] != null && String(env[n]) !== '') return env[n];
+  return undefined;
+}
+// KV 命名空间绑定对象（未绑定返回 null）
+function kvStore(env) {
+  for (const n of ENV_NAMES.kv) if (env && env[n] && typeof env[n] === 'object') return env[n];
+  return null;
+}
 const UUID_PATTERN = '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$';
 const PATH_SEG_PATTERN = '^[A-Za-z0-9._~-]+$';
 const HOSTNAME_PATTERN = '^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*$';
@@ -500,16 +522,16 @@ const CONFIG_SCHEMA = [
   // ---- 面板设置 ----
   { key: 'uuid', type: 'string', def: '', el: 'a-uuid', label: 'UUID', required: true, lower: true,
     pattern: UUID_PATTERN, hint: 'UUID 格式不正确（应为 xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx，可点「生成」）' },
-  // 面板路径：留空使用 UUID
+  // 面板 / 订阅 / 节点（WebSocket、XHTTP）共用的访问路径：由必填的环境变量 PATH 提供（面板中只读）
   { key: 'path', type: 'string', def: '', el: 'a-path', label: '面板路径', maxLen: 128, strip: ['^/+', '/+$'],
-    pattern: PATH_SEG_PATTERN, hint: '只能包含字母、数字及 . _ ~ -（不含 /）', reserved: RESERVED_PATHS, envLock: ['D', 'PATH'] },
+    pattern: PATH_SEG_PATTERN, hint: '只能包含字母、数字及 . _ ~ -（不含 /）', reserved: RESERVED_PATHS, envLock: ENV_NAMES.path },
   // 自定义订阅路径：/<别名>/sub 输出订阅（不开放面板与管理接口）；留空为 /<UUID>/sub
   { key: 'subUrl', type: 'string', def: '', el: 'a-suburl', label: '自定义订阅路径', maxLen: 128, strip: ['^/+', '/+$', '/sub$', '/+$'],
     pattern: PATH_SEG_PATTERN, hint: '只填一段别名，如 AAZ（字母、数字及 . _ ~ -）', reserved: RESERVED_PATHS },
   // 管理用户名：登录时与管理密码一起校验（区分大小写）；留空取默认 admin
   { key: 'adminUser', type: 'string', def: 'admin', el: 'a-adminuser', label: '管理用户名', maxLen: 64, fillDefault: true,
-    pattern: '^[^\\s\\x00-\\x1f\\x7f]+$', hint: '不能包含空格或控制字符', envLock: ['ADMIN_USER'] },
-  { key: 'admin', type: 'secret', def: '', el: 'a-admin', label: '管理密码', trim: false, maxLen: 256, envLock: ['ADMIN', 'admin'], check: 'adminPass' },
+    pattern: '^[^\\s\\x00-\\x1f\\x7f]+$', hint: '不能包含空格或控制字符', envLock: ENV_NAMES.adminUser },
+  { key: 'admin', type: 'secret', def: '', el: 'a-admin', label: '管理密码', trim: false, maxLen: 256, envLock: ENV_NAMES.admin, check: 'adminPass' },
   // 绑定域名：节点 SNI / Host，留空使用访问域名
   { key: 'host', type: 'string', def: '', el: 'a-host', label: '绑定域名', maxLen: 253, strip: ['^https?://', '[/?#].*$'],
     pattern: HOSTNAME_PATTERN, hint: '请填写域名，如 node.example.com' },
@@ -714,7 +736,7 @@ function envLockedFields(env) {
   const out = {};
   for (const d of CONFIG_SCHEMA) {
     if (!d.envLock) continue;
-    const name = d.envLock.find(n => env && env[n] != null && String(env[n]) !== '');
+    const name = d.envLock.find(n => env && env[n] != null && String(env[n]) !== '');   // 按名称顺序：当前名称优先于旧名称
     if (name) out[d.key] = name;
   }
   return out;
@@ -1012,14 +1034,15 @@ function json(obj, status, headers) {
 // 其它机房最多约 1 分钟后同步（面板保存提示即此含义）。
 // ---------------------------------------------------------------------------
 
-// KV 读取失败 / 配置损坏时不能静默当作「没有配置」：否则未设置环境变量 U 时每次请求都会随机生成新 UUID（登录与全部节点同时失效），
+// KV 读取失败 / 配置损坏时不能静默当作「没有配置」：否则未设置环境变量 UUID 时会重新生成 UUID（登录与全部节点同时失效），
 // 在此状态下保存还会用默认值覆盖掉真实配置。cfg._kvError 记录原因（unavailable：KV 读取出错；corrupt：存储内容不是合法 JSON），
 // 调用方据此拒绝写入；节点与订阅在环境变量提供了有效 UUID 时继续按环境变量 + 默认值工作
 async function loadConfig(env) {
   let kvCfg = null, kvError = '';
-  if (env.K && typeof env.K.get === 'function') {
+  const kv = kvStore(env);
+  if (kv && typeof kv.get === 'function') {
     try {
-      const kvJson = await env.K.get('config', { cacheTtl: 30 });
+      const kvJson = await kv.get('config', { cacheTtl: 30 });
       if (kvJson) {
         try { kvCfg = JSON.parse(kvJson); if (!kvCfg || typeof kvCfg !== 'object') throw new SyntaxError('not an object'); }
         catch (e) { kvCfg = null; kvError = 'corrupt'; }
@@ -1028,20 +1051,55 @@ async function loadConfig(env) {
   }
   const cfg = buildConfig(env, kvCfg);
   if (kvError) cfg._kvError = kvError;
+  if (!cfg.uuid && !kvError) await provisionUuid(env, kvCfg, cfg);
   return cfg;
 }
 
+// 环境变量 UUID（有效时返回小写形式，否则空串）
+function envUuid(env) {
+  const v = String(envVar(env, 'uuid') || '').toLowerCase();
+  return isUUID(v) ? v : '';
+}
+
+// UUID 未设置（环境变量与 KV 都没有）：随机生成一个并保存到 KV，之后一直沿用；面板里可以查看与修改。
+// 未绑定 KV 时无处保存（每次请求都重新生成会让节点失效），cfg._uuidUnsaved 标记，由 handleRequest 提示设置 UUID。
+// 首次生成只发生在第一次访问时；KV 跨机房最终一致，极端情况下两个机房同时首次访问可能各生成一个，后写入者生效——
+// 部署后请先自己打开一次面板。同一实例内用 WeakMap 记住已生成的值（KV 边缘缓存最长 30 秒内可能还读不到刚写入的）
+const AUTO_UUIDS = new WeakMap();
+async function provisionUuid(env, kvCfg, cfg) {
+  const kv = kvStore(env);
+  if (!kv || typeof kv.put !== 'function') { cfg._uuidUnsaved = true; return; }
+  let uuid = AUTO_UUIDS.get(kv);
+  if (!uuid) {
+    uuid = uuidv4();
+    try { await kv.put('config', JSON.stringify(Object.assign({}, kvCfg || {}, { uuid }))); }
+    catch (e) { cfg._kvError = 'unavailable'; return; }
+    AUTO_UUIDS.set(kv, uuid);
+  }
+  cfg.uuid = uuid;
+}
+
+// 面板路径（环境变量 PATH）：去掉首尾 /，只允许 字母 数字 . _ ~ -，且不能是保留路径。返回 { value, error }
+function normalizePanelPath(raw) {
+  const v = String(raw == null ? '' : raw).trim().replace(/^\/+/, '').replace(/\/+$/, '');
+  if (!v) return { value: '', error: '' };
+  if (!new RegExp(PATH_SEG_PATTERN).test(v) || v.length > 128) return { value: '', error: '只能包含字母、数字及 . _ ~ -（不含 /），最长 128 位' };
+  if (RESERVED_PATHS.indexOf(v.toLowerCase()) >= 0) return { value: '', error: '「' + v + '」为保留路径，请换一个' };
+  return { value: v, error: '' };
+}
+
 // 由「默认值 < 环境变量 < KV 配置 < 锁定的环境变量」组装完整配置（纯函数：保存接口用刚写入的数据直接组装，
-// 不经 KV 边缘缓存，避免保存后回读到旧配置）
+// 不经 KV 边缘缓存，避免保存后回读到旧配置）。cfg.uuid 为空表示尚未设置（loadConfig 负责生成），cfg.path 为空表示 PATH 未设置 / 非法
 function buildConfig(env, kvCfg) {
   const cfg = schemaDefaults();
+  const flag = (v) => v === true || v === 'true' || v === '1' || v === 1;
   // 环境变量
-  if (env.U) cfg.uuid = String(env.U).toLowerCase();
+  if (envVar(env, 'uuid')) cfg.uuid = String(envVar(env, 'uuid')).toLowerCase();
   if (env.HOST) cfg.host = String(env.HOST).replace(/^https?:\/\//, '').split('/')[0];
   if (env.PROXYIP) cfg.proxyIP = String(env.PROXYIP);
-  if (env.S || env.OUTBOUND) cfg.outboundProxy = String(env.S || env.OUTBOUND);
-  if (env.ECH === 'true' || env.ECH === '1') cfg.ech = true;
-  if (env.TROJAN === 'true' || env.TROJAN === '1') cfg.enableTrojan = true;
+  if (envVar(env, 'outbound')) cfg.outboundProxy = String(envVar(env, 'outbound'));
+  if (flag(envVar(env, 'ech'))) cfg.ech = true;
+  if (flag(envVar(env, 'trojan'))) cfg.enableTrojan = true;
   if (env.TROJAN_PASSWORD) cfg.trojanPassword = String(env.TROJAN_PASSWORD);
   if (env.ALPN) cfg.alpn = String(env.ALPN);
   // KV 图形化配置（更高优先级）：按字段表逐项合并，未登记的字段自动忽略
@@ -1051,7 +1109,7 @@ function buildConfig(env, kvCfg) {
       if (v !== undefined) setPath(cfg, d.key, cloneJSON(v));
     }
   }
-  // 环境变量锁定字段（ADMIN / D）优先于 KV：面板中这些项只读
+  // 环境变量锁定字段（PATH / ADMIN / ADMIN_USER）优先于 KV：面板中这些项只读
   const locked = envLockedFields(env);
   for (const key of Object.keys(locked)) {
     const d = SCHEMA_BY_KEY.get(key);
@@ -1059,19 +1117,21 @@ function buildConfig(env, kvCfg) {
     if (d.lower) v = v.toLowerCase();
     setPath(cfg, key, v);
   }
-  // 兜底：KV 中的 UUID 为空或非法时回退环境变量 U（否则每次请求随机生成新 UUID，登录态与所有节点同时失效），仍无效才随机生成
+  // UUID：KV 中为空或非法时回退环境变量；仍无效则留空（loadConfig 生成并保存）
   cfg.uuid = String(cfg.uuid || '').toLowerCase();
-  if (!isUUID(cfg.uuid) && env.U && isUUID(String(env.U))) cfg.uuid = String(env.U).toLowerCase();
-  if (!isUUID(cfg.uuid)) cfg.uuid = uuidv4();
-  // path 为空或为 "/" 时回退 UUID，保证订阅 ws 路径与面板路径统一为 /UUID
-  if (!cfg.path || cfg.path === '/') { cfg.path = cfg.uuid; cfg._pathAuto = true; }
+  if (!isUUID(cfg.uuid)) cfg.uuid = envUuid(env);
+  // 面板路径只认环境变量 PATH（不再回退 UUID）；非法值按未设置处理并记下原因
+  const np = normalizePanelPath(locked.path ? env[locked.path] : '');
+  cfg.path = np.value;
+  if (np.error) cfg._pathError = np.error;
   return cfg;
 }
 
 // 写入 KV：只保存字段表登记的配置项；由环境变量锁定的字段（管理密码、面板路径）不写入
 // （避免明文密码落盘，也避免与环境变量不一致）。返回实际写入的对象；未绑定 KV 返回 null
 async function saveConfig(env, cfg) {
-  if (!env.K || typeof env.K.put !== 'function') return null;
+  const kv = kvStore(env);
+  if (!kv || typeof kv.put !== 'function') return null;
   const stored = pickSchema(cfg);
   // 环境变量提供、且面板里没有被改动的值不写入 KV：否则一次保存就会把 PROXYIP / TROJAN_PASSWORD / ALPN 等
   // 环境变量快照进 KV（KV 优先级更高），之后再改环境变量会被静默忽略，Trojan 密码等也会明文落盘。
@@ -1090,7 +1150,7 @@ async function saveConfig(env, cfg) {
     const parent = ks.length > 1 ? getPath(stored, ks.slice(0, -1).join('.')) : stored;
     if (parent) delete parent[ks[ks.length - 1]];
   }
-  await env.K.put('config', JSON.stringify(stored));
+  await kv.put('config', JSON.stringify(stored));
   return stored;
 }
 
@@ -4036,21 +4096,21 @@ pre.code{background:var(--bg2);border:1px solid var(--border);border-radius:8px;
     </section>
 
     <!-- ===== 视图：面板设置 ===== -->
-    <section class="view" data-view="account" data-title="面板设置" data-sub="部署基础信息：UUID、面板路径、管理用户名与密码、绑定域名">
+    <section class="view" data-view="account" data-title="面板设置" data-sub="部署基础信息：UUID、面板路径（PATH）、管理用户名与密码、绑定域名">
       <div class="card">
         <h3><span class="tick"></span>基础配置</h3>
-        <div class="field"><label>UUID（订阅节点身份）</label>
+        <div class="field"><label>UUID（订阅节点身份；环境变量 UUID 留空时已自动生成）</label>
           <div class="inrow">
             <input type="text" id="a-uuid" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" autocomplete="off">
             <button class="btn sm" onclick="genUuid()">生成</button>
           </div>
         </div>
-        <div class="field"><label>面板路径（访问入口，留空用 UUID）</label><input type="text" id="a-path" placeholder="留空自动使用 UUID" autocomplete="off"><div class="hint">修改面板路径或 UUID 并保存后，面板会自动跳转到新地址；节点的 WebSocket 路径随之改变，客户端需重新更新订阅。</div></div>
+        <div class="field"><label>面板路径（环境变量 PATH 设置，面板中只读）</label><input type="text" id="a-path" autocomplete="off"><div class="hint">面板、订阅与节点（WebSocket / XHTTP）共用此路径；修改请到 Worker 环境变量 PATH，修改后节点路径随之改变，客户端需重新更新订阅。</div></div>
         <div class="field"><label>自定义订阅路径（只填一段，如 AAZ → /AAZ/sub；留空为 /UUID/sub）</label><input type="text" id="a-suburl" placeholder="AAZ" autocomplete="off"></div>
         <div class="field"><label>管理用户名（登录时需要；留空为 admin，区分大小写）</label><input type="text" id="a-adminuser" placeholder="admin" autocomplete="off" autocapitalize="off" spellcheck="false"></div>
         <div class="field"><label>管理密码（留空保持不变；未设置时面板禁用）</label><input type="password" id="a-admin" placeholder="设置后访问面板需登录" autocomplete="new-password"></div>
         <div class="field" style="margin-bottom:0"><label>绑定域名（留空使用当前访问的域名）</label><input type="text" id="a-host" placeholder="node.example.com" autocomplete="off"></div>
-        <p class="hint" style="margin-top:10px">「绑定域名」仅用于订阅节点主机名（XHTTP 协议要求绑定自定义域名），不负责域名解析。自定义域名访问面板需先在 Cloudflare 面板 → Workers 与 Pages → 该 Worker → Domains &amp; Routes 添加自定义域名（DNS 由 Cloudflare 托管，证书自动签发），此字段留空即使用你访问面板 / 订阅时的域名。未绑定 KV（变量名 K）时无法保存面板配置，只有环境变量生效。</p>
+        <p class="hint" style="margin-top:10px">「绑定域名」仅用于订阅节点主机名（XHTTP 协议要求绑定自定义域名），不负责域名解析。自定义域名访问面板需先在 Cloudflare 面板 → Workers 与 Pages → 该 Worker → Domains &amp; Routes 添加自定义域名（DNS 由 Cloudflare 托管，证书自动签发），此字段留空即使用你访问面板 / 订阅时的域名。未绑定 KV（绑定变量名 CONFIG_KV）时无法保存面板配置，只有环境变量生效。</p>
       </div>
       <div class="card">
         <h3><span class="tick"></span>备份与恢复</h3>
@@ -5217,10 +5277,10 @@ function publicConfig(cfg, env) {
   out.version = VERSION;
   out.adminSet = !!cfg.admin;
   delete out.admin;
-  out.path = cfg._pathAuto ? '' : cfg.path;        // 留空 = 面板路径跟随 UUID
-  out.panelPath = cfg.path;                         // 当前生效的面板路径（保存后面板据此跳转）
+  out.path = cfg.path;                              // 环境变量 PATH 提供（面板中只读）
+  out.panelPath = cfg.path;                         // 当前生效的面板路径
   out.envLocked = envLockedFields(env);             // { 字段: 环境变量名 }：面板中只读
-  out.kv = !!(env.K && typeof env.K.put === 'function');
+  out.kv = !!(kvStore(env) && typeof kvStore(env).put === 'function');
   out.builtinPrefDomains = DEFAULT_PREFERRED_DOMAINS.split('\n');   // 面板「载入内置列表」使用
   out.kvError = cfg._kvError ? kvErrorMessage(cfg._kvError) : '';   // 非空 = 配置存储异常，面板提示且保存被禁用
   return out;
@@ -5250,6 +5310,19 @@ function panelPage() {
   return PANEL_PAGE;
 }
 
+// 必填环境变量检查：返回说明文字（有问题时），否则空串。PATH 必填；ADMIN 必填（缺失时面板与管理接口禁用，见面板入口处的提示）；
+// UUID 可选——未绑定 KV 时没有地方保存自动生成的 UUID，此时必须手动设置
+function setupProblems(env, cfg) {
+  const lines = [];
+  if (!cfg.path) {
+    lines.push(cfg._pathError
+      ? '环境变量 PATH 的值不正确：' + cfg._pathError + '。'
+      : 'CFNext 尚未完成配置：请在 Worker 环境变量中设置 PATH（面板、订阅与节点共用的访问路径，如 mypanel）和 ADMIN（管理密码），然后重新访问。从旧版升级时：旧版的默认路径就是 UUID，把 PATH 设为原来的 UUID（或之前用 D 设置的路径）即可保持节点与订阅地址不变。');
+  }
+  if (cfg._uuidUnsaved) lines.push('未绑定 KV 命名空间（绑定变量名 CONFIG_KV）时，必须设置环境变量 UUID（节点用户 ID）；绑定 KV 后可留空，系统会自动生成并保存。');
+  return lines.join('\n');
+}
+
 async function handleRequest(request, env, state) {
   const url = new URL(request.url);
   const UA = request.headers.get('User-Agent') || '';
@@ -5261,10 +5334,13 @@ async function handleRequest(request, env, state) {
   }
 
   const cfg = await loadConfig(env);
-  // 配置存储异常且环境变量没有提供有效 UUID：此时的 UUID 是随机生成的，继续处理只会让所有节点和登录失效，直接返回 503
-  if (cfg._kvError && !(env.U && isUUID(String(env.U)))) {
+  // 配置存储异常且环境变量没有提供有效 UUID：此时拿不到真实的 UUID，继续处理只会让所有节点和登录失效，直接返回 503
+  if (cfg._kvError && !envUuid(env)) {
     return new Response('配置存储暂不可用，请稍后重试', { status: 503, headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Retry-After': '30' } });
   }
+  // 必填项缺失：PATH（面板 / 订阅 / 节点的访问路径）未设置或非法，或没有 UUID 又无处保存。没有路径就无法路由任何请求，统一返回设置说明
+  const setupMsg = setupProblems(env, cfg);
+  if (setupMsg) return new Response(setupMsg, { status: 503, headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' } });
   const panelPath = cfg.path;
   const path = url.pathname.replace(/^\/+|\/+$/g, '');
   const segs = path.split('/');
@@ -5369,8 +5445,9 @@ async function handleRequest(request, env, state) {
       if (request.method === 'POST') {
         if (cfg._kvError) return json({ ok: false, msg: kvErrorMessage(cfg._kvError) + '，为避免覆盖已有配置，已禁止保存' }, 503);
         // 未绑定 KV 时保存不会持久化，必须拒绝而不是提示「已保存」
-        if (!env.K || typeof env.K.put !== 'function') {
-          return json({ ok: false, msg: '未绑定 KV 命名空间（变量名 K），无法保存面板配置；请在 Worker 设置中绑定 KV 后重试' }, 400);
+        const kv = kvStore(env);
+        if (!kv || typeof kv.put !== 'function') {
+          return json({ ok: false, msg: '未绑定 KV 命名空间（变量名 CONFIG_KV），无法保存面板配置；请在 Worker 设置中绑定 KV 后重试' }, 400);
         }
         let body;
         try { body = await request.json(); } catch (e) { return json({ ok: false, msg: '请求体不是合法的 JSON' }, 400); }
@@ -5379,7 +5456,6 @@ async function handleRequest(request, env, state) {
           const { patch, errors, ignored } = sanitizeConfigPatch(body, env);
           if (errors.length) return json({ ok: false, msg: formatConfigErrors(errors), errors, ignored }, 400);
           const merged = pickSchema(cfg);
-          if (cfg._pathAuto) merged.path = '';
           for (const d of CONFIG_SCHEMA) {
             const v = getPath(patch, d.key);
             if (v !== undefined) setPath(merged, d.key, v);
@@ -5412,14 +5488,15 @@ async function handleRequest(request, env, state) {
       if (request.method !== 'POST') return json({ ok: false, msg: '仅支持 POST' }, 405);
       try {
         if (cfg._kvError === 'unavailable') return json({ ok: false, msg: kvErrorMessage(cfg._kvError) + '，暂时无法重置' }, 503);   // 配置损坏（corrupt）时允许重置来修复
-        if (!env.K || typeof env.K.delete !== 'function') return json({ ok: false, msg: '未绑定 KV 命名空间，无需重置' }, 400);
-        await env.K.delete('config');
+        const kvr = kvStore(env);
+        if (!kvr || typeof kvr.delete !== 'function') return json({ ok: false, msg: '未绑定 KV 命名空间，无需重置' }, 400);
+        await kvr.delete('config');
         return json({ ok: true, msg: '已重置：KV 已清空，面板还原为初始部署状态' });
       } catch (e) { return json({ ok: false, msg: '重置失败: ' + (e.message || e) }, 500); }
     }
 
     if (apiName === 'status') {
-      return json({ ok: true, data: { version: VERSION, host: url.hostname, path: panelPath, region: (request.cf && request.cf.colo) || 'unknown', kv: !!(env.K && typeof env.K.get === 'function'), workersDev: /\.workers\.dev$/i.test(url.hostname) } });
+      return json({ ok: true, data: { version: VERSION, host: url.hostname, path: panelPath, region: (request.cf && request.cf.colo) || 'unknown', kv: !!(kvStore(env) && typeof kvStore(env).get === 'function'), workersDev: /\.workers\.dev$/i.test(url.hostname) } });
     }
 
     if (apiName === 'update') {

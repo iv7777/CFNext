@@ -138,10 +138,10 @@ function publicConfig(cfg, env) {
   out.version = VERSION;
   out.adminSet = !!cfg.admin;
   delete out.admin;
-  out.path = cfg._pathAuto ? '' : cfg.path;        // 留空 = 面板路径跟随 UUID
-  out.panelPath = cfg.path;                         // 当前生效的面板路径（保存后面板据此跳转）
+  out.path = cfg.path;                              // 环境变量 PATH 提供（面板中只读）
+  out.panelPath = cfg.path;                         // 当前生效的面板路径
   out.envLocked = envLockedFields(env);             // { 字段: 环境变量名 }：面板中只读
-  out.kv = !!(env.K && typeof env.K.put === 'function');
+  out.kv = !!(kvStore(env) && typeof kvStore(env).put === 'function');
   out.builtinPrefDomains = DEFAULT_PREFERRED_DOMAINS.split('\n');   // 面板「载入内置列表」使用
   out.kvError = cfg._kvError ? kvErrorMessage(cfg._kvError) : '';   // 非空 = 配置存储异常，面板提示且保存被禁用
   return out;
@@ -171,6 +171,19 @@ function panelPage() {
   return PANEL_PAGE;
 }
 
+// 必填环境变量检查：返回说明文字（有问题时），否则空串。PATH 必填；ADMIN 必填（缺失时面板与管理接口禁用，见面板入口处的提示）；
+// UUID 可选——未绑定 KV 时没有地方保存自动生成的 UUID，此时必须手动设置
+function setupProblems(env, cfg) {
+  const lines = [];
+  if (!cfg.path) {
+    lines.push(cfg._pathError
+      ? '环境变量 PATH 的值不正确：' + cfg._pathError + '。'
+      : 'CFNext 尚未完成配置：请在 Worker 环境变量中设置 PATH（面板、订阅与节点共用的访问路径，如 mypanel）和 ADMIN（管理密码），然后重新访问。从旧版升级时：旧版的默认路径就是 UUID，把 PATH 设为原来的 UUID（或之前用 D 设置的路径）即可保持节点与订阅地址不变。');
+  }
+  if (cfg._uuidUnsaved) lines.push('未绑定 KV 命名空间（绑定变量名 CONFIG_KV）时，必须设置环境变量 UUID（节点用户 ID）；绑定 KV 后可留空，系统会自动生成并保存。');
+  return lines.join('\n');
+}
+
 async function handleRequest(request, env, state) {
   const url = new URL(request.url);
   const UA = request.headers.get('User-Agent') || '';
@@ -182,10 +195,13 @@ async function handleRequest(request, env, state) {
   }
 
   const cfg = await loadConfig(env);
-  // 配置存储异常且环境变量没有提供有效 UUID：此时的 UUID 是随机生成的，继续处理只会让所有节点和登录失效，直接返回 503
-  if (cfg._kvError && !(env.U && isUUID(String(env.U)))) {
+  // 配置存储异常且环境变量没有提供有效 UUID：此时拿不到真实的 UUID，继续处理只会让所有节点和登录失效，直接返回 503
+  if (cfg._kvError && !envUuid(env)) {
     return new Response('配置存储暂不可用，请稍后重试', { status: 503, headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Retry-After': '30' } });
   }
+  // 必填项缺失：PATH（面板 / 订阅 / 节点的访问路径）未设置或非法，或没有 UUID 又无处保存。没有路径就无法路由任何请求，统一返回设置说明
+  const setupMsg = setupProblems(env, cfg);
+  if (setupMsg) return new Response(setupMsg, { status: 503, headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' } });
   const panelPath = cfg.path;
   const path = url.pathname.replace(/^\/+|\/+$/g, '');
   const segs = path.split('/');
@@ -290,8 +306,9 @@ async function handleRequest(request, env, state) {
       if (request.method === 'POST') {
         if (cfg._kvError) return json({ ok: false, msg: kvErrorMessage(cfg._kvError) + '，为避免覆盖已有配置，已禁止保存' }, 503);
         // 未绑定 KV 时保存不会持久化，必须拒绝而不是提示「已保存」
-        if (!env.K || typeof env.K.put !== 'function') {
-          return json({ ok: false, msg: '未绑定 KV 命名空间（变量名 K），无法保存面板配置；请在 Worker 设置中绑定 KV 后重试' }, 400);
+        const kv = kvStore(env);
+        if (!kv || typeof kv.put !== 'function') {
+          return json({ ok: false, msg: '未绑定 KV 命名空间（变量名 CONFIG_KV），无法保存面板配置；请在 Worker 设置中绑定 KV 后重试' }, 400);
         }
         let body;
         try { body = await request.json(); } catch (e) { return json({ ok: false, msg: '请求体不是合法的 JSON' }, 400); }
@@ -300,7 +317,6 @@ async function handleRequest(request, env, state) {
           const { patch, errors, ignored } = sanitizeConfigPatch(body, env);
           if (errors.length) return json({ ok: false, msg: formatConfigErrors(errors), errors, ignored }, 400);
           const merged = pickSchema(cfg);
-          if (cfg._pathAuto) merged.path = '';
           for (const d of CONFIG_SCHEMA) {
             const v = getPath(patch, d.key);
             if (v !== undefined) setPath(merged, d.key, v);
@@ -333,14 +349,15 @@ async function handleRequest(request, env, state) {
       if (request.method !== 'POST') return json({ ok: false, msg: '仅支持 POST' }, 405);
       try {
         if (cfg._kvError === 'unavailable') return json({ ok: false, msg: kvErrorMessage(cfg._kvError) + '，暂时无法重置' }, 503);   // 配置损坏（corrupt）时允许重置来修复
-        if (!env.K || typeof env.K.delete !== 'function') return json({ ok: false, msg: '未绑定 KV 命名空间，无需重置' }, 400);
-        await env.K.delete('config');
+        const kvr = kvStore(env);
+        if (!kvr || typeof kvr.delete !== 'function') return json({ ok: false, msg: '未绑定 KV 命名空间，无需重置' }, 400);
+        await kvr.delete('config');
         return json({ ok: true, msg: '已重置：KV 已清空，面板还原为初始部署状态' });
       } catch (e) { return json({ ok: false, msg: '重置失败: ' + (e.message || e) }, 500); }
     }
 
     if (apiName === 'status') {
-      return json({ ok: true, data: { version: VERSION, host: url.hostname, path: panelPath, region: (request.cf && request.cf.colo) || 'unknown', kv: !!(env.K && typeof env.K.get === 'function'), workersDev: /\.workers\.dev$/i.test(url.hostname) } });
+      return json({ ok: true, data: { version: VERSION, host: url.hostname, path: panelPath, region: (request.cf && request.cf.colo) || 'unknown', kv: !!(kvStore(env) && typeof kvStore(env).get === 'function'), workersDev: /\.workers\.dev$/i.test(url.hostname) } });
     }
 
     if (apiName === 'update') {

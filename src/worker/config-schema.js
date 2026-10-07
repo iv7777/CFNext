@@ -21,6 +21,28 @@
 //   check     仅服务端执行的附加校验（见 SERVER_CHECKS）
 //   custom    面板中由专用代码回填 / 收集（通用逻辑跳过）
 // ---------------------------------------------------------------------------
+// 环境变量名：每项第一个是当前名称，其余是旧版的短变量名（继续兼容，已部署的 Worker 无需改动即可升级）。
+// PATH 与 ADMIN 为必填；其余均可选（UUID 未设置时自动生成，见 config.js）
+const ENV_NAMES = {
+  uuid: ['UUID', 'U'],
+  path: ['PATH', 'D'],
+  admin: ['ADMIN', 'admin'],
+  adminUser: ['ADMIN_USER'],
+  outbound: ['OUTBOUND_PROXY', 'OUTBOUND', 'S'],
+  ech: ['ENABLE_ECH', 'ECH'],
+  trojan: ['ENABLE_TROJAN', 'TROJAN'],
+  kv: ['CONFIG_KV', 'K'],   // KV 命名空间的绑定变量名
+};
+// 读取环境变量（按 ENV_NAMES 顺序取第一个非空的）；未设置返回 undefined
+function envVar(env, key) {
+  for (const n of ENV_NAMES[key]) if (env && env[n] != null && String(env[n]) !== '') return env[n];
+  return undefined;
+}
+// KV 命名空间绑定对象（未绑定返回 null）
+function kvStore(env) {
+  for (const n of ENV_NAMES.kv) if (env && env[n] && typeof env[n] === 'object') return env[n];
+  return null;
+}
 const UUID_PATTERN = '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$';
 const PATH_SEG_PATTERN = '^[A-Za-z0-9._~-]+$';
 const HOSTNAME_PATTERN = '^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*$';
@@ -30,16 +52,16 @@ const CONFIG_SCHEMA = [
   // ---- 面板设置 ----
   { key: 'uuid', type: 'string', def: '', el: 'a-uuid', label: 'UUID', required: true, lower: true,
     pattern: UUID_PATTERN, hint: 'UUID 格式不正确（应为 xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx，可点「生成」）' },
-  // 面板路径：留空使用 UUID
+  // 面板 / 订阅 / 节点（WebSocket、XHTTP）共用的访问路径：由必填的环境变量 PATH 提供（面板中只读）
   { key: 'path', type: 'string', def: '', el: 'a-path', label: '面板路径', maxLen: 128, strip: ['^/+', '/+$'],
-    pattern: PATH_SEG_PATTERN, hint: '只能包含字母、数字及 . _ ~ -（不含 /）', reserved: RESERVED_PATHS, envLock: ['D', 'PATH'] },
+    pattern: PATH_SEG_PATTERN, hint: '只能包含字母、数字及 . _ ~ -（不含 /）', reserved: RESERVED_PATHS, envLock: ENV_NAMES.path },
   // 自定义订阅路径：/<别名>/sub 输出订阅（不开放面板与管理接口）；留空为 /<UUID>/sub
   { key: 'subUrl', type: 'string', def: '', el: 'a-suburl', label: '自定义订阅路径', maxLen: 128, strip: ['^/+', '/+$', '/sub$', '/+$'],
     pattern: PATH_SEG_PATTERN, hint: '只填一段别名，如 AAZ（字母、数字及 . _ ~ -）', reserved: RESERVED_PATHS },
   // 管理用户名：登录时与管理密码一起校验（区分大小写）；留空取默认 admin
   { key: 'adminUser', type: 'string', def: 'admin', el: 'a-adminuser', label: '管理用户名', maxLen: 64, fillDefault: true,
-    pattern: '^[^\\s\\x00-\\x1f\\x7f]+$', hint: '不能包含空格或控制字符', envLock: ['ADMIN_USER'] },
-  { key: 'admin', type: 'secret', def: '', el: 'a-admin', label: '管理密码', trim: false, maxLen: 256, envLock: ['ADMIN', 'admin'], check: 'adminPass' },
+    pattern: '^[^\\s\\x00-\\x1f\\x7f]+$', hint: '不能包含空格或控制字符', envLock: ENV_NAMES.adminUser },
+  { key: 'admin', type: 'secret', def: '', el: 'a-admin', label: '管理密码', trim: false, maxLen: 256, envLock: ENV_NAMES.admin, check: 'adminPass' },
   // 绑定域名：节点 SNI / Host，留空使用访问域名
   { key: 'host', type: 'string', def: '', el: 'a-host', label: '绑定域名', maxLen: 253, strip: ['^https?://', '[/?#].*$'],
     pattern: HOSTNAME_PATTERN, hint: '请填写域名，如 node.example.com' },
@@ -244,7 +266,7 @@ function envLockedFields(env) {
   const out = {};
   for (const d of CONFIG_SCHEMA) {
     if (!d.envLock) continue;
-    const name = d.envLock.find(n => env && env[n] != null && String(env[n]) !== '');
+    const name = d.envLock.find(n => env && env[n] != null && String(env[n]) !== '');   // 按名称顺序：当前名称优先于旧名称
     if (name) out[d.key] = name;
   }
   return out;

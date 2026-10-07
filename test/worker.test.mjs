@@ -32,7 +32,7 @@ function kv(init = {}) {
     async delete(k) { m.delete(k); },
   };
 }
-const stored = (env) => JSON.parse(env.K.m.get('config'));
+const stored = (env) => JSON.parse(env.CONFIG_KV.m.get('config'));
 
 async function call(env, path, { method = 'GET', body, cookie, ua = BROWSER, headers = {} } = {}) {
   const h = { 'User-Agent': ua, ...headers };
@@ -48,7 +48,7 @@ async function login(env, password = 'pw', panelPath = UUID, username = 'admin')
   assert.equal(res.status, 200, 'login should succeed');
   return res.headers.get('Set-Cookie').split(';')[0];
 }
-const baseEnv = (extra = {}) => ({ U: UUID, ADMIN: 'pw', K: kv(), ...extra });
+const baseEnv = (extra = {}) => ({ UUID, PATH: UUID, ADMIN: 'pw', CONFIG_KV: kv(), ...extra });   // PATH、ADMIN 必填；路径取 UUID 的值，使 /<UUID> 即面板入口
 // 固定节点列表：把若干 `IP:端口#名称` 行托管为「自定义优选 API 1」的响应（默认模式下唯一的节点来源），测试里用它精确控制节点
 const NODE_LISTS = new Map();
 const fixedNodes = (lines, extra = {}) => {
@@ -75,11 +75,11 @@ test('GET /api/config 返回字段表默认值（与旧 DEFAULT_CONFIG 一致）
   for (const [k, v] of Object.entries(legacy)) assert.deepEqual(d[k], v, k);
   for (const k of ['optimizer', 'preferredDomains', 'preferredIPs']) assert.equal(k in d, false, `已移除的自定义订阅 / 随机优选配置 ${k}`);
   assert.equal(d.uuid, UUID);
-  assert.equal(d.path, '', '面板路径跟随 UUID 时返回空');
+  assert.equal(d.path, UUID, '面板路径来自环境变量 PATH');
   assert.equal(d.panelPath, UUID);
   assert.equal(d.adminSet, true);
   assert.equal('admin' in d, false, '不下发管理密码');
-  assert.deepEqual(d.envLocked, { admin: 'ADMIN' });
+  assert.deepEqual(d.envLocked, { path: 'PATH', admin: 'ADMIN' }, 'PATH 与 ADMIN 来自环境变量，面板只读');
   for (const k of ['nodeLimit', 'nodeLimitCount', 'polling', 'cfAccountId', 'cfApiToken', 'cfApiTokenSet', 'quotaAuto', 'caps']) assert.equal(k in d, false, `已移除的配额安全字段 ${k}`);
   assert.equal(d.ipsrc.uouin, true, 'uouin 默认开启');
   assert.equal(d.ipsrc.wetest, false, '微测网默认关闭');
@@ -95,11 +95,11 @@ test('保存空 / 非法 UUID 被拒绝并返回字段级错误（问题 1）', 
     assert.equal(r.ok, false);
     assert.equal(r.errors[0].field, 'uuid');
   }
-  assert.equal(env.K.m.has('config'), false, '校验失败不写 KV');
+  assert.equal(env.CONFIG_KV.m.has('config'), false, '校验失败不写 KV');
 });
 
 test('KV 中残留非法 UUID 时回退环境变量 U，面板仍可进入（问题 1）', async () => {
-  const env = baseEnv({ K: kv({ config: { uuid: '', path: '' } }) });
+  const env = baseEnv({ CONFIG_KV: kv({ config: { uuid: '', path: '' } }) });
   const cookie = await login(env);
   const res = await call(env, `/${UUID}/api/config`, { cookie });
   assert.equal(res.status, 200);
@@ -110,8 +110,8 @@ test('字段校验：范围、枚举、格式、全部协议关闭', async () =>
   const env = baseEnv();
   const cookie = await login(env);
   const cases = [
-    [{ path: 'a/b' }, 'path'],
-    [{ path: 'login' }, 'path'],
+    [{ subUrl: 'a/b' }, 'subUrl'],
+    [{ subUrl: 'login' }, 'subUrl'],
     [{ subUrl: 'version' }, 'subUrl'],
     [{ host: 'bad host' }, 'host'],
     [{ outboundProxy: 'ss://rc4:pw@1.2.3.4:8388' }, 'outboundProxy'],
@@ -156,26 +156,26 @@ test('保存只写入字段表登记的配置项，规范化取值，忽略未�
 });
 
 test('未绑定 KV 时保存返回明确错误（问题 10）', async () => {
-  const env = baseEnv({ K: undefined });
+  const env = baseEnv({ CONFIG_KV: undefined });
   const cookie = await login(env);
   const res = await call(env, `/${UUID}/api/config`, { method: 'POST', cookie, body: { alpn: 'h2' } });
   assert.equal(res.status, 400);
   assert.match((await res.json()).msg, /KV/);
 });
 
-test('修改 UUID：重新签发登录态并返回新面板路径（问题 2）', async () => {
-  const env = baseEnv({ ADMIN: undefined, K: kv({ config: { admin: 'pw' } }) });
+test('修改 UUID：重新签发登录态；面板路径来自 PATH，不随 UUID 变化（问题 2）', async () => {
+  const env = baseEnv({ ADMIN: undefined, CONFIG_KV: kv({ config: { admin: 'pw' } }) });
   const cookie = await login(env);
   const res = await call(env, `/${UUID}/api/config`, { method: 'POST', cookie, body: { uuid: UUID2.toUpperCase() } });
   const r = await res.json();
   assert.equal(res.status, 200, JSON.stringify(r));
   assert.equal(r.data.uuid, UUID2);
-  assert.equal(r.data.panelPath, UUID2, '路径跟随 UUID');
+  assert.equal(r.data.panelPath, UUID, '面板路径来自 PATH，不随 UUID 变化');
   const newCookie = res.headers.get('Set-Cookie');
   assert.ok(newCookie && newCookie.startsWith('cfnext_auth='));
-  const again = await call(env, `/${UUID2}/api/config`, { cookie: newCookie.split(';')[0] });
-  assert.equal(again.status, 200, '新令牌可直接访问新路径');
-  const old = await call(env, `/${UUID2}/api/config`, { cookie });
+  const again = await call(env, `/${UUID}/api/config`, { cookie: newCookie.split(';')[0] });
+  assert.equal(again.status, 200, '新令牌可直接访问面板');
+  const old = await call(env, `/${UUID}/api/config`, { cookie });
   assert.equal(old.status, 403, '旧令牌随 UUID 变更失效');
 });
 
@@ -228,17 +228,120 @@ test('登录会话：使用面板时顺延 24 小时（10 分钟内不重复签�
 });
 
 test('默认配置的订阅：含 XHTTP 节点（.X），不含 IPv6 地址', async () => {
-  const env = baseEnv({ K: kv({ config: fixedNodes('104.16.9.1:443#a\n[2606:4700::1]:443#v6', { enableXhttp: undefined, filter: undefined }) }) });
+  const env = baseEnv({ CONFIG_KV: kv({ config: fixedNodes('104.16.9.1:443#a\n[2606:4700::1]:443#v6', { enableXhttp: undefined, filter: undefined }) }) });
   const links = await withFetch(nodesFetch, async () => (await (await call(env, `/${UUID}/sub`, { ua: 'v2rayN/7.0' })).text()).split('\n').filter(Boolean));
   assert.deepEqual(links.map(nameOf), ['a', 'a.X']);
   assert.ok(/type=xhttp/.test(links[1]));
 });
 
+test('必填环境变量：PATH 未设置 / 非法时所有请求返回 503 设置说明；PATH 首尾斜杠自动去掉', async () => {
+  const text = async (env, path = '/', init) => { const r = await call(env, path, init); return [r.status, await r.text()]; };
+  // 未设置 PATH：任何路径（含 /<UUID> 与 /login）都返回设置说明，且不泄露配置
+  const none = baseEnv({ PATH: undefined });
+  for (const path of ['/', `/${UUID}`, `/${UUID}/sub`, '/login', '/anything']) {
+    const [status, body] = await text(none, path);
+    assert.equal(status, 503, path);
+    assert.match(body, /PATH/); assert.match(body, /ADMIN/);
+    assert.ok(!body.includes(UUID), '说明里不含 UUID');
+  }
+  // 非法 PATH：说明具体原因
+  for (const [bad, reason] of [['a/b', /只能包含/], ['bad path', /只能包含/], ['login', /保留路径/], ['Version', /保留路径/], ['x'.repeat(129), /最长 128/]]) {
+    const [status, body] = await text(baseEnv({ PATH: bad }), '/');
+    assert.equal(status, 503, bad); assert.match(body, /PATH 的值不正确/); assert.match(body, reason, bad);
+  }
+  // 首尾斜杠自动去掉
+  const env = baseEnv({ PATH: '/mypanel/' });
+  const cookie = await login(env, 'pw', 'mypanel');
+  assert.equal((await call(env, '/mypanel', { cookie })).status, 200);
+  assert.equal((await call(env, '/mypanel/api/config', { cookie })).status, 200);
+  // ADMIN 未设置：面板与管理接口禁用（节点与订阅不受影响）
+  const noAdmin = baseEnv({ ADMIN: undefined });
+  const [st, body] = await text(noAdmin, `/${UUID}`);
+  assert.equal(st, 403); assert.match(body, /ADMIN/);
+});
+
+test('面板路径只认 PATH：节点路径为 /<PATH>，UUID 仅作节点身份；订阅仍可从 /<UUID>/sub 取得', async () => {
+  const env = baseEnv({ PATH: 'mypanel', CONFIG_KV: kv({ config: customCfg() }) });
+  assert.equal((await call(env, `/${UUID}`, { ua: BROWSER })).status, 404, 'UUID 路径不是面板入口');
+  assert.equal((await call(env, '/mypanel', { ua: BROWSER })).status, 302, '面板入口在 PATH 下，未登录跳转登录页');
+  const links = await withFetch(nodesFetch, async () => (await (await call(env, `/${UUID}/sub`, { ua: 'v2rayN/7.0' })).text()).split('\n').filter(l => /^vless:\/\//.test(l)));
+  assert.ok(links.length > 0);
+  assert.ok(links.every(l => l.includes(`@`) && l.startsWith(`vless://${UUID}@`)), 'UUID 作为用户 ID');
+  assert.ok(links.every(l => /path=%2Fmypanel(%3F|&)/.test(l)), '节点 ws 路径为 /<PATH>');
+  // WebSocket 代理在 /<PATH> 下工作，/<UUID> 下不是代理入口
+  const log = fakeNet({ 'ws.example': { delay: 5 } });
+  const res = await worker.fetch(new Request('https://node.example.com/mypanel', { headers: { Upgrade: 'websocket' } }), env, {});
+  assert.equal(res.status, 101);
+  const res2 = await worker.fetch(new Request(`https://node.example.com/${UUID}`, { headers: { Upgrade: 'websocket' } }), env, {});
+  assert.notEqual(res2.status, 101);
+  assert.equal(log.length, 0);
+});
+
+test('UUID 可选：未设置时首次访问随机生成并保存到 KV，之后一直沿用，面板可查看与修改；保留 KV 中已有的其它设置', async () => {
+  const env = baseEnv({ UUID: undefined, CONFIG_KV: kv({ config: { alpn: 'h2' } }) });
+  const cookie = await login(env);
+  const stored1 = stored(env);
+  assert.match(stored1.uuid, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/, '生成 v4 UUID 并写入 KV');
+  assert.equal(stored1.alpn, 'h2', '已有设置保留');
+  const get = async () => (await (await call(env, `/${UUID}/api/config`, { cookie })).json()).data;
+  const d1 = await get(), d2 = await get();
+  assert.equal(d1.uuid, stored1.uuid); assert.equal(d2.uuid, stored1.uuid, '每次请求相同');
+  const subUuid = async () => (await (await call(env, `/${stored1.uuid}/sub`, { ua: 'v2rayN/7.0' })).text()).match(/^vless:\/\/([0-9a-f-]+)@/m)[1];
+  assert.equal(await withFetch(notFound, subUuid), stored1.uuid, '订阅使用生成的 UUID');
+  // 面板里修改后以新值为准，不再重新生成
+  const res = await call(env, `/${UUID}/api/config`, { method: 'POST', cookie, body: { uuid: UUID2 } });
+  assert.equal(res.status, 200);
+  assert.equal(stored(env).uuid, UUID2);
+  const renewed = res.headers.get('Set-Cookie').split(';')[0];   // 修改 UUID 后旧登录态失效，当前会话已续签
+  assert.equal((await (await call(env, `/${UUID}/api/config`, { cookie: renewed })).json()).data.uuid, UUID2);
+  // 同一实例的并发首次请求不会各生成一个
+  const env2 = baseEnv({ UUID: undefined, CONFIG_KV: kv() });
+  const ids = await Promise.all([1, 2, 3, 4].map(async () => (await (await call(env2, `/${UUID}`, { ua: BROWSER })).text(), stored(env2).uuid)));
+  assert.equal(new Set(ids).size, 1);
+});
+
+test('UUID 可选的前提：没有 KV 就没处保存自动生成的 UUID，必须手动设置（返回 503 说明）；设置了则不需要 KV', async () => {
+  const noKv = baseEnv({ UUID: undefined, CONFIG_KV: undefined });
+  const r = await call(noKv, '/', {});
+  assert.equal(r.status, 503);
+  const body = await r.text();
+  assert.match(body, /CONFIG_KV/); assert.match(body, /UUID/);
+  // 手动设置 UUID 后无需 KV
+  const ok = baseEnv({ CONFIG_KV: undefined });
+  const cookie = await login(ok);
+  assert.equal((await call(ok, `/${UUID}/api/config`, { cookie })).status, 200);
+});
+
+test('环境变量新名称与旧版短变量名都生效，新名称优先；面板提示锁定的是实际使用的变量名', async () => {
+  const names = { uuid: UUID2, PATH: 'newpath', OUTBOUND_PROXY: 'socks5://1.2.3.4:1080', ENABLE_ECH: 'true', ENABLE_TROJAN: '1' };
+  const legacy = { U: UUID2, D: 'oldpath', S: 'socks5://5.6.7.8:1080', ECH: 'true', TROJAN: 'true' };
+  const read = async (env, path) => {
+    const cookie = await login(env, 'pw', path);
+    return (await (await call(env, `/${path}/api/config`, { cookie })).json()).data;
+  };
+  const base = { UUID: undefined, PATH: undefined, ADMIN: 'pw', CONFIG_KV: kv() };
+  const a = await read({ ...base, UUID: UUID2, PATH: 'newpath', OUTBOUND_PROXY: names.OUTBOUND_PROXY, ENABLE_ECH: 'true', ENABLE_TROJAN: '1' }, 'newpath');
+  assert.equal(a.uuid, UUID2); assert.equal(a.outboundProxy, 'socks5://1.2.3.4:1080'); assert.equal(a.ech, true); assert.equal(a.enableTrojan, true);
+  assert.equal(a.envLocked.path, 'PATH');
+  const b = await read({ ...base, ...legacy }, 'oldpath');
+  assert.equal(b.uuid, UUID2); assert.equal(b.outboundProxy, 'socks5://5.6.7.8:1080'); assert.equal(b.ech, true); assert.equal(b.enableTrojan, true);
+  assert.equal(b.envLocked.path, 'D');
+  // 同时设置：新名称优先（OUTBOUND 是旧版别名）
+  const c = await read({ ...base, UUID: UUID2, U: UUID, PATH: 'newpath', D: 'oldpath', OUTBOUND_PROXY: 'socks5://1.1.1.1:1', OUTBOUND: 'socks5://2.2.2.2:2', S: 'socks5://3.3.3.3:3' }, 'newpath');
+  assert.equal(c.uuid, UUID2); assert.equal(c.outboundProxy, 'socks5://1.1.1.1:1');
+  const d = await read({ ...base, UUID: UUID2, PATH: 'p1', OUTBOUND: 'socks5://2.2.2.2:2' }, 'p1');
+  assert.equal(d.outboundProxy, 'socks5://2.2.2.2:2', '旧别名 OUTBOUND 仍然支持');
+  // KV 绑定：新旧变量名都可用
+  const viaOld = baseEnv({ CONFIG_KV: undefined, K: kv({ config: { alpn: 'h2' } }) });
+  assert.equal((await read(viaOld, UUID)).alpn, 'h2');
+  assert.equal((await read(viaOld, UUID)).kv, true);
+});
+
 test('环境变量锁定的字段在面板只读、保存时忽略（问题 3）', async () => {
-  const env = baseEnv({ D: 'panel' });
+  const env = baseEnv({ PATH: 'panel' });
   const cookie = await login(env, 'pw', 'panel');
   const r = await (await call(env, '/panel/api/config', { cookie })).json();
-  assert.deepEqual(r.data.envLocked, { path: 'D', admin: 'ADMIN' });
+  assert.deepEqual(r.data.envLocked, { path: 'PATH', admin: 'ADMIN' });
   const res = await call(env, '/panel/api/config', { method: 'POST', cookie, body: { path: 'other' } });
   const s = await res.json();
   assert.equal(res.status, 200);
@@ -247,7 +350,7 @@ test('环境变量锁定的字段在面板只读、保存时忽略（问题 3）
 });
 
 test('订阅别名只输出订阅，不开放面板 / 管理接口（问题 6）', async () => {
-  const env = baseEnv({ K: kv({ config: { subUrl: 'AAZ', filter: { ipType: ['IPv4'] } } }) });
+  const env = baseEnv({ CONFIG_KV: kv({ config: { subUrl: 'AAZ', filter: { ipType: ['IPv4'] } } }) });
   const cookie = await login(env);
   const sub = await call(env, '/AAZ/sub', { ua: 'v2rayN/7.0' });
   assert.equal(sub.status, 200);
@@ -258,7 +361,7 @@ test('订阅别名只输出订阅，不开放面板 / 管理接口（问题 6）
 });
 
 test('自定义订阅路径留空：订阅地址为 /<UUID>/sub（面板路径自定义时同样如此），面板路径下的 /sub 继续可用；UUID 路径下不开放面板 / 管理接口', async () => {
-  const env = baseEnv({ D: 'panel', K: kv({ config: { filter: { ipType: ['IPv4'] } } }) });
+  const env = baseEnv({ PATH: 'panel', CONFIG_KV: kv({ config: { filter: { ipType: ['IPv4'] } } }) });
   const cookie = await login(env, 'pw', 'panel');
   for (const p of [`/${UUID}/sub`, '/panel/sub', `/${UUID}/sub/clash`]) {
     const r = await call(env, p, { ua: 'v2rayN/7.0' });
@@ -269,14 +372,14 @@ test('自定义订阅路径留空：订阅地址为 /<UUID>/sub（面板路径�
   assert.equal((await call(env, `/${UUID}/api/config`, { cookie })).status, 404, 'UUID 路径下不提供管理接口');
   assert.equal((await call(env, '/panel', { cookie })).status, 200, '面板路径不受影响');
   // 设置了自定义订阅路径：UUID 不再作为订阅入口（面板路径与 UUID 不同时）
-  const env2 = baseEnv({ D: 'panel', K: kv({ config: { subUrl: 'AAZ' } }) });
+  const env2 = baseEnv({ PATH: 'panel', CONFIG_KV: kv({ config: { subUrl: 'AAZ' } }) });
   assert.equal((await call(env2, '/AAZ/sub', { ua: 'v2rayN/7.0' })).status, 200);
   assert.equal((await call(env2, `/${UUID}/sub`, { ua: 'v2rayN/7.0' })).status, 404);
 });
 
 test('预览与订阅同一流程：返回节点数，订阅不写 KV（问题 7）', async () => {
   const lines = Array.from({ length: 10 }, (_, i) => `104.16.1.${i + 1}:443#n${i + 1}`).join('\n');
-  const env = baseEnv({ K: kv({ config: fixedNodes(lines) }) });
+  const env = baseEnv({ CONFIG_KV: kv({ config: fixedNodes(lines) }) });
   const cookie = await login(env);
   await withFetch(nodesFetch, async () => {
     const r = await (await call(env, `/${UUID}/api/sub?fmt=v2ray`, { cookie })).json();
@@ -286,7 +389,7 @@ test('预览与订阅同一流程：返回节点数，订阅不写 KV（问题 7
     const sub = await call(env, `/${UUID}/sub`, { ua: 'v2rayN/7.0' });
     assert.equal((await sub.text()).trim().split('\n').length, 10);
   });
-  assert.deepEqual([...env.K.m.keys()], ['config'], '订阅不再写入轮询窗口（issued）');
+  assert.deepEqual([...env.CONFIG_KV.m.keys()], ['config'], '订阅不再写入轮询窗口（issued）');
 });
 
 test('面板页面注入字段表与共用校验函数', async () => {
@@ -354,7 +457,7 @@ test('单次订阅最多下发 500 个节点，每次下发相同（不再轮询
     const m = String(url).match(/^https:\/\/pool\.example\.com\/cap(\d)\.txt$/);
     return m ? new Response(pool(10 + Number(m[1]))) : new Response('Not Found', { status: 404 });
   };
-  const env = baseEnv({ K: kv({ config: { enableTrojan: true, filter: { ipType: ['IPv4'] }, src: { prefDomain: false },
+  const env = baseEnv({ CONFIG_KV: kv({ config: { enableTrojan: true, filter: { ipType: ['IPv4'] }, src: { prefDomain: false },
     ipsrc: { hostmonit: false, uouin: false, api1: true, api1Url: 'https://pool.example.com/cap1.txt', api2: true, api2Url: 'https://pool.example.com/cap2.txt' } } }) });
   try {
     const a = await subLinks(env);
@@ -362,17 +465,17 @@ test('单次订阅最多下发 500 个节点，每次下发相同（不再轮询
     assert.equal(a.length, 500);
     assert.deepEqual(b, a, '两次更新下发相同节点');
   } finally { globalThis.fetch = offline; }
-  assert.equal(env.K.m.has('issued'), false);
+  assert.equal(env.CONFIG_KV.m.has('issued'), false);
 });
 
 test('选择具体地区时仍保留不带地区的通用节点（优选域名节点）', async () => {
-  const env = baseEnv({ K: kv({ config: { filter: { region: ['HK'], ipType: ['IPv4'] } } }) });
+  const env = baseEnv({ CONFIG_KV: kv({ config: { filter: { region: ['HK'], ipType: ['IPv4'] } } }) });
   const names = (await subLinks(env)).map(nameOf);
   assert.ok(names.some(n => /^优选域名-\d+$/.test(n)), '优选域名节点（通用）保留');
 });
 
 test('默认模式（IPv4+IPv6）子请求数不超过免费版 50 个上限，DoH 不重复查询', async () => {
-  const env = baseEnv({ K: kv({ config: {} }) });
+  const env = baseEnv({ CONFIG_KV: kv({ config: {} }) });
   const offline = globalThis.fetch;
   const seen = [];
   globalThis.fetch = async (url) => {
@@ -392,7 +495,7 @@ test('默认模式（IPv4+IPv6）子请求数不超过免费版 50 个上限，D
 });
 
 test('HostMonit 优选改为调用数据接口：按运营商命名、只保留 CF 段并去重；运营商筛选保留通用节点', async () => {
-  const env = baseEnv({ K: kv({ config: { enableXhttp: false, filter: { ipType: ['IPv4'], isp: ['移动'] } } }) });
+  const env = baseEnv({ CONFIG_KV: kv({ config: { enableXhttp: false, filter: { ipType: ['IPv4'], isp: ['移动'] } } }) });
   const offline = globalThis.fetch;
   const calls = [];
   globalThis.fetch = async (url, opts = {}) => {
@@ -442,7 +545,7 @@ test('uouin 来源：签名与文档一致，按线路命名、只保留 CF 段�
   const handler = (url) => url.startsWith('https://api.uouin.com/') ? new Response(JSON.stringify(uouinData)) : notFound();
   // 默认开启
   await withFetch(handler, async (calls) => {
-    const links = await subLinks(baseEnv({ K: kv({ config: { enableXhttp: false, filter: { ipType: ['IPv4', 'IPv6'] } } }) }));
+    const links = await subLinks(baseEnv({ CONFIG_KV: kv({ config: { enableXhttp: false, filter: { ipType: ['IPv4', 'IPv6'] } } }) }));
     const u = new URL(calls.find(x => x.includes('uouin')));
     assert.equal(u.searchParams.get('key'), md5(md5('DdlTxtN0sUOu') + '70cloudflareapikey' + u.searchParams.get('time')));
     assert.match(u.searchParams.get('time'), /^\d{13}$/);
@@ -456,7 +559,7 @@ test('uouin 来源：签名与文档一致，按线路命名、只保留 CF 段�
   });
   // 关闭：不请求 uouin，也不下发其（已缓存的）节点
   await withFetch(handler, async (calls) => {
-    const links = await subLinks(baseEnv({ K: kv({ config: { enableXhttp: false, ipsrc: { uouin: false } } }) }));
+    const links = await subLinks(baseEnv({ CONFIG_KV: kv({ config: { enableXhttp: false, ipsrc: { uouin: false } } }) }));
     assert.equal(calls.filter(u => u.includes('uouin')).length, 0);
     assert.ok(!links.some(l => /-U\d+$/.test(nameOf(l))));
   });
@@ -474,11 +577,11 @@ test('微测网来源：默认关闭；开启后只拉取所选 IP 类型的页�
     : url === WETEST_V6
       ? new Response(wetestPage([['移动', '2606:4700:24::2a95:c83b', 'SEA'], ['电信', '2606:4700:24::2a95:c83b', 'SEA'], ['联通', '2001:db8::1', 'LAX']]))
       : notFound();
-  const cfg = (ipType) => baseEnv({ K: kv({ config: { enableXhttp: false, src: { prefDomain: false }, ipsrc: { hostmonit: false, uouin: false, wetest: true }, filter: { ipType } } }) });
+  const cfg = (ipType) => baseEnv({ CONFIG_KV: kv({ config: { enableXhttp: false, src: { prefDomain: false }, ipsrc: { hostmonit: false, uouin: false, wetest: true }, filter: { ipType } } }) });
   const byName = (links) => Object.fromEntries(links.map(l => [nameOf(l), hostOf(l)]));
   await withFetch(handler, async (calls) => {
     // 默认关闭：不请求微测网
-    await subLinks(baseEnv({ K: kv({ config: { enableXhttp: false, src: { prefDomain: false }, ipsrc: { hostmonit: false, uouin: false }, filter: { ipType: ['IPv4'] } } }) }));
+    await subLinks(baseEnv({ CONFIG_KV: kv({ config: { enableXhttp: false, src: { prefDomain: false }, ipsrc: { hostmonit: false, uouin: false }, filter: { ipType: ['IPv4'] } } }) }));
     assert.equal(calls.filter(u => u.includes('wetest')).length, 0);
     // 仅 IPv4：只拉 v4 页面
     const v4 = await subLinks(cfg(['IPv4']));
@@ -520,7 +623,7 @@ test('微测网测试接口：返回两页合并结果、丢弃项与行摘要�
 test('HTML 线路表解析支持 IPv6：自定义优选 API 可直接使用微测网 IPv6 页面（含 [IPv6]:端口 与裸 IPv6），非法地址跳过', async () => {
   const page = wetestPage([['移动', '2606:4700:24::2a95:c83b', 'SEA'], ['联通', '[2606:4700:23::6acf:9b0c]:8443', 'SEA'], ['电信', '2606:4700:zz::1', 'SIN'], ['电信', '2001:db8::1', 'SIN']]);
   await withFetch((url) => url === 'https://mine.example.com/v6.html' ? new Response(page) : notFound(), async () => {
-    const links = await subLinks(baseEnv({ K: kv({ config: { enableXhttp: false, src: { prefDomain: false }, ipsrc: { hostmonit: false, uouin: false, api1: true, api1Url: 'https://mine.example.com/v6.html' }, filter: { ipType: ['IPv6'] } } }) }));
+    const links = await subLinks(baseEnv({ CONFIG_KV: kv({ config: { enableXhttp: false, src: { prefDomain: false }, ipsrc: { hostmonit: false, uouin: false, api1: true, api1Url: 'https://mine.example.com/v6.html' }, filter: { ipType: ['IPv6'] } } }) }));
     assert.deepEqual(links.map(l => [nameOf(l), hostOf(l), l.match(/\]:(\d+)\?/)[1]]), [
       ['移动-01', '[2606:4700:24::2a95:c83b]', '443'],
       ['联通-01', '[2606:4700:23::6acf:9b0c]', '8443'],
@@ -533,10 +636,10 @@ test('自定义优选 API 1/2：开关控制、只保留 CF 段；开启但未�
     ? new Response('104.16.5.5:443#自有-A\n104.16.5.6\n8.8.8.8:443#外部')
     : notFound();
   await withFetch(handler, async (calls) => {
-    const off = await subLinks(baseEnv({ K: kv({ config: { enableXhttp: false, filter: { ipType: ['IPv4'] }, ipsrc: { api1Url: 'https://mine.example.com/ips.txt' } } }) }));
+    const off = await subLinks(baseEnv({ CONFIG_KV: kv({ config: { enableXhttp: false, filter: { ipType: ['IPv4'] }, ipsrc: { api1Url: 'https://mine.example.com/ips.txt' } } }) }));
     assert.ok(!off.some(l => hostOf(l) === '104.16.5.5'), '开关关闭时不使用');
     assert.equal(calls.filter(u => u.includes('mine.example.com')).length, 0);
-    const on = await subLinks(baseEnv({ K: kv({ config: { enableXhttp: false, filter: { ipType: ['IPv4'] }, ipsrc: { api2: true, api2Url: 'https://mine.example.com/ips.txt' } } }) }));
+    const on = await subLinks(baseEnv({ CONFIG_KV: kv({ config: { enableXhttp: false, filter: { ipType: ['IPv4'] }, ipsrc: { api2: true, api2Url: 'https://mine.example.com/ips.txt' } } }) }));
     const byHost = Object.fromEntries(on.map(l => [hostOf(l), nameOf(l)]));
     assert.equal(byHost['104.16.5.5'], '自有-A');
     assert.ok('104.16.5.6' in byHost);
@@ -551,9 +654,9 @@ test('自定义优选 API 1/2：开关控制、只保留 CF 段；开启但未�
 
 test('HostMonit 开关关闭时不下发其节点；选定地区时保留运营商线路节点', async () => {
   // 上一个 HostMonit 测试已写入 10 分钟缓存（含 198.41.208.52「移动-01」）
-  const on = await subLinks(baseEnv({ K: kv({ config: { filter: { ipType: ['IPv4'], region: ['HK'] } } }) }));
+  const on = await subLinks(baseEnv({ CONFIG_KV: kv({ config: { filter: { ipType: ['IPv4'], region: ['HK'] } } }) }));
   assert.ok(on.some(l => nameOf(l) === '移动-01'), '选定地区时运营商线路节点（无地区标记）保留');
-  const off = await subLinks(baseEnv({ K: kv({ config: { filter: { ipType: ['IPv4'] }, ipsrc: { hostmonit: false } } }) }));
+  const off = await subLinks(baseEnv({ CONFIG_KV: kv({ config: { filter: { ipType: ['IPv4'] }, ipsrc: { hostmonit: false } } }) }));
   assert.ok(!off.some(l => /^(移动|联通|电信)(\/(移动|联通|电信))*-\d+$/.test(nameOf(l))), '关闭后不含 HostMonit 节点');
 });
 
@@ -621,7 +724,7 @@ test('分线路来源：某条线路的 IP 全部与其它线路重复时，该�
   //（用未缓存的自定义 API 来源验证；HostMonit / uouin 在前面的测试中已写入 10 分钟缓存）
   const list = (url) => url === 'https://mine.example.com/lines.txt'
     ? new Response('104.16.3.3:443#电信/联通-01\n104.16.3.4:443#移动-01\n') : notFound();
-  const env2 = baseEnv({ K: kv({ config: { filter: { ipType: ['IPv4'], isp: ['联通'] }, ipsrc: { hostmonit: false, api1: true, api1Url: 'https://mine.example.com/lines.txt' } } }) });
+  const env2 = baseEnv({ CONFIG_KV: kv({ config: { filter: { ipType: ['IPv4'], isp: ['联通'] }, ipsrc: { hostmonit: false, api1: true, api1Url: 'https://mine.example.com/lines.txt' } } }) });
   const names = await withFetch(list, async () => (await subLinks(env2)).map(nameOf));
   assert.ok(names.includes('电信/联通-01'), '含联通的合并节点保留');
   assert.ok(!names.includes('移动-01'), '只标记移动的节点被剔除');
@@ -629,10 +732,10 @@ test('分线路来源：某条线路的 IP 全部与其它线路重复时，该�
 
 test('不再内置静态 IP 池；所有来源都没有产出时用官方域名兜底，订阅不为空', async () => {
   // 默认模式：在线来源关闭 / 离线（前面的测试已写入 HostMonit / uouin 缓存，这里显式关闭）、优选域名关闭 → 官方域名兜底
-  const a = await subLinks(baseEnv({ K: kv({ config: { enableXhttp: false, src: { prefDomain: false }, ipsrc: { hostmonit: false, uouin: false } } }) }));
+  const a = await subLinks(baseEnv({ CONFIG_KV: kv({ config: { enableXhttp: false, src: { prefDomain: false }, ipsrc: { hostmonit: false, uouin: false } } }) }));
   assert.deepEqual(a.map(hostOf), ['cloudflare.com', 'www.cloudflare.com', 'speed.cloudflare.com']);
   // 默认模式（优选域名开启、在线来源离线）：只有优选域名节点，没有任何 IP 节点
-  const b = await subLinks(baseEnv({ K: kv({ config: { enableXhttp: false, filter: { ipType: ['IPv4'] }, ipsrc: { hostmonit: false, uouin: false } } }) }));
+  const b = await subLinks(baseEnv({ CONFIG_KV: kv({ config: { enableXhttp: false, filter: { ipType: ['IPv4'] }, ipsrc: { hostmonit: false, uouin: false } } }) }));
   assert.ok(b.length > 0 && b.every(l => !/^\d+\.\d+\.\d+\.\d+$/.test(hostOf(l))), '无内置静态 IP');
 });
 
@@ -641,7 +744,7 @@ test('节点命名：优选域名节点为「优选域名-NN」，优选 IP 来�
   const config = { enableXhttp: false, filter: { ipType: ['IPv4'] }, prefDomains: 'a.example.com\nb.example.com',
     ipsrc: { hostmonit: false, uouin: false, api1: true, api1Url: url } };
   const names = await withFetch((u) => u === url ? new Response('104.16.1.1\n104.16.1.2') : notFound(), async () => {
-    const t = await (await call(baseEnv({ K: kv({ config }) }), `/${UUID}/sub`, { ua: 'v2rayN/7.0' })).text();
+    const t = await (await call(baseEnv({ CONFIG_KV: kv({ config }) }), `/${UUID}/sub`, { ua: 'v2rayN/7.0' })).text();
     return t.split('\n').filter(l => /^vless:\/\//.test(l)).map(l => hostOf(l) + ' ' + nameOf(l));
   });
   assert.deepEqual(names, ['a.example.com 优选域名-01', 'b.example.com 优选域名-02', '104.16.1.1 优选IP-01', '104.16.1.2 优选IP-02']);
@@ -654,7 +757,7 @@ test('仅 TLS 端口：默认开启；关闭后 443 节点追加 80 明文节点
     ipsrc: { hostmonit: false, uouin: false, api1: true, api1Url: url }, ...extra });
   const portsOf = async (config) => withFetch(   // node.example.com：自定义域名
   handler, async () => {
-    const env = baseEnv({ K: kv({ config }) });
+    const env = baseEnv({ CONFIG_KV: kv({ config }) });
     const t = await (await call(env, `/${UUID}/sub`, { ua: 'v2rayN/7.0' })).text();
     return t.split('\n').filter(l => /^vless:\/\//.test(l)).map(l => l.match(/:(\d+)\?/)[1] + ' ' + nameOf(l)).sort();
   });
@@ -666,7 +769,7 @@ test('仅 TLS 端口：默认开启；关闭后 443 节点追加 80 明文节点
   // ECH 开启时强制仅 TLS
   assert.deepEqual(await portsOf(cfg({ tlsOnly: false, ech: true })), ['443 优选IP-01', '8443 p8443']);
   // 面板保存的关闭状态保留
-  const env = baseEnv({ K: kv() });
+  const env = baseEnv({ CONFIG_KV: kv() });
   const cookie = await login(env);
   assert.equal((await (await call(env, `/${UUID}/api/config`, { cookie })).json()).data.tlsOnly, true);
   await call(env, `/${UUID}/api/config`, { method: 'POST', cookie, body: { tlsOnly: false } });
@@ -817,10 +920,10 @@ test('内置地区反代域名只查 A 记录（这些域名没有 TXT），自�
   const dns = [];
   const stub = dohStub({ 'cloudflare-dns.com': { answers: {
     'proxyip.jp.cmliussss.net|A': ['198.51.100.31'], 'proxyip.sg.cmliussss.net|A': ['198.51.100.32'], 'my-relay.example.net|A': ['198.51.100.31'] } } }, dns);
-  await withFetch(stub, () => connectVia(baseEnv({ K: kv({ config: { relay: { mode: 'builtin', region: 'JP', region2: 'SG' } } }) }), 'tx.example'));
+  await withFetch(stub, () => connectVia(baseEnv({ CONFIG_KV: kv({ config: { relay: { mode: 'builtin', region: 'JP', region2: 'SG' } } }) }), 'tx.example'));
   await until(() => dns.filter(d => /cmliussss/.test(d.name)).length >= 2);
   assert.deepEqual(dns.filter(d => /cmliussss/.test(d.name)).map(d => d.type), ['A', 'A']);
-  await withFetch(stub, () => connectVia(baseEnv({ K: kv({ config: { relay: { mode: 'custom', custom: 'my-relay.example.net' } } }) }), 'tx.example'));
+  await withFetch(stub, () => connectVia(baseEnv({ CONFIG_KV: kv({ config: { relay: { mode: 'custom', custom: 'my-relay.example.net' } } }) }), 'tx.example'));
   await until(() => dns.filter(d => d.name === 'my-relay.example.net').length >= 2);
   assert.deepEqual(dns.filter(d => d.name === 'my-relay.example.net').map(d => d.type).sort(), ['A', 'TXT']);
 });
@@ -936,7 +1039,7 @@ test('明文端口 WebSocket（http://）不再被重定向到 https；普通 ht
 
 test('订阅：TLS ws 节点带 ed=2048、ALPN 随面板下发；多协议时 Trojan / XHTTP 名称加 .T / .X，节点名全局唯一', async () => {
   // 优选 API 返回的两条地址dup（名称按来源原样使用）
-  const env = baseEnv({ K: kv({ config: fixedNodes('104.16.9.1:443#dup\n104.16.9.2:443#dup', { enableTrojan: true, enableXhttp: true, alpn: 'h2, http/1.1' }) }) });
+  const env = baseEnv({ CONFIG_KV: kv({ config: fixedNodes('104.16.9.1:443#dup\n104.16.9.2:443#dup', { enableTrojan: true, enableXhttp: true, alpn: 'h2, http/1.1' }) }) });
   const get = (fmt) => withFetch(nodesFetch, async () => (await call(env, `/${UUID}/sub/${fmt}`, { ua: 'x' })).text());
   const links = (await get('plain')).split('\n').filter(Boolean);
   assert.deepEqual(links.map(nameOf), ['dup', 'dup.T', 'dup.X', 'dup·2', 'dup.T·2', 'dup.X·2']);
@@ -969,7 +1072,7 @@ const subOf = (env, fmt, ua = 'x') => withFetch(nodesFetch, async () => call(env
 const customCfg = (extra) => fixedNodes('104.16.9.1:443#a', extra);   // 一个固定节点「a」
 
 test('明文端口 Trojan 节点在 Clash / sing-box / QuanX / Surge 中不启用 TLS（security=none）', async () => {
-  const env = baseEnv({ K: kv({ config: customCfg({ enableVless: false, enableTrojan: true, tlsOnly: false }) }) });
+  const env = baseEnv({ CONFIG_KV: kv({ config: customCfg({ enableVless: false, enableTrojan: true, tlsOnly: false }) }) });
   const clash = await (await subOf(env, 'clash')).text();
   const block = clash.split('\n  - name:').find(b => b.includes('a·80'));
   assert.ok(block && /port: 80\n/.test(block));
@@ -986,30 +1089,30 @@ test('明文端口 Trojan 节点在 Clash / sing-box / QuanX / Surge 中不启�
 });
 
 test('Surfboard：只输出 Trojan TLS 节点并使用服务端的 Trojan 密码；未启用 Trojan 时明确报错', async () => {
-  const on = baseEnv({ K: kv({ config: customCfg({ enableVless: true, enableTrojan: true, trojanPassword: 'tp-secret' }) }) });
+  const on = baseEnv({ CONFIG_KV: kv({ config: customCfg({ enableVless: true, enableTrojan: true, trojanPassword: 'tp-secret' }) }) });
   const body = await (await subOf(on, 'surfboard')).text();
   const proxies = body.split('[Proxy]\n')[1].split('\n\n')[0].split('\n');
   assert.equal(proxies.length, 1, '不再把 VLESS 节点改写成 Trojan 重复下发');
   assert.match(proxies[0], /^a\.T = trojan, 104\.16\.9\.1, 443, password=tp-secret,/);
-  const off = baseEnv({ K: kv({ config: customCfg({ enableTrojan: false }) }) });
+  const off = baseEnv({ CONFIG_KV: kv({ config: customCfg({ enableTrojan: false }) }) });
   const res = await subOf(off, 'surfboard');
   assert.equal(res.status, 500);
   assert.match(await res.text(), /Surfboard 只支持 Trojan/);
 });
 
 test('sing-box：仅启用 XHTTP（无可用节点）时报错，而不是输出空 selector 的无效配置', async () => {
-  const env = baseEnv({ K: kv({ config: customCfg({ enableVless: false, enableTrojan: false, enableXhttp: true }) }) });
+  const env = baseEnv({ CONFIG_KV: kv({ config: customCfg({ enableVless: false, enableTrojan: false, enableXhttp: true }) }) });
   const res = await subOf(env, 'singbox');
   assert.equal(res.status, 500);
   assert.match(await res.text(), /不支持 XHTTP/);
   // 同时启用 VLESS 时仍正常输出
-  const ok = baseEnv({ K: kv({ config: customCfg({ enableXhttp: true }) }) });
+  const ok = baseEnv({ CONFIG_KV: kv({ config: customCfg({ enableXhttp: true }) }) });
   const sb = JSON.parse(await (await subOf(ok, 'singbox')).text());
   assert.ok(sb.outbounds[0].outbounds.length > 0);
 });
 
 test('原生地址节点同样遵循多协议命名（Trojan .T / XHTTP .X）', async () => {
-  const env = baseEnv({ K: kv({ config: { enableTrojan: true, enableXhttp: true, src: { native: true, prefDomain: false, prefIp: false }, filter: { ipType: ['IPv4'] } } }) });
+  const env = baseEnv({ CONFIG_KV: kv({ config: { enableTrojan: true, enableXhttp: true, src: { native: true, prefDomain: false, prefIp: false }, filter: { ipType: ['IPv4'] } } }) });
   const links = (await (await subOf(env, 'plain')).text()).split('\n').filter(Boolean);
   assert.deepEqual(links.filter(l => nameOf(l).startsWith('原生地址')).map(nameOf), ['原生地址', '原生地址.T', '原生地址.X']);
 });
@@ -1021,7 +1124,7 @@ test('出站代理：密码含未编码 @ 时主机名解析正确；SOCKS5 对 
   const feed = async (sock, bytes) => { await until(() => sock.push); sock.push(new Uint8Array(bytes)); };
   // SOCKS5：socks5://us:p@ss@10.0.0.1:1080
   let log = fakeNet({ '10.0.0.1': { delay: 5 } });
-  let env = baseEnv({ K: kv({ config: { outboundProxy: 'socks5://us:p@ss@10.0.0.1:1080', outboundMode: 'only' } }) });
+  let env = baseEnv({ CONFIG_KV: kv({ config: { outboundProxy: 'socks5://us:p@ss@10.0.0.1:1080', outboundMode: 'only' } }) });
   let ws = await openWs(env);
   ws.emit('message', { data: vlessReqV6(443).buffer });   // 握手需要下面喂数据才会完成：不能 await
   await until(() => log.length && log[0].written.length);
@@ -1038,7 +1141,7 @@ test('出站代理：密码含未编码 @ 时主机名解析正确；SOCKS5 对 
   assert.deepEqual(req.slice(20), [1, 187]);
   // HTTP CONNECT
   log = fakeNet({ '10.0.0.2': { delay: 5 } });
-  env = baseEnv({ K: kv({ config: { outboundProxy: 'http://10.0.0.2:8080', outboundMode: 'only' } }) });
+  env = baseEnv({ CONFIG_KV: kv({ config: { outboundProxy: 'http://10.0.0.2:8080', outboundMode: 'only' } }) });
   ws = await openWs(env);
   ws.emit('message', { data: vlessReqV6(443).buffer });
   await until(() => log.length && log[0].written.length);
@@ -1068,7 +1171,7 @@ test('协议头：地址被截断时等待后续分片（不按错误地址建�
     // Trojan UDP ASSOCIATE（cmd=3）
     const hex = createHash('sha224').update(UUID).digest('hex');
     const trojan = (cmd) => new Uint8Array([...Buffer.from(hex + '\r\n'), cmd, 3, 9, ...Buffer.from('x.example'), 1, 187, 13, 10, ...TLS_HELLO]);
-    const envT = baseEnv({ K: kv({ config: { enableTrojan: true } }) });
+    const envT = baseEnv({ CONFIG_KV: kv({ config: { enableTrojan: true } }) });
     const w3 = await openWs(envT);
     await w3.emit('message', { data: trojan(3).buffer });
     assert.equal(w3.closed.code, 1011);
@@ -1082,7 +1185,7 @@ test('协议头：地址被截断时等待后续分片（不按错误地址建�
 
 test('面板关闭 VLESS 后服务端不再接受 VLESS WebSocket 连接（Trojan 不受影响）', async () => {
   const log = fakeNet({ 'x.example': { delay: 5 } });
-  const env = baseEnv({ K: kv({ config: { enableVless: false, enableTrojan: true } }) });
+  const env = baseEnv({ CONFIG_KV: kv({ config: { enableVless: false, enableTrojan: true } }) });
   const ws = await openWs(env);
   await ws.emit('message', { data: vlessReq('x.example', 443, TLS_HELLO).buffer });
   assert.equal(ws.closed.code, 1011);
@@ -1091,7 +1194,7 @@ test('面板关闭 VLESS 后服务端不再接受 VLESS WebSocket 连接（Troja
 
 test('WebSocket 关闭原因按字节截断（含中文的长错误信息不会让 close() 抛异常）', async () => {
   globalThis.__connect = () => { throw new Error('出站连接失败：' + '很长的错误信息'.repeat(30)); };
-  const ws = await openWs(baseEnv({ K: kv({ config: { outboundMode: '' } }) }));
+  const ws = await openWs(baseEnv({ CONFIG_KV: kv({ config: { outboundMode: '' } }) }));
   // 直连与反代均失败 → fail(lastErr)
   await withFetch(() => new Response('{}'), async () => {
     await ws.emit('message', { data: vlessReq('x.example', 443, TLS_HELLO).buffer });
@@ -1103,7 +1206,7 @@ test('WebSocket 关闭原因按字节截断（含中文的长错误信息不会�
 
 test('XHTTP：首个请求体块短于 VLESS 头部时累积后再解析', async () => {
   const log = fakeNet({ 'xh.example': { delay: 5 } });
-  const env = baseEnv({ K: kv({ config: { enableXhttp: true } }) });
+  const env = baseEnv({ CONFIG_KV: kv({ config: { enableXhttp: true } }) });
   const full = vlessReq('xh.example', 443, TLS_HELLO);
   const body = new ReadableStream({ async start(c) {
     c.enqueue(full.slice(0, 7)); await new Promise(r => setTimeout(r, 10));
@@ -1122,19 +1225,19 @@ const nextQs = (path) => '?next=' + encodeURIComponent('/' + path);
 
 test('Clash 模板不再包含公开的默认凭据：SS 密码 / 认证 / API 密钥按 UUID 派生且稳定，CORS 不再是 *，DNS 只监听本机', async () => {
   const get = async (env) => (await subOf(env, 'clash')).text();
-  const a = await get(baseEnv({ K: kv({ config: customCfg() }) }));
+  const a = await get(baseEnv({ CONFIG_KV: kv({ config: customCfg() }) }));
   assert.ok(!/yyds666|Xf3#Lp9WqZ|__CFNEXT_/.test(a), '无默认密码 / 未替换的占位符');
   const d = (purpose, uuid = UUID) => createHash('sha224').update(`cfnext-clash|${purpose}|${uuid}`).digest('hex').slice(0, 20);
   assert.ok(a.includes(`password: "${d('ss')}"`) && a.includes(`- "mihomo:${d('auth')}"`) && a.includes(`secret: "${d('api')}"`), '与 UUID 派生一致（同时校验 SHA-224 实现）');
-  assert.equal(await get(baseEnv({ K: kv({ config: customCfg() }) })), a, '同一部署每次订阅结果稳定');
-  const other = await (await withFetch(nodesFetch, () => call(baseEnv({ U: UUID2, K: kv({ config: customCfg() }) }), `/${UUID2}/sub/clash`, { ua: 'x' }))).text();
+  assert.equal(await get(baseEnv({ CONFIG_KV: kv({ config: customCfg() }) })), a, '同一部署每次订阅结果稳定');
+  const other = await (await withFetch(nodesFetch, () => call(baseEnv({ UUID: UUID2, CONFIG_KV: kv({ config: customCfg() }) }), `/${UUID2}/sub/clash`, { ua: 'x' }))).text();
   assert.ok(!other.includes(d('api')) && other.includes(`secret: "${d('api', UUID2)}"`), '不同部署密钥不同');
   assert.ok(!/allow-origins:\n\s+- "\*"/.test(a), 'CORS 不是 *');
   assert.match(a, /listen: 127\.0\.0\.1:1053/);
 });
 
 test('管理密码：面板设置的密码以加盐摘要存入 KV；旧版明文密码在下次保存时升级；以摘要前缀开头的密码被拒绝', async () => {
-  const env = baseEnv({ ADMIN: undefined, K: kv({ config: { admin: 'legacy-pw' } }) });
+  const env = baseEnv({ ADMIN: undefined, CONFIG_KV: kv({ config: { admin: 'legacy-pw' } }) });
   const cookie = await login(env, 'legacy-pw');                       // 旧版明文仍可登录
   assert.equal(stored(env).admin, 'legacy-pw');
   const r = await (await call(env, `/${UUID}/api/config`, { method: 'POST', cookie, body: { alpn: 'h2' } })).json();
@@ -1193,7 +1296,7 @@ test('管理用户名：环境变量 ADMIN_USER 优先且面板只读（保存�
   assert.equal(cfg.adminUser, 'ops'); assert.equal(cfg.envLocked.adminUser, 'ADMIN_USER');
   const r = await (await call(env, `/${UUID}/api/config`, { method: 'POST', cookie, body: { adminUser: 'other', tlsOnly: false } })).json();
   assert.equal(r.ok, true);
-  assert.equal(JSON.parse(env.K.m.get('config')).adminUser, undefined, 'ADMIN_USER 不写入 KV');
+  assert.equal(JSON.parse(env.CONFIG_KV.m.get('config')).adminUser, undefined, 'ADMIN_USER 不写入 KV');
   await login(env, 'pw', UUID, 'ops');
 });
 
@@ -1223,7 +1326,7 @@ test('登录加固：/login 与 /version 对不知道面板路径的人返回 40
 
 test('环境变量提供的值不会因为一次保存被固化进 KV；面板改成不同的值才保存为覆盖', async () => {
   const env = baseEnv({ ADMIN: undefined, PROXYIP: 'relay.example.com:443', TROJAN: 'true', TROJAN_PASSWORD: 'env-tp', ALPN: 'h2',
-    K: kv({ config: { admin: 'pw' } }) });
+    CONFIG_KV: kv({ config: { admin: 'pw' } }) });
   const first = await call(env, `/${UUID}/api/config`, { method: 'POST', cookie: await login(env), body: { tlsOnly: false } });
   const r = await first.json();
   assert.equal(r.ok, true);
@@ -1278,7 +1381,7 @@ const failingKv = (init = {}) => {
 
 test('KV 读取失败：有环境变量 UUID 时节点与订阅照常工作，保存与重置被拒绝且不会覆盖已有配置；无环境变量 UUID 时返回 503', async () => {
   const k = failingKv({ config: { alpn: 'h2' } });
-  const env = baseEnv({ K: k });
+  const env = baseEnv({ CONFIG_KV: k });
   const cookie = await login(env);                                   // ADMIN 来自环境变量，不依赖 KV
   assert.equal((await call(env, `/${UUID}/sub`, { ua: 'v2rayN/7' })).status, 200, '订阅仍可用');
   const cfg = await (await call(env, `/${UUID}/api/config`, { cookie })).json();
@@ -1294,7 +1397,7 @@ test('KV 读取失败：有环境变量 UUID 时节点与订阅照常工作，�
   assert.equal(after.data.alpn, 'h2');
   assert.equal(after.data.kvError, '');
   // 未设置环境变量 U：此时 UUID 只能是随机值，直接 503，不再让登录与节点悄悄失效
-  const noU = { ADMIN: 'pw', K: failingKv() };
+  const noU = { ADMIN: 'pw', CONFIG_KV: failingKv() };
   const res = await call(noU, `/${UUID}/sub`, { ua: 'v2rayN/7' });
   assert.equal(res.status, 503);
   assert.equal(res.headers.get('Retry-After'), '30');
@@ -1302,7 +1405,7 @@ test('KV 读取失败：有环境变量 UUID 时节点与订阅照常工作，�
 
 test('KV 中的配置损坏（不是合法 JSON）：显示提示并禁止保存，但允许重置修复', async () => {
   const k = kv({ config: '{"alpn": "h2"' });
-  const env = baseEnv({ K: k });
+  const env = baseEnv({ CONFIG_KV: k });
   const cookie = await login(env);
   const cfg = await (await call(env, `/${UUID}/api/config`, { cookie })).json();
   assert.match(cfg.data.kvError, /已损坏/);
@@ -1332,7 +1435,7 @@ const connectVia = async (env, host) => {
 test('反代 / 落地域名解析：每种记录只发 1 个 DoH 请求（Cloudflare 优先）；结果缓存复用，但不跨请求共享进行中的解析', async () => {
   const log = fakeNet({ '198.51.100.5': { delay: 5 } });
   const dns = [];
-  const env = baseEnv({ K: kv({ config: { proxyIP: 'dedupe.example.com' } }) });
+  const env = baseEnv({ CONFIG_KV: kv({ config: { proxyIP: 'dedupe.example.com' } }) });
   await withFetch(dohStub({ 'cloudflare-dns.com': { delay: 40, answers: { 'dedupe.example.com|A': ['198.51.100.5'] } } }, dns), async () => {
     const sockets = [];
     for (let i = 0; i < 4; i++) sockets.push(await openWs(env));
@@ -1354,14 +1457,14 @@ test('反代域名解析：首选 DoH 失败时才换下一个端点；全部失
   fakeNet({ '198.51.100.6': { delay: 5 }, 'neg.example.com': { delay: 5 } });
   // 首选端点 500 → 第二个端点接手，第三个不被访问
   let dns = [];
-  let env = baseEnv({ K: kv({ config: { proxyIP: 'fallback.example.com' } }) });
+  let env = baseEnv({ CONFIG_KV: kv({ config: { proxyIP: 'fallback.example.com' } }) });
   await withFetch(dohStub({ 'dns.alidns.com': { answers: { 'fallback.example.com|A': ['198.51.100.6'] } } }, dns), () => connectVia(env, 't.example'));
   let hosts = dns.filter(d => d.name === 'fallback.example.com').map(d => d.host);
   assert.deepEqual([...new Set(hosts)].sort(), ['cloudflare-dns.com', 'dns.alidns.com']);
   assert.ok(!hosts.includes('doh.pub'));
   // 全部失败：第一次尝试所有端点，第二次连接直接用缓存的「无结果」
   dns = [];
-  env = baseEnv({ K: kv({ config: { proxyIP: 'neg.example.com' } }) });
+  env = baseEnv({ CONFIG_KV: kv({ config: { proxyIP: 'neg.example.com' } }) });
   await withFetch(dohStub({}, dns), () => connectVia(env, 't.example'));
   const first = dns.filter(d => d.name === 'neg.example.com').length;
   assert.ok(first >= 6, `第一次查询了所有端点（${first}）`);
@@ -1399,7 +1502,7 @@ test('机房共享缓存：优选 API 结果写入 / 读取 Cache API；命中�
   try {
     const cfgFor = (url) => ({ filter: { ipType: ['IPv4'] }, src: { prefDomain: false }, ipsrc: { hostmonit: false, uouin: false, api1: true, api1Url: url } });
     const linksFor = async (url, handler) => {
-      const env = baseEnv({ K: kv({ config: cfgFor(url) }) });
+      const env = baseEnv({ CONFIG_KV: kv({ config: cfgFor(url) }) });
       return withFetch(handler, async (calls) => {
         const t = await (await call(env, `/${UUID}/sub`, { ua: 'v2rayN/7.0' })).text();
         return { calls, hosts: t.split('\n').filter(l => /^vless:\/\//.test(l)).map(l => l.match(/@([^:]+):/)[1]) };
@@ -1420,7 +1523,7 @@ test('机房共享缓存：优选 API 结果写入 / 读取 Cache API；命中�
   } finally { delete globalThis.caches; }
   // 3) 没有 Cache API：退回内存缓存，订阅照常
   const urlC = 'https://shared-c.example.com/ips.txt';
-  const env = baseEnv({ K: kv({ config: { filter: { ipType: ['IPv4'] }, src: { prefDomain: false }, ipsrc: { hostmonit: false, uouin: false, api1: true, api1Url: urlC } } }) });
+  const env = baseEnv({ CONFIG_KV: kv({ config: { filter: { ipType: ['IPv4'] }, src: { prefDomain: false }, ipsrc: { hostmonit: false, uouin: false, api1: true, api1Url: urlC } } }) });
   const t = await withFetch((u) => u === urlC ? new Response('104.16.6.6') : notFound(), async () => (await call(env, `/${UUID}/sub`, { ua: 'v2rayN/7.0' })).text());
   assert.match(t, /@104\.16\.6\.6:443/);
 });
@@ -1555,7 +1658,7 @@ for (const method of Object.keys(ssMethods)) {
     ];
     for (const [host, expectHeader] of targets) {
       const log = fakeNet({ '10.0.0.9': { delay: 5 } });
-      const env = baseEnv({ K: kv({ config: { outboundProxy: `ss://${method}:${encodeURIComponent(password)}@10.0.0.9:8388`, outboundMode: 'only' } }) });
+      const env = baseEnv({ CONFIG_KV: kv({ config: { outboundProxy: `ss://${method}:${encodeURIComponent(password)}@10.0.0.9:8388`, outboundMode: 'only' } }) });
       const ws = await openWs(env);
       const big = new Uint8Array(40000).map((_, i) => i & 255); big.set(TLS_HELLO);   // 超过单块上限：必须拆块
       await ws.emit('message', { data: vlessReq(host, 443, [...big]).buffer });
@@ -1581,7 +1684,7 @@ test('Shadowsocks 出站：IPv4 / IPv6 目标使用对应的地址类型；密�
   const method = 'aes-256-gcm', password = 'secret';
   const run = async (req, header) => {
     const log = fakeNet({ '10.0.0.9': { delay: 5 } });
-    const env = baseEnv({ K: kv({ config: { outboundProxy: `ss://${method}:${password}@10.0.0.9:8388`, outboundMode: 'only' } }) });
+    const env = baseEnv({ CONFIG_KV: kv({ config: { outboundProxy: `ss://${method}:${password}@10.0.0.9:8388`, outboundMode: 'only' } }) });
     const ws = await openWs(env);
     await ws.emit('message', { data: req.buffer });
     await until(() => log.length && ssRefDecodeClient(method, password, log[0].written).plain.length >= header.length);
@@ -1599,7 +1702,7 @@ const cfDoh = (map, log = []) => async (url) => {   // 简易 DoH：map[域名] 
   return new Response(JSON.stringify({ Status: 0, Answer: ips.map(data => ({ type: 1, data })) }));
 };
 const domainsOfSub = async (config, fetchHandler = notFound) => {
-  const env = baseEnv({ K: kv({ config: { ...config } }) });
+  const env = baseEnv({ CONFIG_KV: kv({ config: { ...config } }) });
   const t = await withFetch(fetchHandler, async () => (await call(env, `/${UUID}/sub`, { ua: 'v2rayN/7' })).text());
   return t.split('\n').filter(l => /^vless:\/\//.test(l)).map(l => l.match(/@([^:?]+):/)[1]);
 };
@@ -1678,7 +1781,7 @@ test('地区反代模式：off 时不解析也不连接任何地区反代；cust
   // off：目标直连失败后不尝试任何反代，连接被关闭
   let log = fakeNet({});
   let dns = [];
-  let env = baseEnv({ K: kv({ config: { relay: { mode: 'off' } } }) });
+  let env = baseEnv({ CONFIG_KV: kv({ config: { relay: { mode: 'off' } } }) });
   await withFetch(cfDoh({}, dns), async () => {
     const ws = await openWs(env);
     await ws.emit('message', { data: vlessReq('off-test.example', 443, TLS_HELLO).buffer });
@@ -1689,7 +1792,7 @@ test('地区反代模式：off 时不解析也不连接任何地区反代；cust
   // custom：直连挂起（目标在 Cloudflare 上）→ 自定义反代接管，内置反代不被碰
   log = fakeNet({ 'cf-custom.example': { delay: 'hang' }, '203.0.113.31': { delay: 10 }, '203.0.113.30': { delay: 40 } });
   dns = [];
-  env = baseEnv({ K: kv({ config: { relay: { mode: 'custom', custom: 'my-relay.example.com\n203.0.113.30:8443' } } }) });
+  env = baseEnv({ CONFIG_KV: kv({ config: { relay: { mode: 'custom', custom: 'my-relay.example.com\n203.0.113.30:8443' } } }) });
   await withFetch(cfDoh({ 'my-relay.example.com': ['203.0.113.31'] }, dns), async () => {
     const ws = await openWs(env);
     await ws.emit('message', { data: vlessReq('cf-custom.example', 443, TLS_HELLO).buffer });
@@ -1703,7 +1806,7 @@ test('地区反代模式：off 时不解析也不连接任何地区反代；cust
   // 固定地区：首选 SE、次选不使用 → 只解析 SE
   log = fakeNet({ 'cf-se.example': { delay: 'hang' }, '203.0.113.50': { delay: 10 } });
   dns = [];
-  env = baseEnv({ K: kv({ config: { relay: { mode: 'builtin', region: 'SE', region2: 'none' } } }) });
+  env = baseEnv({ CONFIG_KV: kv({ config: { relay: { mode: 'builtin', region: 'SE', region2: 'none' } } }) });
   await withFetch(cfDoh({ 'proxyip.se.cmliussss.net': ['203.0.113.50'] }, dns), async () => {
     const ws = await openWs(env);
     await ws.emit('message', { data: vlessReq('cf-se.example', 443, TLS_HELLO).buffer });
@@ -1737,7 +1840,7 @@ test('自定义订阅 / 随机优选已移除：旧 KV 中的相关字段与 YX 
   const legacy = { enableXhttp: false, filter: { ipType: ['IPv4'] }, ipsrc: { hostmonit: false, uouin: false },
     optimizer: { subMode: 'custom', subIncludeDefault: true, subRandomCount: 5 }, preferredDomains: 'my.custom.example\n104.16.0.9:443#MINE',
     preferredIPs: [{ ip: '104.16.0.10', port: 443, name: 'MINE2' }] };
-  const env = baseEnv({ YX: '104.16.0.11:443#ENV', K: kv({ config: legacy }) });
+  const env = baseEnv({ YX: '104.16.0.11:443#ENV', CONFIG_KV: kv({ config: legacy }) });
   const links = (await (await subOf(env, 'plain')).text()).split('\n').filter(Boolean);
   assert.equal(links.length, 14, '按默认来源（内置 14 个优选域名）生成');
   assert.ok(!links.some(l => ['my.custom.example', '104.16.0.9', '104.16.0.10', '104.16.0.11'].includes(l.match(/@([^:?]+):/)[1])));
@@ -1752,7 +1855,7 @@ test('自定义订阅 / 随机优选已移除：旧 KV 中的相关字段与 YX 
 });
 
 test('节点测活已移除：旧 KV 的 probeAlive 与 PROBE_ALIVE 环境变量被忽略，订阅不再对优选域名做任何预检解析，面板无对应开关', async () => {
-  const env = baseEnv({ PROBE_ALIVE: '1', K: kv({ config: { enableXhttp: false, probeAlive: true, filter: { ipType: ['IPv4'] }, ipsrc: { hostmonit: false, uouin: false } } }) });
+  const env = baseEnv({ PROBE_ALIVE: '1', CONFIG_KV: kv({ config: { enableXhttp: false, probeAlive: true, filter: { ipType: ['IPv4'] }, ipsrc: { hostmonit: false, uouin: false } } }) });
   const calls = [];
   const links = await withFetch((u) => { calls.push(u); return nodesFetch(u); }, async () =>
     (await (await call(env, `/${UUID}/sub/plain`, { ua: 'x' })).text()).split('\n').filter(Boolean));
@@ -1768,7 +1871,7 @@ test('节点测活已移除：旧 KV 的 probeAlive 与 PROBE_ALIVE 环境变量
 });
 
 test('Stash 手动选择格式时输出 Clash 配置（与按 UA 识别一致），不再是明文链接', async () => {
-  const env = baseEnv({ K: kv({ config: customCfg() }) });
+  const env = baseEnv({ CONFIG_KV: kv({ config: customCfg() }) });
   const forced = await (await subOf(env, 'stash')).text();
   assert.match(forced, /^# CFNext 订阅\ntest-url:/);
   assert.match(forced, /\nproxies:\n/);
@@ -1777,13 +1880,13 @@ test('Stash 手动选择格式时输出 Clash 配置（与按 UA 识别一致）
 });
 
 test('Surge / Loon / Quantumult X 不输出 XHTTP 节点（它们没有 XHTTP 传输）；只启用 XHTTP 时明确报错', async () => {
-  const both = baseEnv({ K: kv({ config: customCfg({ enableXhttp: true }) }) });
+  const both = baseEnv({ CONFIG_KV: kv({ config: customCfg({ enableXhttp: true }) }) });
   for (const [fmt, nodeRe] of [['surge', /^a(\.X)? = vless,/m], ['loon', /^a(\.X)? = vless,/m], ['quanx', /tag=a(\.X)?$/m]]) {
     const body = await (await subOf(both, fmt)).text();
     assert.ok(!/\.X\b/.test(body), `${fmt} 不含 XHTTP 节点（.X）`);
     assert.match(body, nodeRe, `${fmt} 仍包含 VLESS 节点`);
   }
-  const only = baseEnv({ K: kv({ config: customCfg({ enableVless: false, enableTrojan: false, enableXhttp: true }) }) });
+  const only = baseEnv({ CONFIG_KV: kv({ config: customCfg({ enableVless: false, enableTrojan: false, enableXhttp: true }) }) });
   for (const [fmt, name] of [['surge', 'Surge'], ['loon', 'Loon'], ['quanx', 'Quantumult X']]) {
     const res = await subOf(only, fmt);
     assert.equal(res.status, 500, fmt);
@@ -1799,7 +1902,7 @@ const xhttpPost = (env, path, body) => worker.fetch(new Request(`https://node.ex
 
 test('XHTTP：Xray 风格请求（路径带结尾 / 与 x_padding 查询串）被接受，响应以 VLESS 响应头开始并转发上行数据', async () => {
   const log = fakeNet({ 'slash.example': { delay: 5 } });
-  const env = baseEnv({ K: kv({ config: { enableXhttp: true } }) });
+  const env = baseEnv({ CONFIG_KV: kv({ config: { enableXhttp: true } }) });
   const res = await xhttpPost(env, `/${UUID}/?x_padding=${'x'.repeat(300)}`, vlessReq('slash.example', 443, TLS_HELLO));
   assert.equal(res.status, 200);
   assert.equal(res.headers.get('cache-control'), 'no-store');
@@ -1810,7 +1913,7 @@ test('XHTTP：Xray 风格请求（路径带结尾 / 与 x_padding 查询串）�
   assert.equal(log[0].hostname, 'slash.example');
   assert.deepEqual([...log[0].written[0]], TLS_HELLO);
   // 关闭 XHTTP 时不接受代理请求
-  const off = await xhttpPost(baseEnv({ K: kv({ config: { enableXhttp: false } }) }), `/${UUID}/`, vlessReq('slash.example', 443, TLS_HELLO));
+  const off = await xhttpPost(baseEnv({ CONFIG_KV: kv({ config: { enableXhttp: false } }) }), `/${UUID}/`, vlessReq('slash.example', 443, TLS_HELLO));
   assert.notEqual(off.headers.get('content-type'), 'application/octet-stream');
 });
 
@@ -1822,7 +1925,7 @@ test('XHTTP 下行有背压：客户端不读取时不会无限缓冲目标连�
     readable: new ReadableStream({ pull(c) { pulls++; c.enqueue(new Uint8Array(64 * 1024)); } }),   // 目标不停地发数据
     close() { closed = true; },
   });
-  const env = baseEnv({ K: kv({ config: { enableXhttp: true } }) });
+  const env = baseEnv({ CONFIG_KV: kv({ config: { enableXhttp: true } }) });
   const body = new ReadableStream({ start(c) { c.enqueue(vlessReq('bp.example', 443, TLS_HELLO)); } });   // 请求体保持打开
   const res = await xhttpPost(env, `/${UUID}`, body);
   const reader = res.body.getReader();
@@ -1836,7 +1939,7 @@ test('XHTTP 下行有背压：客户端不读取时不会无限缓冲目标连�
 
 test('XHTTP 链接：未设置 ALPN 时显式带 alpn=h2（stream-one 依赖 HTTP/2），WS 节点不带；面板设置的 ALPN 优先', async () => {
   const links = async (alpn) => {
-    const env = baseEnv({ K: kv({ config: customCfg({ enableXhttp: true, ...(alpn ? { alpn } : {}) }) }) });
+    const env = baseEnv({ CONFIG_KV: kv({ config: customCfg({ enableXhttp: true, ...(alpn ? { alpn } : {}) }) }) });
     return (await (await subOf(env, 'plain')).text()).split('\n').filter(Boolean);
   };
   let [ws, x] = await links();
@@ -1886,7 +1989,7 @@ test('WS：同一帧内一次性到达的大量数据帧（建连完成前）按
 });
 
 test('sing-box 的 VLESS 出站不再指定 packet_encoding=xudp（服务端不支持 Mux/XUDP，只支持 UDP-DNS）', async () => {
-  const env = baseEnv({ K: kv({ config: customCfg() }) });
+  const env = baseEnv({ CONFIG_KV: kv({ config: customCfg() }) });
   const sb = JSON.parse(await (await subOf(env, 'singbox')).text());
   const vless = sb.outbounds.filter(o => o.type === 'vless');
   assert.ok(vless.length > 0 && vless.every(o => !('packet_encoding' in o)));
