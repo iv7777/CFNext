@@ -184,6 +184,13 @@ function setupProblems(env, cfg) {
   return lines.join('\n');
 }
 
+// 路径不对（根路径、未知路由）时返回一个普通的 Hello World 页面作为伪装：
+// 看起来像个占位站点，既不暴露面板路径 / UUID，也不返回 404 引人注意
+function helloPage() {
+  return new Response('<!doctype html><html><head><meta charset="utf-8"><title>Hello World</title></head><body><h1>Hello World !</h1></body></html>',
+    { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8' } });
+}
+
 async function handleRequest(request, env, state) {
   const url = new URL(request.url);
   const UA = request.headers.get('User-Agent') || '';
@@ -251,9 +258,9 @@ async function handleRequest(request, env, state) {
   const isPanelRoot = segs[0] === panelPath;
   const isSubRoot = isPanelRoot || segs[0] === subRoot;
 
-  // 根路径不跳转到面板入口（否则会把面板路径 / UUID 告诉任何访问者）
+  // 根路径不跳转到面板入口（否则会把面板路径 / UUID 告诉任何访问者），返回伪装页
   if (segs[0] === '') {
-    return new Response('Not Found', { status: 404 });
+    return helloPage();
   }
 
   // ---------- 代理：WebSocket / xhttp ----------
@@ -412,7 +419,8 @@ async function handleRequest(request, env, state) {
     return json({ ok: false, msg: '未知 API: ' + apiName }, 404);
   }
 
-  return new Response('Not Found', { status: 404 });
+  // 未匹配任何有效路由（路径不对）：返回伪装页，不暴露部署存在
+  return helloPage();
 }
 
 // 安全响应头：只加在 HTML 页面与 JSON 接口上（订阅、WebSocket、XHTTP 流不动）。

@@ -262,7 +262,7 @@ test('必填环境变量：PATH 未设置 / 非法时所有请求返回 503 设�
 
 test('面板路径只认 PATH：节点路径为 /<PATH>，UUID 仅作节点身份；订阅仍可从 /<UUID>/sub 取得', async () => {
   const env = baseEnv({ PATH: 'mypanel', CONFIG_KV: kv({ config: customCfg() }) });
-  assert.equal((await call(env, `/${UUID}`, { ua: BROWSER })).status, 404, 'UUID 路径不是面板入口');
+  assert.equal((await call(env, `/${UUID}`, { ua: BROWSER })).status, 200, 'UUID 路径不是面板入口（返回伪装页）');
   assert.equal((await call(env, '/mypanel', { ua: BROWSER })).status, 302, '面板入口在 PATH 下，未登录跳转登录页');
   const links = await withFetch(nodesFetch, async () => (await (await call(env, `/${UUID}/sub`, { ua: 'v2rayN/7.0' })).text()).split('\n').filter(l => /^vless:\/\//.test(l)));
   assert.ok(links.length > 0);
@@ -355,8 +355,8 @@ test('订阅别名只输出订阅，不开放面板 / 管理接口（问题 6）
   const sub = await call(env, '/AAZ/sub', { ua: 'v2rayN/7.0' });
   assert.equal(sub.status, 200);
   assert.match(await sub.text(), /^vless:\/\//m);
-  assert.equal((await call(env, '/AAZ', { cookie })).status, 404, '别名下不提供面板');
-  assert.equal((await call(env, '/AAZ/api/config', { cookie })).status, 404, '别名下不提供管理接口');
+  assert.equal((await call(env, '/AAZ', { cookie })).status, 200, '别名下不提供面板');
+  assert.equal((await call(env, '/AAZ/api/config', { cookie })).status, 200, '别名下不提供管理接口');
   assert.equal((await call(env, `/${UUID}`, { cookie })).status, 200, '面板路径不受影响');
 });
 
@@ -368,13 +368,13 @@ test('自定义订阅路径留空：订阅地址为 /<UUID>/sub（面板路径�
     assert.equal(r.status, 200, p);
   }
   assert.match(await (await call(env, `/${UUID}`, { ua: 'v2rayN/7.0' })).text(), /^vless:\/\//m, '客户端 UA 访问 /<UUID> 同样得到订阅');
-  assert.equal((await call(env, `/${UUID}`, { cookie })).status, 404, 'UUID 路径下不提供面板');
-  assert.equal((await call(env, `/${UUID}/api/config`, { cookie })).status, 404, 'UUID 路径下不提供管理接口');
+  assert.equal((await call(env, `/${UUID}`, { cookie })).status, 200, 'UUID 路径下不提供面板');
+  assert.equal((await call(env, `/${UUID}/api/config`, { cookie })).status, 200, 'UUID 路径下不提供管理接口');
   assert.equal((await call(env, '/panel', { cookie })).status, 200, '面板路径不受影响');
   // 设置了自定义订阅路径：UUID 不再作为订阅入口（面板路径与 UUID 不同时）
   const env2 = baseEnv({ PATH: 'panel', CONFIG_KV: kv({ config: { sbu: 'AAZ' } }) });
   assert.equal((await call(env2, '/AAZ/sub', { ua: 'v2rayN/7.0' })).status, 200);
-  assert.equal((await call(env2, `/${UUID}/sub`, { ua: 'v2rayN/7.0' })).status, 404);
+  assert.equal((await call(env2, `/${UUID}/sub`, { ua: 'v2rayN/7.0' })).status, 200);
 });
 
 test('预览与订阅同一流程：返回节点数，订阅不写 KV（问题 7）', async () => {
