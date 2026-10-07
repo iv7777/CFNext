@@ -681,7 +681,7 @@ const SERVER_CHECKS = {
   },
   adminPass(v) {
     // 以摘要前缀开头的密码会被误当成已哈希的值，直接拒绝
-    if (v && String(v).startsWith('cfnext-pbkdf2$')) return '密码不能以 cfnext-pbkdf2$ 开头';
+    if (v && String(v).startsWith('hopline-pbkdf2$')) return '密码不能以 hopline-pbkdf2$ 开头';
   },
   hostPort(v) {
     if (!v) return;
@@ -3264,8 +3264,7 @@ function generateClash(cfg, nodes) {
   // 节点排序：443端口优先（非标准端口如8443在mihomo下HTTPS握手易被GFW干扰，放后面避免默认选中）
   proxies.sort((a, b) => (a.port === 443 ? 0 : 1) - (b.port === 443 ? 0 : 1));
   // 模板中的本地凭据按 UUID 派生（同一部署每次订阅结果稳定，不同部署互不相同），避免所有人共用公开的默认密码
-  // 派生前缀沿用项目旧名 CFNext：改名会改变已部署实例下发给客户端的本地密码
-  const derive = (purpose) => sha224hex('cfnext-clash|' + purpose + '|' + cfg.uuid).slice(0, 20);
+  const derive = (purpose) => sha224hex('hopline-clash|' + purpose + '|' + cfg.uuid).slice(0, 20);
   const template = CLASH_TEMPLATE
     .split('__HOPLINE_SS_PASSWORD__').join(derive('ss'))
     .split('__HOPLINE_AUTH_PASSWORD__').join(derive('auth'))
@@ -5166,8 +5165,7 @@ async function hmacHex(key, msg) {
 // 迭代次数写在摘要里，日后可调高而不影响已保存的密码；取 1 万次是为了控制免费版 10ms CPU 限制下的登录开销。
 // 由环境变量 ADMIN 提供的密码仍是明文（环境变量本身即密钥存储），按常量时间比较。
 // KV 中若存有明文密码同样可用，下次在面板保存任意配置时自动改存摘要。
-// 前缀沿用项目旧名 CFNext：它是 KV 中已保存摘要的格式标识，改名会使已部署实例的密码失效
-const ADMIN_HASH_PREFIX = 'cfnext-pbkdf2$';
+const ADMIN_HASH_PREFIX = 'hopline-pbkdf2$';
 const ADMIN_HASH_ITER = 10000;
 const toHex = (u8) => Array.from(u8).map(b => b.toString(16).padStart(2, '0')).join('');
 const fromHex = (h) => Uint8Array.from((String(h).match(/../g) || []).map(x => parseInt(x, 16)));

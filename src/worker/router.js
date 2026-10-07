@@ -26,8 +26,7 @@ async function hmacHex(key, msg) {
 // 迭代次数写在摘要里，日后可调高而不影响已保存的密码；取 1 万次是为了控制免费版 10ms CPU 限制下的登录开销。
 // 由环境变量 ADMIN 提供的密码仍是明文（环境变量本身即密钥存储），按常量时间比较。
 // KV 中若存有明文密码同样可用，下次在面板保存任意配置时自动改存摘要。
-// 前缀沿用项目旧名 CFNext：它是 KV 中已保存摘要的格式标识，改名会使已部署实例的密码失效
-const ADMIN_HASH_PREFIX = 'cfnext-pbkdf2$';
+const ADMIN_HASH_PREFIX = 'hopline-pbkdf2$';
 const ADMIN_HASH_ITER = 10000;
 const toHex = (u8) => Array.from(u8).map(b => b.toString(16).padStart(2, '0')).join('');
 const fromHex = (h) => Uint8Array.from((String(h).match(/../g) || []).map(x => parseInt(x, 16)));

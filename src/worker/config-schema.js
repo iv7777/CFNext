@@ -211,7 +211,7 @@ const SERVER_CHECKS = {
   },
   adminPass(v) {
     // 以摘要前缀开头的密码会被误当成已哈希的值，直接拒绝
-    if (v && String(v).startsWith('cfnext-pbkdf2$')) return '密码不能以 cfnext-pbkdf2$ 开头';
+    if (v && String(v).startsWith('hopline-pbkdf2$')) return '密码不能以 hopline-pbkdf2$ 开头';
   },
   hostPort(v) {
     if (!v) return;

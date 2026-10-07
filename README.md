@@ -8,13 +8,11 @@
 
 # 更新日志 _V2.2.1
 
-### 📝 项目更名：CFNext → Hopline
+### 📝 项目更名为 Hopline
 
-- 仓库更名为 **[iv7777/Hopline](https://github.com/iv7777/Hopline)**，部署文件由 `CFNext.js` 改为 **`Hopline.js`**（内容与用法不变，部署时粘贴 `Hopline.js` 即可）
-- 面板标题、登录页、关于页、订阅配置名（Clash / Sing-box 导入后显示为 Hopline）、备份与订阅下载文件名统一改为 Hopline
-- 版本更新检测改为读取 `raw.githubusercontent.com/iv7777/Hopline/main/Hopline.js`。**V2.2.0 及更早的部署仍会去找旧文件名 `CFNext.js`，面板里的「检测更新」会失败**，请手动把 `Hopline.js` 粘贴到 Worker 完成这一次升级，之后即可正常检测
-- 登录 Cookie 更名为 `hopline_auth`：升级后需重新登录一次
-- **以下保持不变，升级无需任何操作**：环境变量与 KV 中的配置、已保存的管理密码摘要（格式标识 `cfnext-pbkdf2$` 保留）、节点与订阅地址、Clash 订阅中按 UUID 派生的本地凭据（Shadowsocks 入站、mihomo 认证与 API secret 不变）
+- 仓库为 **[iv7777/Hopline](https://github.com/iv7777/Hopline)**，部署文件为 **`Hopline.js`**；面板标题、登录页、关于页、订阅配置名（Clash / Sing-box 导入后显示为 Hopline）、备份与订阅下载文件名、登录 Cookie（`hopline_auth`）统一使用新名称
+- 版本更新检测读取 `raw.githubusercontent.com/iv7777/Hopline/main/Hopline.js`
+- **全新开始，不兼容旧版部署**：管理密码摘要格式改为 `hopline-pbkdf2$`，Clash 订阅中按 UUID 派生的本地凭据（Shadowsocks 入站、mihomo 认证与 API secret）随之改变；请重新部署 `Hopline.js` 并重新配置
 
 ---
 
@@ -145,7 +143,7 @@
 
 ### 📝 名称说明
 
-- 名称说明统一为「CFNext · Cloudflare 代理订阅面板」（面板标题、登录页、关于页、README、`package.json`；原「隧道面板」易与 Cloudflare Tunnel 混淆）；功能无变化
+- 名称说明统一为「Hopline · Cloudflare 代理订阅面板」（面板标题、登录页、关于页、README、`package.json`；原「隧道面板」易与 Cloudflare Tunnel 混淆）；功能无变化
 
 ---
 
@@ -321,7 +319,7 @@
 - Clash 模板不再使用公开的默认凭据：SS 监听密码、`authentication`、控制接口 `secret` 按 UUID 为每个部署派生；`external-controller-cors` 不再是 `*`；DNS 仅监听 `127.0.0.1:1053`
 - 管理密码在 KV 中保存为加盐 PBKDF2-SHA256 摘要（旧版明文在下次保存时自动升级）；Trojan 密码不再写入导出的备份文件
 - `/login`、`/version` 只对知道面板路径的人可用（面板入口跳转自带 `?next=`），直接访问返回 404；IPv6 登录失败按 /64 计数；限速表满时不再整表清空
-- 面板与登录页加入 CSP、`X-Frame-Options`、`nosniff`、`Referrer-Policy`；二维码脚本带 SRI 校验；新增「退出登录」，登录 Cookie 更名为 `cfnext_auth`（升级后需重新登录一次）
+- 面板与登录页加入 CSP、`X-Frame-Options`、`nosniff`、`Referrer-Policy`；二维码脚本带 SRI 校验；新增「退出登录」，登录 Cookie 更名为 `hopline_auth`（升级后需重新登录一次）
 - 保存配置时，与环境变量相同的值不再写入 KV（此前一次保存就会把 `PROXYIP`、`TROJAN_PASSWORD`、`ALPN` 等固化进 KV，之后修改环境变量被静默忽略）
 
 ### ⚡ 性能与稳定
@@ -459,8 +457,8 @@
 - 修改面板路径 / UUID / 管理密码 / 管理用户名后自动跳转到新地址并保持登录
 - 由环境变量提供的配置（`ADMIN`、`D`、`CF_ACCOUNT_ID`、`CF_API_TOKEN`）在面板中只读显示
 - 订阅预览与客户端实际订阅走同一流程并显示真实节点数；「当前下发策略」显示实际生效的节点上限
-- 源码拆分到 `src/`，由 `node build.mjs` 生成 `CFNext.js`；新增自动化测试与 CI
-- 检测更新改为读取仓库 `CFNext.js`；移除混淆版
+- 源码拆分到 `src/`，由 `node build.mjs` 生成 `Hopline.js`；新增自动化测试与 CI
+- 检测更新改为读取仓库 `Hopline.js`；移除混淆版
 
 ### 🐛 BUG 处理
 
@@ -490,7 +488,7 @@
 - 新增订阅预览、按客户端联动的订阅二维码（Clash / Sing-box / Surge 安装 scheme）、自定义订阅路径别名（如 /AAZ/sub）
 - 新增配置 JSON 导出 / 导入（备份迁移）、UUID 一键生成
 - 新增 Surfboard 订阅格式与明文 vless 输出（面板格式选择新增 Surfboard / Stash / 明文 vless）
-- 更新检测重写：拉取仓库 `CFNext.js` 比对版本号，60 秒缓存
+- 更新检测重写：拉取仓库 `Hopline.js` 比对版本号，60 秒缓存
 
 ### 🐛 BUG 处理
 

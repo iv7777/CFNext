@@ -1227,7 +1227,7 @@ test('Clash 模板不再包含公开的默认凭据：SS 密码 / 认证 / API �
   const get = async (env) => (await subOf(env, 'clash')).text();
   const a = await get(baseEnv({ CONFIG_KV: kv({ config: customCfg() }) }));
   assert.ok(!/yyds666|Xf3#Lp9WqZ|__HOPLINE_/.test(a), '无默认密码 / 未替换的占位符');
-  const d = (purpose, uuid = UUID) => createHash('sha224').update(`cfnext-clash|${purpose}|${uuid}`).digest('hex').slice(0, 20);
+  const d = (purpose, uuid = UUID) => createHash('sha224').update(`hopline-clash|${purpose}|${uuid}`).digest('hex').slice(0, 20);
   assert.ok(a.includes(`password: "${d('ss')}"`) && a.includes(`- "mihomo:${d('auth')}"`) && a.includes(`secret: "${d('api')}"`), '与 UUID 派生一致（同时校验 SHA-224 实现）');
   assert.equal(await get(baseEnv({ CONFIG_KV: kv({ config: customCfg() }) })), a, '同一部署每次订阅结果稳定');
   const other = await (await withFetch(nodesFetch, () => call(baseEnv({ UUID: UUID2, CONFIG_KV: kv({ config: customCfg() }) }), `/${UUID2}/sub/clash`, { ua: 'x' }))).text();
@@ -1243,7 +1243,7 @@ test('管理密码：面板设置的密码以加盐摘要存入 KV；旧版明�
   const r = await (await call(env, `/${UUID}/api/config`, { method: 'POST', cookie, body: { alpn: 'h2' } })).json();
   assert.equal(r.ok, true);
   const h = stored(env).admin;
-  assert.match(h, /^cfnext-pbkdf2\$10000\$[0-9a-f]{32}\$[0-9a-f]{64}$/, '保存任意配置后明文升级为摘要');
+  assert.match(h, /^hopline-pbkdf2\$10000\$[0-9a-f]{32}\$[0-9a-f]{64}$/, '保存任意配置后明文升级为摘要');
   assert.ok(!JSON.stringify(stored(env)).includes('legacy-pw'));
   await login(env, 'legacy-pw');                                      // 密码不变，仍可登录
   // 修改密码：新密码生效，旧密码失效；每次的盐不同
@@ -1255,7 +1255,7 @@ test('管理密码：面板设置的密码以加盐摘要存入 KV；旧版明�
   await login(env, 'brand-new');
   const bad = await call(env, '/login', { method: 'POST', body: 'username=admin&password=legacy-pw&next=' + encodeURIComponent('/' + UUID), headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'CF-Connecting-IP': '198.51.100.77' } });
   assert.equal(bad.status, 403);
-  const rej = await call(env, `/${UUID}/api/config`, { method: 'POST', cookie: await login(env, 'brand-new'), body: { admin: 'cfnext-pbkdf2$x' } });
+  const rej = await call(env, `/${UUID}/api/config`, { method: 'POST', cookie: await login(env, 'brand-new'), body: { admin: 'hopline-pbkdf2$x' } });
   assert.equal(rej.status, 400);
 });
 

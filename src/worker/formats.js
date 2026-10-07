@@ -106,8 +106,7 @@ function generateClash(cfg, nodes) {
   // 节点排序：443端口优先（非标准端口如8443在mihomo下HTTPS握手易被GFW干扰，放后面避免默认选中）
   proxies.sort((a, b) => (a.port === 443 ? 0 : 1) - (b.port === 443 ? 0 : 1));
   // 模板中的本地凭据按 UUID 派生（同一部署每次订阅结果稳定，不同部署互不相同），避免所有人共用公开的默认密码
-  // 派生前缀沿用项目旧名 CFNext：改名会改变已部署实例下发给客户端的本地密码
-  const derive = (purpose) => sha224hex('cfnext-clash|' + purpose + '|' + cfg.uuid).slice(0, 20);
+  const derive = (purpose) => sha224hex('hopline-clash|' + purpose + '|' + cfg.uuid).slice(0, 20);
   const template = CLASH_TEMPLATE
     .split('__HOPLINE_SS_PASSWORD__').join(derive('ss'))
     .split('__HOPLINE_AUTH_PASSWORD__').join(derive('auth'))
