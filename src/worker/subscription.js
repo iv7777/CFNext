@@ -5,7 +5,7 @@ const NODE_CAP = 500;
 // 根据 UA 或指定格式生成订阅
 async function generateSubscription(cfg, requestUrl, format, ua) {
   // 明文端口节点只由「仅 TLS 端口」控制（默认开启）；ECH 只对 TLS 生效，开启时同样只下发 TLS 端口节点。
-  // 自定义域名的明文端口需在 Cloudflare 关闭「始终使用 HTTPS」，否则被 301 重定向、WebSocket 握手失败
+  // 自定义域名的明文端口需在域名平台关闭「始终使用 HTTPS」，否则被 301 重定向、WebSocket 握手失败
   const rc = Object.assign({}, cfg, { host: cfg.hst || new URL(requestUrl).hostname });
   const prefList = effectivePrefDomains(cfg);   // 面板填写的优选域名（整体替换内置列表）或内置列表
   if (rc.ecn) rc.tlo = true;
@@ -18,8 +18,8 @@ async function generateSubscription(cfg, requestUrl, format, ua) {
   // 1) 原生地址（src.native）：工作器域名直接作为节点 server 下发（默认关闭）；
   // 2) 优选域名（src.prefDomain）：第三方优选域名直接作为节点 server 下发（客户端连接时动态 DNS 解析，拿到当前最优 CF 边缘 IP）；
   // 3) 优选 IP（src.prefIp）：自定义优选 API / HostMonit / uouin / 微测网等在线来源（「优选配置 → 优选 IP 来源」）。
-  // 这些来源都是 Cloudflare 任播 IP / 域名，大多不带地区标记（任播 IP 的落地机房取决于客户端所在网络），
-  // 因此面板「节点地区」筛选通常不改变节点构成；来源一律只保留 Cloudflare 段，非 CF 段 IP 无法转发到 Worker
+  // 这些来源都是任播 IP / 域名，大多不带地区标记（任播 IP 的落地机房取决于客户端所在网络），
+  // 因此面板「节点地区」筛选通常不改变节点构成；来源一律只保留边缘段，非 CF 段 IP 无法转发到 Worker
   const src = cfg.sc || {};
   const useNative = src.nv === true;            // 启用原生地址（工作器域名）
   const useDomain = src.pd !== false;       // 启用优选域名（默认开）

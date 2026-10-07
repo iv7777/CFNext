@@ -96,7 +96,7 @@ function parseTrojanHeader(data) {
   return { command, port, addr, password: TD.decode(data.subarray(0, 56)), headerLength: offset };
 }
 
-// Trojan 协议密码使用 SHA-224（56 字节 hex）——Cloudflare WebCrypto 不支持 SHA-224，手写实现（SHA-256 结构 + SHA-224 初始值）
+// Trojan 协议密码使用 SHA-224（56 字节 hex）——运行时 WebCrypto 不支持 SHA-224，手写实现（SHA-256 结构 + SHA-224 初始值）
 const SHA256_K = [
   0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
   0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
@@ -165,7 +165,7 @@ function detectTrojan(pending, cfg) {
 }
 
 // DoH 端点池（UDP/DNS → DoH 转换用，使 V2rayNG 关闭「本地 DNS」时远端 DNS 仍可用）
-// Cloudflare 优先（Worker 与其同机房，延迟最低，且用户的查询不必先经过第三方境内解析器），其余按序兜底
+// 首选端点优先（Worker 与其同机房，延迟最低，且用户的查询不必先经过第三方境内解析器），其余按序兜底
 const DOH_ENDPOINTS = [
   'https://cloudflare-dns.com/dns-query',
   'https://dns.google/dns-query',

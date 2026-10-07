@@ -109,7 +109,7 @@ const CONFIG_SCHEMA = [
   { key: 'sc.nv', type: 'bool', def: false, el: 'fl-native', label: '原生地址' },
   { key: 'sc.pd', type: 'bool', def: true, el: 'fl-pref-domain', label: '优选域名' },
   { key: 'sc.pi', type: 'bool', def: true, el: 'fl-pref-ip', label: '优选 IP' },
-  // ---- 「优选 IP」的在线来源（默认模式；均只保留 Cloudflare 段 IP，结果缓存 10 分钟） ----
+  // ---- 「优选 IP」的在线来源（默认模式；均只保留边缘段 IP，结果缓存 10 分钟） ----
   { key: 'ix.hm', type: 'bool', def: true, el: 'ps-hostmonit', label: 'HostMonit 实时优选' },
   // uouin 分线路优选：借用 api.uouin.com 网站内部接口（非开放 API，对方可能随时更换签名或封禁），默认开启
   { key: 'ix.uo', type: 'bool', def: true, el: 'ps-uouin', label: 'uouin 分线路优选' },
@@ -333,9 +333,9 @@ function clientSchema() {
 // 内置官方直连域名：节点池为空时的最后兜底（保证订阅不为空），以及仅勾选 IPv6 时的 AAAA 来源
 const BUILTIN_OFFICIAL_DOMAINS = ['cloudflare.com', 'www.cloudflare.com', 'speed.cloudflare.com'];
 
-// 内置默认优选域名：第三方 CNAME 域名，解析到 Cloudflare 边缘；节点 server 直接下发域名
+// 内置默认优选域名：第三方 CNAME 域名，解析到边缘；节点 server 直接下发域名
 // （客户端连接时动态 DNS 解析，拿到当前最优 CF 边缘 IP，可用性远高于静态 IP 快照）。
-// 均已用面板「优选域名 → 测试」验证：能解析且落在 Cloudflare 段（解析失败或非 CF 段的域名无法作入口）。
+// 均已用面板「优选域名 → 测试」验证：能解析且落在边缘段（解析失败或非 CF 段的域名无法作入口）。
 // 面板「优选域名」填写后会整体替换本列表
 const DEFAULT_PREFERRED_DOMAINS = [
   'cloudflare.182682.xyz', 'cdn.2020111.xyz', 'cf.0sm.com', 'cf.090227.xyz', 'cfip.1323123.xyz',
@@ -353,7 +353,7 @@ function dohPrefDomains(text) {
 }
 
 
-// 明文 HTTP 端口：Cloudflare 边缘在这些端口上不支持 TLS，节点必须走明文 ws（否则握手失败连不通）
+// 明文 HTTP 端口：边缘在这些端口上不支持 TLS，节点必须走明文 ws（否则握手失败连不通）
 const HTTP_PORTS = new Set([80, 8080, 8880, 2052, 2082, 2086, 2095]);
 
 // 优选器预设数据源：微测网接口 + 优选 IP 来源
