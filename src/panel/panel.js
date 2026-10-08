@@ -77,31 +77,43 @@ function switchView(id){
 }
 $('hamb').addEventListener('click', function(){ $('sidebar').classList.toggle('open'); });
 
-/* ===== 主题 ===== */
-function systemIsLight(){ return window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches; }
-function storedTheme(){ var t = 'light'; try { t = localStorage.getItem('tp_theme') || 'light'; } catch(e) {} return t; }
-function resolveTheme(t){ if (t === 'auto') return systemIsLight() ? 'light' : 'dark'; return t; }
-function setThemeIcon(t){
-  var p = document.getElementById('themeIcon');
-  if (!p) return;
-  if (t === 'light') p.setAttribute('d', 'M12 17a5 5 0 1 0 0-10 5 5 0 0 0 0 10zM12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M19.1 4.9l-1.4 1.4M6.3 17.7l-1.4 1.4');
-  else p.setAttribute('d', 'M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z');
+/* ===== 主题：跟随系统（默认）/ 日间 / 夜间，三态循环 ===== */
+var THEME_MODES = ['auto', 'light', 'dark'];
+var THEME_NAMES = { auto: '跟随系统', light: '日间模式', dark: '夜间模式' };
+var THEME_ICONS = {
+  auto: 'M3 5h18v11H3zM8 20h8M12 16v4',
+  light: 'M12 17a5 5 0 1 0 0-10 5 5 0 0 0 0 10zM12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M19.1 4.9l-1.4 1.4M6.3 17.7l-1.4 1.4',
+  dark: 'M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z'
+};
+var systemLightQuery = window.matchMedia ? window.matchMedia('(prefers-color-scheme: light)') : null;
+function systemIsLight(){ return !!(systemLightQuery && systemLightQuery.matches); }
+function storedTheme(){
+  var t = 'auto';
+  try { t = localStorage.getItem('tp_theme') || 'auto'; } catch(e) {}
+  return THEME_MODES.indexOf(t) < 0 ? 'auto' : t;
 }
+function resolveTheme(t){ return t === 'auto' ? (systemIsLight() ? 'light' : 'dark') : t; }
 function applyTheme(){
-  var t = resolveTheme(storedTheme());
-  document.documentElement.setAttribute('data-theme', t);
-  setThemeIcon(t);
+  var mode = storedTheme();
+  document.documentElement.setAttribute('data-theme', resolveTheme(mode));
+  var p = document.getElementById('themeIcon');
+  if (p) p.setAttribute('d', THEME_ICONS[mode]);
+  $('themeBtn').title = '当前：' + THEME_NAMES[mode] + '（点击切换：跟随系统 → 日间 → 夜间）';
 }
 function setTheme(t){
   try { localStorage.setItem('tp_theme', t); } catch(e) {}
   applyTheme();
-  toast(t === 'auto' ? '已切换为跟随系统' : (t === 'light' ? '已切换为日间模式' : '已切换为夜间模式'), 'ok');
+  toast('已切换为' + THEME_NAMES[t], 'ok');
 }
 $('themeBtn').addEventListener('click', function(){
-  var cur = storedTheme();
-  var next = (cur === 'light') ? 'dark' : 'light';
-  setTheme(next);
+  setTheme(THEME_MODES[(THEME_MODES.indexOf(storedTheme()) + 1) % THEME_MODES.length]);
 });
+// 跟随系统时，系统主题在面板打开期间切换（如日落自动切夜间）也立即生效
+if (systemLightQuery) {
+  var onSystemTheme = function(){ if (storedTheme() === 'auto') applyTheme(); };
+  if (systemLightQuery.addEventListener) systemLightQuery.addEventListener('change', onSystemTheme);
+  else if (systemLightQuery.addListener) systemLightQuery.addListener(onSystemTheme);
+}
 applyTheme();
 
 /* ===== 更新检测 ===== */

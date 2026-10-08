@@ -2143,3 +2143,57 @@ test('面板：并发首次访问只拉取一次', async () => {
     assert.equal(calls.length, 3, '三个镜像各一次，而不是 3×3');
   });
 });
+
+// ---------------- 主题：默认跟随系统，三态循环 ----------------
+// 取面板脚本里「主题」一节，在桩出来的 window / document / localStorage 下执行
+function themeHarness({ stored, systemLight = true } = {}) {
+  const src = readFileSync(new URL('../src/panel/panel.js', import.meta.url), 'utf8');
+  const section = src.slice(src.indexOf('/* ===== 主题'), src.indexOf('/* ===== 更新检测'));
+  const store = new Map(stored === undefined ? [] : [['tp_theme', stored]]);
+  const attrs = {}, toasts = [], listeners = [];
+  const mq = { matches: systemLight, addEventListener: (_, fn) => listeners.push(fn) };
+  const btn = { title: '', click: null, addEventListener(_, fn) { this.click = fn; } };
+  const icon = { d: '', setAttribute(_, v) { this.d = v; } };
+  const run = new Function('window', 'document', 'localStorage', '$', 'toast',
+    section + '\n;return { storedTheme, applyTheme };');
+  const api = run(
+    { matchMedia: () => mq },
+    { documentElement: { setAttribute: (k, v) => { attrs[k] = v; } }, getElementById: (id) => (id === 'themeIcon' ? icon : null) },
+    { getItem: (k) => (store.has(k) ? store.get(k) : null), setItem: (k, v) => store.set(k, v) },
+    () => btn, (m) => toasts.push(m));
+  return { ...api, attrs, toasts, store, mq, btn, icon, fire: () => listeners.forEach(fn => fn()) };
+}
+
+test('主题：未保存时默认跟随系统（日间 / 夜间系统各自生效），无效取值按跟随系统处理', () => {
+  assert.equal(themeHarness({ systemLight: true }).attrs['data-theme'], 'light');
+  assert.equal(themeHarness({ systemLight: false }).attrs['data-theme'], 'dark');
+  assert.equal(themeHarness({ stored: 'garbage', systemLight: false }).attrs['data-theme'], 'dark');
+  assert.equal(themeHarness({ stored: 'garbage' }).storedTheme(), 'auto');
+});
+
+test('主题：按钮三态循环 跟随系统 → 日间 → 夜间 → 跟随系统，并保存选择', () => {
+  const h = themeHarness({ systemLight: false });
+  assert.equal(h.attrs['data-theme'], 'dark', '跟随系统（夜间系统）');
+  h.btn.click(); assert.equal(h.store.get('tp_theme'), 'light'); assert.equal(h.attrs['data-theme'], 'light');
+  h.btn.click(); assert.equal(h.store.get('tp_theme'), 'dark'); assert.equal(h.attrs['data-theme'], 'dark');
+  h.btn.click(); assert.equal(h.store.get('tp_theme'), 'auto'); assert.equal(h.attrs['data-theme'], 'dark', '回到跟随系统');
+  assert.deepEqual(h.toasts, ['已切换为日间模式', '已切换为夜间模式', '已切换为跟随系统']);
+  assert.match(h.btn.title, /跟随系统/);
+});
+
+test('主题：跟随系统时系统主题变化立即生效；固定日间 / 夜间时不受影响', () => {
+  const h = themeHarness({ systemLight: true });
+  h.mq.matches = false; h.fire();
+  assert.equal(h.attrs['data-theme'], 'dark');
+  const fixed = themeHarness({ stored: 'light', systemLight: true });
+  fixed.mq.matches = false; fixed.fire();
+  assert.equal(fixed.attrs['data-theme'], 'light');
+});
+
+test('主题：页面头部提前套用主题，登录页同样默认跟随系统', () => {
+  for (const f of ['panel', 'login']) {
+    const html = readFileSync(new URL(`../src/panel/${f}.html`, import.meta.url), 'utf8');
+    assert.match(html, /<\/title>\n<script>\(function\(\)\{var t='auto'/, `${f}.html 头部有提前套用主题的脚本`);
+    assert.ok(!html.includes("|| 'light'"), `${f}.html 不再默认日间`);
+  }
+});
