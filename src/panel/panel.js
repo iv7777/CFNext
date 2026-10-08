@@ -204,7 +204,7 @@ function renderStatus(d){
   var wd = !!(d.workersDev) || /\.workers\.dev$/i.test(location.hostname);
   $('wdwarn').style.display = wd ? 'block' : 'none';
   $('subHint').textContent = wd
-    ? '当前为 *.workers.dev 域名：可能限制该域名直连，若客户端更新订阅失败（提示无效订阅），请在客户端开启系统代理或「更新订阅使用代理」后重试；节点连接不受影响（直连优选 IP）。'
+    ? '当前为 *.workers.dev 域名：平台可能限制该域名直连，若客户端更新订阅失败（提示无效订阅），请在客户端开启系统代理或「更新订阅使用代理」后重试；节点连接不受影响（直连优选 IP）。'
     : '';
   var kv = d.kv;
   var kvTxt = kv ? '已绑定（配置持久化）' : '未绑定（无法保存配置，仅环境变量生效）';

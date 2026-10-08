@@ -1,8 +1,6 @@
 # Hopline · 代理订阅面板
 
 > **Hopline —— 部署在 Workers / Pages 平台的代理订阅面板**，单文件同时实现 VLESS / Trojan / XHTTP 多协议代理与图形化配置：`/<PATH>` 进入面板，`/sub` 输出订阅；内置优选域名与在线优选 IP 来源、ECH 加密、落地与出站代理（含可配置的地区反代）及地区 / 运营商 / IP 版本多维筛选，只需设置 `PATH` 与 `ADMIN` 两个环境变量即可部署（UUID 等其余均可选），绑定 KV 后改完即生效。
->
-> **[Telegram 交流群](https://t.me/SZ_PAI)**　**[YouTube 频道](https://www.youtube.com/@PAI_CN)**
 
 ---
 
@@ -257,6 +255,11 @@ npm run lint            # eslint 静态检查（通过 npx 获取，仓库本身
 ---
 
 ## 更新日志
+
+### V2.3.2
+
+- 面板文字修正：「调优节点」提示与 `*.workers.dev` 域名提示的措辞
+- README 重新整理：部署指南置前、合并重复内容、更新日志精简，并移除页眉外链
 
 ### V2.3.1
 
