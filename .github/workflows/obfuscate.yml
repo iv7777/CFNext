@@ -1,0 +1,52 @@
+name: Obfuscate Hopline.js
+
+# Hopline.js 变化（push 到 main）时自动生成 obf_Hopline.js；
+# 也可以手动触发（workflow_dispatch）并选择混淆强度，产出一次性的强度更高/更低的版本。
+# 强度定义见 obfuscate.mjs 中的 PRESETS（light / medium / heavy）。
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'Hopline.js'
+  workflow_dispatch:
+    inputs:
+      level:
+        description: '混淆强度'
+        required: false
+        type: choice
+        options:
+          - light
+          - medium
+          - heavy
+        default: medium
+
+permissions:
+  contents: write
+
+jobs:
+  obfuscate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Generate obf_Hopline.js
+        run: node obfuscate.mjs "${{ github.event.inputs.level || 'medium' }}"
+
+      - name: Commit and push the obfuscated file
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          git add obf_Hopline.js
+          if git diff --staged --quiet; then
+            echo "No changes to commit, obf_Hopline.js is already up-to-date."
+          else
+            git commit -m "chore: regenerate obf_Hopline.js"
+            git push
+          fi
