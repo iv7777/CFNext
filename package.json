@@ -7,7 +7,6 @@
     "build": "node build.mjs",
     "check": "node build.mjs --check && node --check Hopline.js",
     "test": "node build.mjs --check && node --test",
-    "lint": "npx --yes eslint@10.1.0 -c eslint.config.mjs Hopline.js src/panel/panel.js",
-    "obfuscate": "node obfuscate.mjs"
+    "lint": "npx --yes eslint@10.1.0 -c eslint.config.mjs Hopline.js src/panel/panel.js"
   }
 }
