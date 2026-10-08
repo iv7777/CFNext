@@ -30,7 +30,7 @@
 
 ## 二、快速部署
 
-> 全程约 5 分钟，只需要 **`Hopline.js`** 一个文件（仓库根目录，已是构建好的成品，直接使用：[raw 链接](https://raw.githubusercontent.com/iv7777/Hopline/main/Hopline.js)）。
+> 全程约 5 分钟，只需要 **`Hopline.js`** 一个文件（仓库根目录，已是构建好的成品，直接使用：[raw 链接](https://raw.githubusercontent.com/iv7777/Hopline/main/Hopline.js)）。管理面板的页面（约 80KB）不在这个文件里：Worker 首次打开面板时在服务端按版本标签从 jsDelivr / GitHub 拉取、校验 SHA-256 并缓存，所以部署文件更小，浏览器也不需要访问 GitHub。
 
 ### 2.1 准备
 
@@ -84,6 +84,7 @@
 | 所有请求返回「设置说明」（503） | `PATH` 没设置或格式不对，按提示修改后重新访问 |
 | 面板提示「已禁用」 | 没有设置 `ADMIN` |
 | 保存时报错 / 无法保存 | 没有绑定 KV，变量名必须是 `CONFIG_KV` |
+| 打开面板提示「面板页面暂时无法加载」（503） | Worker 没能从 jsDelivr / GitHub 拉到当前版本（`v<版本号>` 标签）的面板页面。稍后刷新即可；一直如此请确认仓库里存在对应版本标签（自己 fork 的需把 `src/worker/update.js` 里的 `UPDATE_REPO` 改成自己的仓库）。代理与订阅不受影响 |
 | 客户端更新订阅提示「无效订阅」 | `*.workers.dev` 域名可能被限制，绑定自定义域名，或让客户端通过代理更新订阅 |
 | 登录后过一段时间被退出 | 24 小时未使用面板自动退出，最长 7 天需重新登录 |
 | 改了 `PATH` 后节点连不上 | 节点路径随 `PATH` 改变，客户端需要重新更新订阅 |
@@ -210,6 +211,7 @@
 - **管理登录**：必须设置 `ADMIN`，以用户名 + 密码登录（任一错误都只提示「用户名或密码错误」）；KV 中的密码保存为加盐 PBKDF2 摘要（环境变量 `ADMIN` 本身是明文）；登录失败 15 分钟内最多 5 次，IPv6 按 /64 计数
 - **会话**：24 小时无操作失效（使用时自动顺延，最长 7 天），可在「面板设置」退出；修改密码、用户名或 UUID 会使其它浏览器的登录状态全部失效
 - **页面安全头**：面板与登录页带 CSP、`X-Frame-Options`、`nosniff`、`Referrer-Policy`；二维码脚本带 SRI 校验
+- **面板页面完整性**：面板页面只从不可变的版本标签 `v<版本号>` 拉取（绝不拉 `main`），Worker 用构建时写入的 SHA-256 校验，不符一律丢弃；缓存键就是这个哈希，升级后自动换新键，旧缓存无需清理（读取顺序：内存 → Cache API → KV → 网络；Cache API 在 `*.workers.dev` 下不生效，会直接用 KV 或网络）
 - **路径与 UUID 鉴权**：请求路径与 `PATH` 一致才进入面板 / 代理，VLESS 头部的 UUID 与配置一致才转发；订阅别名路径只输出订阅
 - **路径伪装**：路径不对（根路径、未知路由）时返回 200 的 `Hello World !` 页面，不暴露部署；`/login`、`/version` 只对知道面板路径的人可用，否则返回 404
 - **Clash 本地凭据**：订阅里的 Shadowsocks 入站密码、认证与 API secret 按 UUID 为每个部署派生，不使用公开的默认密码
@@ -228,11 +230,14 @@
 | `src/panel/panel.html` | 管理面板页面结构（`@include` 引入样式与脚本） |
 | `src/panel/panel.css` | 面板样式（日间 / 夜间主题） |
 | `src/panel/panel.js` | 面板前端脚本（由字段表驱动的表单回填、收集、校验与错误提示） |
-| `src/panel/login.html` | 登录页 |
-| `build.mjs` | 构建脚本：拼接 `src/worker/*.js`、内联面板页面（去注释），再用 terser 压缩 worker 代码（精简并重命名所有名称、删除注释），输出 `Hopline.js`；terser 通过 npx 获取（与 eslint 一致，仓库本身仍无依赖） |
+| `src/panel/login.html` | 登录页（内嵌进 Worker，不依赖网络） |
+| `src/worker/panel-loader.js` | 面板页面加载器：按版本标签拉取 `dist/panel.html`、校验哈希、分层缓存、注入字段表 |
+| `dist/panel.html` | 构建产物：面板 HTML + CSS + JS 合并去注释后的成品，按版本标签发布，**需提交** |
+| `build.mjs` | 构建脚本：拼接 `src/worker/*.js`、内联登录页（去注释），把面板合并为 `dist/panel.html` 并把它的 SHA-256 写进 worker，再用 terser 压缩 worker 代码（精简并重命名所有名称、删除注释），输出 `Hopline.js`；terser 通过 npx 获取（与 eslint 一致，仓库本身仍无依赖） |
 | `eslint.config.mjs` | 静态检查配置（`npm run lint`） |
 | `test/` | `node:test` 测试（模拟 KV 与 Workers 运行时，无需安装依赖） |
-| `.github/workflows/ci.yml` | 每次推送运行：`Hopline.js` 与 `src/` 同步检查 → 语法检查 → lint → 测试 |
+| `.github/workflows/ci.yml` | 每次推送运行：`Hopline.js` / `dist/panel.html` 与 `src/` 同步检查 → 语法检查 → lint → 测试 |
+| `.github/workflows/tag.yml` | 推送到 `main` 后，若 `Hopline.js` 里的版本号还没有对应的 `v<版本号>` 标签就自动创建；标签已存在但 `dist/panel.html` 内容不同（改了面板却没升版本号）则失败 |
 
 ```bash
 node build.mjs          # 修改 src/ 后重新生成 Hopline.js（需 Node.js 20.6+，CI 使用 22；首次会通过 npx 拉取 terser）
@@ -242,7 +247,9 @@ npm run lint            # eslint 静态检查（通过 npx 获取，仓库本身
 
 **新增一个面板配置项**：在 `src/worker/config-schema.js` 的 `CONFIG_SCHEMA` 中加一行（字段路径、类型、默认值、面板控件 id、校验规则），再在 `src/panel/panel.html` 放一个同 id 的控件即可——默认值、KV 读写白名单、保存校验、面板回填 / 收集 / 未保存标记 / 字段级错误提示都会自动生效；服务端通过 `cfg.<字段>` 读取。
 
-> 请勿直接编辑 `Hopline.js`：CI 会检查它是否与 `src/` 同步。
+> 请勿直接编辑 `Hopline.js` 与 `dist/panel.html`：CI 会检查它们是否与 `src/` 同步。
+>
+> **发版流程**：改动后在 `src/worker/update.js` 升 `VERSION` → `node build.mjs` → 提交（`Hopline.js` 与 `dist/panel.html` 一起）→ 合并到 `main`，`tag.yml` 会自动打上 `v<版本号>` 标签。Worker 按这个标签拉面板页面，所以**只改面板（哪怕一个字）也必须升版本号**，否则新 `Hopline.js` 里的哈希对不上旧标签里的页面。
 
 ---
 
@@ -255,6 +262,12 @@ npm run lint            # eslint 静态检查（通过 npx 获取，仓库本身
 ---
 
 ## 更新日志
+
+### V2.4.0
+
+- 面板页面不再内嵌进 `Hopline.js`（部署文件约 195KB → 约 116KB）：Worker 在服务端按版本标签 `v<版本号>` 从 jsDelivr（含 fastly 镜像）/ GitHub 并发拉取 `dist/panel.html`，校验构建时写入的 SHA-256 后缓存（内存 → Cache API → KV），再注入字段表发给浏览器；浏览器只访问自己的域名，路径伪装、登录鉴权与 CSP 不变
+- 缓存键为内容哈希：升级后自动换新键，无需清理；拉取失败时只有面板返回 503 说明页，代理与订阅不受影响，登录页仍内嵌
+- 新增 `.github/workflows/tag.yml`：合并到 `main` 后自动创建 `v<版本号>` 标签；`build.mjs` 同时生成并校验 `dist/panel.html`
 
 ### V2.3.2
 

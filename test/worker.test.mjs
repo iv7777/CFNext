@@ -15,7 +15,13 @@ export async function resolve(spec, ctx, next) {
 }`;
 register('data:text/javascript,' + encodeURIComponent(hooks));
 // 订阅生成会拉取外部优选源：测试环境一律离线，走各处的失败兜底
-globalThis.fetch = async () => { throw new Error('offline in tests'); };
+// 面板页面由 Worker 运行时按版本标签从 GitHub 拉取：默认让这类请求返回本地的 dist/panel.html（SHA-256 与构建时写入 Worker 的一致），其余一律离线
+import { readFileSync } from 'node:fs';
+const PANEL_FILE = readFileSync(new URL('../dist/panel.html', import.meta.url));
+globalThis.fetch = async (url) => {
+  if (String(url).endsWith('/dist/panel.html')) return new Response(PANEL_FILE);
+  throw new Error('offline in tests');
+};
 
 const worker = (await import('../Hopline.js')).default;
 
@@ -1994,4 +2000,146 @@ test('sing-box 的 VLESS 出站不再指定 packet_encoding=xudp（服务端不�
   const sb = JSON.parse(await (await subOf(env, 'singbox')).text());
   const vless = sb.outbounds.filter(o => o.type === 'vless');
   assert.ok(vless.length > 0 && vless.every(o => !('packet_encoding' in o)));
+});
+
+// ---------------- 面板加载器：按版本标签拉取、校验哈希、分层缓存 ----------------
+// 每个用例用带查询串的 URL 加载一份全新的 Hopline.js 模块实例，隔离 isolate 内存、失败冷却等模块级状态
+let freshSeq = 0;
+const freshWorker = async () => (await import('../Hopline.js?fresh=' + (++freshSeq))).default;
+const panelReq = (path = UUID) => new Request('https://node.example.com/' + path, { headers: { 'User-Agent': BROWSER, Cookie: '' } });
+async function panelGet(w, env) {
+  const cookie = await (async () => {   // 复用公共登录流程，但针对给定的 worker 实例
+    const res = await w.fetch(new Request('https://node.example.com/login', {
+      method: 'POST', headers: { 'User-Agent': BROWSER, 'Content-Type': 'application/x-www-form-urlencoded', 'CF-Connecting-IP': '203.0.113.' + Math.floor(Math.random() * 250) },
+      body: 'username=admin&password=pw&next=' + encodeURIComponent('/' + UUID),
+    }), env, {});
+    return res.headers.get('Set-Cookie').split(';')[0];
+  })();
+  return w.fetch(new Request('https://node.example.com/' + UUID, { headers: { 'User-Agent': BROWSER, Cookie: cookie } }), env, {});
+}
+const memCache = () => {   // 最小的 Cache API 内存实现（caches.default）
+  const m = new Map();
+  return { m, async match(k) { const r = m.get(String(k.url || k)); return r ? r.clone() : undefined; }, async put(k, r) { m.set(String(k.url || k), r); } };
+};
+async function withGlobals(globals, fn) {
+  const saved = {};
+  for (const k of Object.keys(globals)) { saved[k] = Object.getOwnPropertyDescriptor(globalThis, k); globalThis[k] = globals[k]; }
+  try { return await fn(); }
+  finally { for (const k of Object.keys(globals)) { if (saved[k]) Object.defineProperty(globalThis, k, saved[k]); else delete globalThis[k]; } }
+}
+
+test('面板：来源固定为版本标签 v<VERSION>，哈希与 dist/panel.html 一致，页面不内嵌面板', async () => {
+  const w = await freshWorker();
+  const urls = [];
+  await withFetch((url) => { urls.push(url); return new Response(PANEL_FILE); }, async () => {
+    const res = await panelGet(w, baseEnv());
+    assert.equal(res.status, 200);
+    const html = await res.text();
+    assert.ok(html.includes('id="stEntry"') && !html.includes('@HOPLINE_'), '页面完整，占位符已替换');
+  });
+  const ver = readFileSync(new URL('../Hopline.js', import.meta.url), 'utf8').match(/Hopline v(\d+\.\d+\.\d+)/)[1];
+  assert.equal(urls.length, 3, '三个镜像并发请求');
+  assert.ok(urls.every(u => u.includes('@v' + ver + '/dist/panel.html') || u.includes('/v' + ver + '/dist/panel.html')), urls.join('\n'));
+  assert.ok(urls.every(u => !/@(main|latest)\b|\/main\//.test(u)), '不拉取可变引用');
+  assert.ok(readFileSync(new URL('../Hopline.js', import.meta.url), 'utf8').includes(createHash('sha256').update(PANEL_FILE).digest('hex')), '哈希已写进 Worker');
+});
+
+test('面板：镜像篡改 / 返回错误内容时被拒绝，不缓存', async () => {
+  const w = await freshWorker();
+  const cache = memCache(), env = baseEnv();
+  await withGlobals({ caches: { default: cache } }, () => withFetch(() => new Response(PANEL_FILE.toString() + '<script>evil()</script>'), async () => {
+    const res = await panelGet(w, env);
+    assert.equal(res.status, 503);
+    assert.match(await res.text(), /面板页面暂时无法加载/);
+  }));
+  assert.equal(cache.m.size, 0, '校验失败的内容不进缓存');
+  assert.deepEqual([...env.CONFIG_KV.m.keys()].filter(k => k.startsWith('panel:')), [], '也不写 KV');
+});
+
+test('面板：一个镜像失败，另一个成功即可；成功后写入 Cache API 与 KV', async () => {
+  const w = await freshWorker();
+  const cache = memCache(), env = baseEnv();
+  await withGlobals({ caches: { default: cache } }, () => withFetch((url) => url.startsWith('https://raw.githubusercontent.com/') ? new Response(PANEL_FILE) : new Response('boom', { status: 502 }), async () => {
+    const res = await panelGet(w, env);
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get('Cache-Control'), 'no-store');
+  }));
+  assert.equal(cache.m.size, 1, '写入 Cache API');
+  const key = [...cache.m.keys()][0];
+  assert.match(key, /^https:\/\/hopline\.invalid\/panel\/[0-9a-f]{64}$/, '缓存键 = 内容哈希');
+  assert.deepEqual([...env.CONFIG_KV.m.keys()].filter(k => k.startsWith('panel:')), ['panel:' + key.split('/').pop()], '写入 KV');
+});
+
+test('面板：升级后哈希变化 → 新缓存键，旧条目不会被误用', async () => {
+  const w = await freshWorker();
+  const env = baseEnv();
+  // 旧版本留下的缓存 / KV 条目（键里是另一个哈希）：新 Worker 不读，也不删，直接走网络
+  const stale = memCache();
+  await stale.put('https://hopline.invalid/panel/' + 'ab'.repeat(32), new Response('OLD PANEL'));
+  env.CONFIG_KV.m.set('panel:' + 'ab'.repeat(32), 'OLD PANEL');
+  let hits = 0;
+  await withGlobals({ caches: { default: stale } }, () => withFetch(() => { hits++; return new Response(PANEL_FILE); }, async () => {
+    const res = await panelGet(w, env);
+    assert.equal(res.status, 200);
+    assert.ok(!(await res.text()).includes('OLD PANEL'));
+  }));
+  assert.equal(hits, 3, '未命中新键 → 拉网络');
+  assert.equal(stale.m.size, 2, '旧条目原样保留，等待 TTL 过期');
+});
+
+test('面板：Cache API 命中时不再访问网络；缓存内容被破坏则当作未命中', async () => {
+  const w1 = await freshWorker();
+  const cache = memCache(), env = baseEnv();
+  await withGlobals({ caches: { default: cache } }, async () => {
+    await withFetch(() => new Response(PANEL_FILE), () => panelGet(w1, env));
+    const w2 = await freshWorker();   // 新 isolate：内存为空，应命中 Cache API
+    await withFetch(() => { throw new Error('不应访问网络'); }, async (calls) => {
+      assert.equal((await panelGet(w2, env)).status, 200);
+      assert.equal(calls.length, 0);
+    });
+    cache.m.set([...cache.m.keys()][0], new Response('corrupted'));
+    const w3 = await freshWorker();
+    const env2 = baseEnv();   // 没有 KV 副本
+    await withFetch(() => new Response(PANEL_FILE), async (calls) => {
+      assert.equal((await panelGet(w3, env2)).status, 200);
+      assert.equal(calls.length, 3, '损坏的缓存被忽略并重新拉取');
+    });
+  });
+});
+
+test('面板：只有 KV 有副本时从 KV 读取（并回填 Cache API）', async () => {
+  const w1 = await freshWorker();
+  const env = baseEnv();
+  await withFetch(() => new Response(PANEL_FILE), () => panelGet(w1, env));   // 先填充 KV（无 Cache API）
+  assert.ok([...env.CONFIG_KV.m.keys()].some(k => k.startsWith('panel:')));
+  const w2 = await freshWorker(), cache = memCache();
+  await withGlobals({ caches: { default: cache } }, () => withFetch(() => { throw new Error('不应访问网络'); }, async (calls) => {
+    assert.equal((await panelGet(w2, env)).status, 200);
+    assert.equal(calls.length, 0);
+  }));
+  assert.equal(cache.m.size, 1, '回填 Cache API');
+});
+
+test('面板：全部来源失败 → 503 说明页，15 秒内不再重试；代理与订阅不受影响', async () => {
+  const w = await freshWorker(), env = baseEnv();
+  await withFetch(() => new Response('nope', { status: 404 }), async (calls) => {
+    const res = await panelGet(w, env);
+    assert.equal(res.status, 503);
+    assert.equal(res.headers.get('Retry-After'), '15');
+    assert.match(await res.text(), /代理与订阅不受影响/);
+    assert.equal(calls.length, 3);
+    assert.equal((await panelGet(w, env)).status, 503);
+    assert.equal(calls.length, 3, '冷却期内不再请求镜像');
+    // 登录页内嵌，不依赖网络；订阅照常
+    assert.equal((await w.fetch(new Request('https://node.example.com/login?next=' + encodeURIComponent('/' + UUID), { headers: { 'User-Agent': BROWSER } }), env, {})).status, 200);
+  });
+});
+
+test('面板：并发首次访问只拉取一次', async () => {
+  const w = await freshWorker(), env = baseEnv();
+  await withFetch(async () => { await new Promise(r => setTimeout(r, 20)); return new Response(PANEL_FILE); }, async (calls) => {
+    const rs = await Promise.all([panelGet(w, env), panelGet(w, env), panelGet(w, env)]);
+    assert.deepEqual(rs.map(r => r.status), [200, 200, 200]);
+    assert.equal(calls.length, 3, '三个镜像各一次，而不是 3×3');
+  });
 });

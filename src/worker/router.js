@@ -159,18 +159,6 @@ async function serveSubscription(request, env, cfg, fmt) {
   return generateSubscription(Object.assign({}, cfg), request.url, fmt, UA);
 }
 
-// 面板页面：注入字段表与共用校验函数（每个 isolate 只组装一次）。
-let PANEL_PAGE = null;
-function panelPage() {
-  if (!PANEL_PAGE) {
-    PANEL_PAGE = PANEL_HTML
-      .replace('/*@HOPLINE_SCHEMA@*/null', () => JSON.stringify(clientSchema()).replace(/</g, '\\u003c'))
-      .replace('/*@HOPLINE_CHECK@*/null', () => '(' + checkFieldValue.toString() + ')')
-      .replace('/*@HOPLINE_HTTP_PORTS@*/null', () => JSON.stringify([...HTTP_PORTS]));
-  }
-  return PANEL_PAGE;
-}
-
 // 必填环境变量检查：返回说明文字（有问题时），否则空串。PATH 必填；ADMIN 必填（缺失时面板与管理接口禁用，见面板入口处的提示）；
 // UUID 可选——未绑定 KV 时没有地方保存自动生成的 UUID，此时必须手动设置
 function setupProblems(env, cfg) {
@@ -295,7 +283,9 @@ async function handleRequest(request, env, state) {
     if (!(await requireAuth(request, cfg, state))) {
       return Response.redirect(new URL('/login?next=' + encodeURIComponent('/' + panelPath), request.url).href, 302);
     }
-    return new Response(panelPage(), { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' } });
+    const page = await panelPage(env);
+    if (!page) return panelUnavailable();
+    return new Response(page, { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' } });
   }
 
   // ---------- API ----------

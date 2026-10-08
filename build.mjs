@@ -1,18 +1,21 @@
 #!/usr/bin/env node
 // 构建脚本：把 src/ 下的源文件合并、压缩为可直接粘贴部署的单文件 Hopline.js
 //
-//   node build.mjs          生成 Hopline.js
-//   node build.mjs --check  仅校验 Hopline.js 是否与 src/ 同步（CI 使用，不同步时退出码 1）
+//   node build.mjs          生成 Hopline.js 与 dist/panel.html
+//   node build.mjs --check  仅校验 Hopline.js、dist/panel.html 是否与 src/ 同步（CI 使用，不同步时退出码 1）
 //
 // 处理流程：
 //   1. 合并 src/worker.js 中的  // @include worker/xxx.js  （保持模块级顺序）
-//   2. 把面板 HTML / CSS / JS 内联进来，内联前按语言各自去掉注释（保留 @HOPLINE_ 占位注释）
+//   2. 把登录页内联进 worker；面板 HTML / CSS / JS 合并成 dist/panel.html（按语言各自去掉注释，保留 @HOPLINE_ 占位注释），
+//      它不再内嵌进 Worker：Worker 运行时按版本标签 v<VERSION> 从 jsDelivr / GitHub 拉取并校验 SHA-256，
+//      该哈希在此处计算并写进 Worker（/* @panel-sha256 */ 占位）
 //   3. 用 terser 压缩合并后的 worker 代码：精简并重命名所有顶层与局部名称、删除全部注释；
 //      面板代码位于 String.raw 模板字符串内，terser 不会改动其内容（注释已在第 2 步去除）
 //   4. 顶部保留一行版本横幅 /*!Hopline vX.Y.Z*/，供旧版「检测更新」从远端文件解析版本号
 //
 // terser 通过 npx 调用（与 `npm run lint` 使用 eslint 的方式一致），版本固定以保证 --check 可复现。
-import { readFileSync, writeFileSync, existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
@@ -21,6 +24,7 @@ import { execFileSync } from 'node:child_process';
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const SRC = join(ROOT, 'src');
 const OUT = join(ROOT, 'Hopline.js');
+const PANEL_OUT = join(ROOT, 'dist', 'panel.html');   // 面板页面成品：按版本标签发布，由 Worker 运行时拉取
 const TERSER = 'terser@5.51.2';            // 固定版本：保证不同机器 / CI 产出一致
 const KEEP_COMMENT = /@HOPLINE_/;          // 内联面板代码时唯一保留的注释（运行时占位符）
 
@@ -110,18 +114,29 @@ function expandWorker(text, file) {
   });
 }
 
-// 合并出未压缩的完整源码（含 worker 注释、面板已去注释、保留 import / export）。
+// 面板页面成品（HTML + CSS + JS 合并、去注释，运行时占位符原样保留）。Worker 校验的就是这份内容的 SHA-256
+export function assemblePanel() {
+  const text = loadPanel(join(SRC, 'panel/panel.html'));
+  return text.endsWith('\n') ? text : text + '\n';
+}
+export function panelSha256(text = assemblePanel()) {
+  return createHash('sha256').update(text, 'utf8').digest('hex');
+}
+
+// 合并出未压缩的完整源码（含 worker 注释、登录页已去注释、保留 import / export）。
 // 测试用它取内部纯函数（压缩产物里名称已被重命名，无法按名取用）。
 export function assemble() {
   const entry = join(SRC, 'worker.js');
   const worker = expandWorker(read(entry), entry);
-  const out = worker.replace(/\/\*\s*@inline\s+(\S+)\s*\*\/\s*''/g, (_, name) => {
-    const text = loadPanel(join(SRC, name));
-    if (text.includes('`')) throw new Error(`${name}: 内联内容不能包含反引号 \``);
-    if (text.includes('${')) throw new Error(`${name}: 内联内容不能包含 \${`);
-    return 'String.raw`\n' + text + '`';
-  });
-  if (/@inline/.test(out.replace(/\/\/.*$/gm, ''))) throw new Error('存在未处理的 @inline 标记');
+  const out = worker
+    .replace(/\/\*\s*@panel-sha256\s*\*\/\s*''/g, () => `'${panelSha256()}'`)
+    .replace(/\/\*\s*@inline\s+(\S+)\s*\*\/\s*''/g, (_, name) => {
+      const text = loadPanel(join(SRC, name));
+      if (text.includes('`')) throw new Error(`${name}: 内联内容不能包含反引号 \``);
+      if (text.includes('${')) throw new Error(`${name}: 内联内容不能包含 \${`);
+      return 'String.raw`\n' + text + '`';
+    });
+  if (/@inline|@panel-sha256/.test(out.replace(/\/\/.*$/gm, ''))) throw new Error('存在未处理的 @inline / @panel-sha256 标记');
   return out;
 }
 
@@ -158,15 +173,19 @@ export function build() {
 const isMain = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];
 if (isMain) {
   const code = build();
+  const panel = assemblePanel();
   if (process.argv.includes('--check')) {
     const cur = existsSync(OUT) ? readFileSync(OUT, 'utf8') : '';
-    if (cur !== code) {
-      console.error('Hopline.js 与 src/ 不同步：请运行 `node build.mjs` 并提交生成结果。');
+    const curPanel = existsSync(PANEL_OUT) ? readFileSync(PANEL_OUT, 'utf8') : '';
+    if (cur !== code || curPanel !== panel) {
+      console.error('Hopline.js / dist/panel.html 与 src/ 不同步：请运行 `node build.mjs` 并提交生成结果。');
       process.exit(1);
     }
-    console.log('Hopline.js 与 src/ 同步。');
+    console.log('Hopline.js 与 dist/panel.html 同步。');
   } else {
     writeFileSync(OUT, code);
-    console.log(`已生成 Hopline.js（${code.length} 字符）`);
+    mkdirSync(dirname(PANEL_OUT), { recursive: true });
+    writeFileSync(PANEL_OUT, panel);
+    console.log(`已生成 Hopline.js（${code.length} 字符）与 dist/panel.html（${panel.length} 字符，sha256 ${panelSha256(panel).slice(0, 12)}…）`);
   }
 }
