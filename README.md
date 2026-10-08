@@ -238,6 +238,8 @@
 | `test/` | `node:test` 测试（模拟 KV 与 Workers 运行时，无需安装依赖） |
 | `.github/workflows/ci.yml` | 每次推送运行：`Hopline.js` / `dist/panel.html` 与 `src/` 同步检查 → 语法检查 → lint → 测试 |
 | `.github/workflows/tag.yml` | 推送到 `main` 后，若 `Hopline.js` 里的版本号还没有对应的 `v<版本号>` 标签就自动创建；标签已存在但 `dist/panel.html` 内容不同（改了面板却没升版本号）则失败 |
+| `obfuscate.mjs` | 在 `Hopline.js` 基础上用 javascript-obfuscator 再混淆一层，产出 `obf_Hopline.js`（非部署必需，供不想公开可读源码的场景用）；light / medium / heavy 三档，通过 npx 获取（版本固定） |
+| `.github/workflows/obfuscate.yml` | 推送到 `main` 且 `Hopline.js` 有变化时自动重新生成并提交 `obf_Hopline.js`（默认 medium 档）；也可手动触发并选择强度 |
 
 ```bash
 node build.mjs          # 修改 src/ 后重新生成 Hopline.js（需 Node.js 20.6+，CI 使用 22；首次会通过 npx 拉取 terser）
@@ -262,6 +264,11 @@ npm run lint            # eslint 静态检查（通过 npx 获取，仓库本身
 ---
 
 ## 更新日志
+
+### V2.4.2
+
+- 新增 `obfuscate.mjs` 与 `.github/workflows/obfuscate.yml`：在 `Hopline.js` 基础上用 javascript-obfuscator 再做一层混淆，产出 `obf_Hopline.js`（light / medium / heavy 三档强度，默认 medium，可手动触发并选档）
+- 不影响 `Hopline.js` / `dist/panel.html` 内容，仅升版本号以便发版（`obf_Hopline.js` 不是部署所需文件，仅供不想直接公开可读源码的场景使用）
 
 ### V2.4.1
 
