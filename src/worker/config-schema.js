@@ -126,6 +126,10 @@ const CONFIG_SCHEMA = [
 
 // 单个字段值校验与规范化（服务端与面板共用：面板页面下发时通过 toString() 注入同一份代码，
 // 因此本函数必须自包含——不得引用外部变量，且保持 ES5 语法）。返回 { value } 或 { error }
+// obfuscate.mjs 用到的标记：本函数的源码会被当作文本提取并原样注入页面，脱离本模块作用域独立运行，
+// 混淆器若把内部字符串替换成指向模块级解码函数的调用，提取出的文本在浏览器里会因找不到该函数而报错；
+// 下面这对注释让混淆器跳过本函数内部（保持可独立运行），不影响文件其余部分的混淆强度
+/* javascript-obfuscator:disable */
 function checkFieldValue(def, v) {
   var t = def.type, i;
   if (t === 'bool') {
@@ -174,6 +178,7 @@ function checkFieldValue(def, v) {
   }
   return { value: v };   // 其余类型仅由服务端 SERVER_CHECKS 校验
 }
+/* javascript-obfuscator:enable */
 
 // 仅服务端执行的附加校验：返回错误信息字符串或 { value } 规范化结果
 const SS_METHODS = ['aes-128-gcm', 'aes-256-gcm', 'chacha20-ietf-poly1305'];

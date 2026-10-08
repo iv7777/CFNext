@@ -1,4 +1,4 @@
-const VERSION = '2.3.2';
+const VERSION = '2.3.3';
 
 // 更新检测：点击版本号后拉取仓库代码比对版本号；有新版本时返回最新代码供面板复制
 // 版本基准为仓库 main 分支根目录的 Hopline.js（由 build.mjs 生成的部署文件）

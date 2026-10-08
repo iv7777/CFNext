@@ -244,6 +244,23 @@ npm run lint            # eslint 静态检查（通过 npx 获取，仓库本身
 
 > 请勿直接编辑 `Hopline.js`：CI 会检查它是否与 `src/` 同步。
 
+### 可选：再加一层混淆（`Hopline.obf.js`）
+
+`Hopline.js` 本身已经过 terser 压缩重命名；`Hopline.obf.js` 是在此之上，用 [javascript-obfuscator](https://github.com/javascript-obfuscator/javascript-obfuscator) 再叠加一层字符串隐藏（基于数组 + base64 编码，可选逐字符拆分）与标识符重命名的**可选**产物，供希望进一步提高静态分析门槛的用户使用。两个文件行为完全一致，部署时二选一即可；**面板「检测更新」只识别 `Hopline.js`**，部署了 `Hopline.obf.js` 的用户需要手动获取新版本重新生成。
+
+| 文件 | 作用 |
+|---|---|
+| `obfuscate.config.mjs` | 三档强度预设（`light` / `medium` / `heavy`），改 `level` 一行即可整体调轻调重；均不启用 control-flow flattening 等有运行时开销的变换（本项目对 Workers 免费版 10ms CPU 限制敏感，详见「六、性能与安全」） |
+| `obfuscate.mjs` | 生成脚本：对未压缩的合并源码（`build.mjs` 的 `assemble()`）直接调用 javascript-obfuscator（通过 npx 固定版本获取），输出 `Hopline.obf.js` |
+| `.github/workflows/obfuscate.yml` | `Hopline.js` 变化时自动重新生成并提交 `Hopline.obf.js`；也可在 Actions 页手动触发并指定强度 |
+
+```bash
+node obfuscate.mjs        # 按 obfuscate.config.mjs 中的 level 生成
+node obfuscate.mjs heavy  # 临时指定强度，不改配置文件
+```
+
+`src/worker/config-schema.js` 中的 `checkFieldValue` 函数被 `/* javascript-obfuscator:disable */ ... enable */` 标记包住：该函数的源码会被当作文本提取、原样注入面板页面独立运行，混淆器若改写其内部字符串会导致提取出的代码在浏览器里找不到解码函数而报错，因此排除在外；不影响文件其余部分的混淆强度。
+
 ---
 
 ## 八、致谢
@@ -255,6 +272,11 @@ npm run lint            # eslint 静态检查（通过 npx 获取，仓库本身
 ---
 
 ## 更新日志
+
+### V2.3.3
+
+- 新增可选产物 **`Hopline.obf.js`**：在 `Hopline.js` 之上用 javascript-obfuscator 再叠加一层强度可调（`obfuscate.config.mjs`，light / medium / heavy）的字符串隐藏与标识符重命名，附带自动重新生成的 CI 工作流（见「七、开发与构建」）
+- `Hopline.js` 本身的代码与体积均无变化（`src/worker/config-schema.js` 只新增了两行注释标记，用于保护 `checkFieldValue` 在该可选产物中仍可独立运行）
 
 ### V2.3.2
 

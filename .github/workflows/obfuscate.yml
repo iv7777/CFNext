@@ -1,0 +1,40 @@
+name: Obfuscate Hopline.js
+
+on:
+  workflow_dispatch:
+    inputs:
+      level:
+        description: '混淆强度：light / medium / heavy（留空则使用 obfuscate.config.mjs 中的默认值）'
+        required: false
+  push:
+    branches:
+      - main
+    paths:
+      - 'Hopline.js'
+
+permissions:
+  contents: write
+
+jobs:
+  obfuscate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: 生成 Hopline.obf.js
+        run: node obfuscate.mjs ${{ github.event.inputs.level }}
+
+      - name: 提交变更的 Hopline.obf.js（如有）
+        run: |
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+          git add Hopline.obf.js
+          if git diff --staged --quiet; then
+            echo "Hopline.obf.js 无变化，不提交。"
+          else
+            git commit -m "chore: regenerate Hopline.obf.js"
+            git push
+          fi
