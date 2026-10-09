@@ -1821,15 +1821,37 @@ async function openOutbound(parsed, cfg, colo, payloadKind) {
   return fail();
 }
 
-// 下行管道（WebSocket）：socket 可读 → send 回调；结束调用 onDone。
-// 合并小块：运行时的 socket 读取每次只给约 4KB，逐块 send 时 1MB 就是约 256 条 WS 消息，每条都有固定 CPU 开销
-// （免费版每个请求只有 10ms CPU）。读到一块后，把「已经到达」的后续数据（同一轮 I/O 内、不额外等待网络）
-// 合并成最多 64KB 一条消息再发：workerd 实测每 MB CPU 约 13ms → 8ms，消息数减少约 16 倍。
+// 下行管道（WebSocket）：目标可读流 → send 回调；结束（含出错）调用 onDone。
+// CPU 主要花在读取次数上：运行时 socket 的默认读取每次只给约 4KB，1MB 就是约 256 轮 JS 调度（免费版每个请求只有 10ms CPU）。
+// 改用 BYOB 读取器、自带 64KB 缓冲：一次读取取走已到达的全部数据（最多 64KB），不额外等待网络，交互流量照常即时发出。
+// workerd 实测 64MB 下行：读取次数 16522 → 1040，每 MB CPU 约 5.5ms → 1.1ms，吞吐约 2.5 倍。
+// ws.send() 不会立即复制数据：发出的缓冲不能再交给下一次读取（复用会把后读的数据写进尚未发出的消息，实测数据损坏）。
+// 大块原样发出并换新缓冲；小块复制一份发出，缓冲继续复用（交互流量不必每次分配 64KB）
+const WS_READ_BUF = 64 * 1024, WS_COPY_BELOW = 32 * 1024;
+async function pumpReadable(readable, send, onDone) {
+  let reader = null;
+  try { reader = readable.getReader({ mode: 'byob' }); } catch (e) { /* 非字节流（如 SS 出站的解密流）：走默认读取 */ }
+  try {
+    if (!reader) await pumpBatched(readable.getReader(), send);
+    else {
+      let buf = new ArrayBuffer(WS_READ_BUF);
+      while (true) {
+        const { done, value } = await reader.read(new Uint8Array(buf, 0, WS_READ_BUF));
+        if (done) break;
+        if (value.byteLength >= WS_COPY_BELOW) { send(value); buf = new ArrayBuffer(WS_READ_BUF); }
+        else { if (value.byteLength) send(value.slice()); buf = value.buffer; }
+      }
+    }
+  } catch (e) { /* 忽略 */ }
+  try { if (onDone) onDone(); } catch (e) { /* 忽略 */ }
+}
+
+// 默认读取（不支持 BYOB 的流）：把「已经到达」的后续数据（同一轮 I/O 内、不额外等待网络）合并成最多 64KB 一条消息再发。
 // 只在读满时合并：一次读到不足 4KB 说明缓冲已读空（交互流量），直接发出，不等待；
 // 读满 4KB 时才用 0ms 定时器探测后续数据是否已到达（读取先于定时器完成 = 已在缓冲中），否则立即发出已攒的
 // （定时器粒度约 1ms，若对每块都等会让交互往返多约 1ms）
 const WS_BATCH_MAX = 64 * 1024, WS_FULL_READ = 4096;
-async function pumpToReader(reader, send, onDone) {
+async function pumpBatched(reader, send) {
   let timer = null;
   const tick = () => new Promise((r) => { timer = setTimeout(() => r(null), 0); });
   const read = () => { const p = reader.read(); p.catch(() => {}); return p; };
@@ -1860,7 +1882,6 @@ async function pumpToReader(reader, send, onDone) {
       if (ended) break;
     }
   } catch (e) { /* 忽略 */ }
-  try { if (onDone) onDone(); } catch (e) { /* 忽略 */ }
 }
 // ---------------------------------------------------------------------------
 // WebSocket 代理（VLESS / Trojan）
@@ -1980,7 +2001,7 @@ async function handleWebSocketProxy(request, cfg) {
     if (pending && pending.byteLength > parsed.headerLength) await writer.write(pending.subarray(parsed.headerLength));
     pending = null;   // 出站就绪后清空缓冲，后续消息直接写出站
     pumped = true;
-    pumpToReader(conn.readable.getReader(), send, () => closeWs(1000));
+    pumpReadable(conn.readable, send, () => closeWs(1000));
   };
 
   // WS 0-RTT：先处理握手头中预发的首包，再处理数据帧；校验不通过时 earlyBytes 为 null，走原流程
@@ -1997,7 +2018,7 @@ async function handleWebSocketProxy(request, cfg) {
     } catch (err) { fail(err); }
   });
   // accept({ allowHalfOpen: true }) 下收到客户端的关闭帧不会自动回应：这里必须自己收尾。
-  // 已有数据转发时，目标连接被关闭后由 pumpToReader 结束并关闭 WS；还没开始转发（握手 / 等首包 / 建连中）时直接关闭，避免连接悬挂
+  // 已有数据转发时，目标连接被关闭后由 pumpReadable 结束并关闭 WS；还没开始转发（握手 / 等首包 / 建连中）时直接关闭，避免连接悬挂
   function cleanup() {
     closed = true;
     if (protoWait) { clearTimeout(protoWait); protoWait = null; }
