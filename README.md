@@ -1,4 +1,4 @@
-# Hopline · Cloudflare 代理订阅面板
+# Hopline · 代理订阅面板
 
 > **Hopline —— 部署在 Cloudflare Workers / Pages 的代理订阅面板**，单文件同时实现 VLESS / Trojan / XHTTP 多协议代理与图形化配置：`/<PATH>` 进入面板，`/sub` 输出订阅；内置优选域名与在线优选 IP 来源、ECH 加密、落地与出站代理（含可配置的地区反代）及地区 / 运营商 / IP 版本多维筛选，只需设置 `PATH` 与 `ADMIN` 两个环境变量即可部署（UUID 等其余均可选），绑定 KV 后改完即生效。
 
@@ -269,7 +269,7 @@ npm run lint            # eslint 静态检查（通过 npx 获取，仓库本身
 
 - **修复：绑定域名留空时，节点链接和各客户端配置里的 SNI / Host 为空**（V2.3.0 起的问题：订阅生成时「留空则取访问域名」的回退值写错了字段，实际没有生效；所有订阅格式都受影响）。现已恢复，并新增测试覆盖 `sni` / `host` 以及 Clash、sing-box 的对应字段
 - **恢复长字段名**：撤销 V2.3.0 的 KV 配置字段 / 接口字段名更名（`uuid`、`path`、`host`、`relay.mode`、`filter.region`、`ipsrc.wetest` 等回到原名），不再使用 `uid`、`hst`、`rl.md` 这类短标识
-- **恢复文案**：撤销 V2.3.1 的「Cloudflare」文字中性化，面板、登录页、README 与源码注释恢复原有措辞
+- **恢复文案**：撤销 V2.3.1 的「Cloudflare」文字中性化，面板、登录页、README 与源码注释恢复原有措辞；唯独面板名称保持「Hopline · 代理订阅面板」（不带 Cloudflare）
 - `Hopline.js` 不再经 terser 压缩，内容即 `src/` 原样拼接（保留注释与原始名称，约 208KB）；需要混淆发布时用 `obfuscate.mjs`
 - **升级注意**：V2.3.0 – V2.4.2 保存在 KV 里的配置使用短字段名，升级后不再识别，需要在面板里重新配置；那几个版本导出的备份也无法导入。环境变量不受影响
 

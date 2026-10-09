@@ -1,6 +1,6 @@
 /*!Hopline v2.4.3*/
 // ============================================================================
-//  Hopline —— Cloudflare 代理订阅面板 · 全新独立编写
+//  Hopline —— 代理订阅面板 · 全新独立编写
 //  ----------------------------------------------------------------------------
 //  环境变量（必填 2 项，其余可选；旧版短变量名 U / D / S / K / ECH / TROJAN 仍然兼容）：
 //    PATH            【必填】面板、订阅与节点（WebSocket / XHTTP）共用的访问路径，如 mypanel（旧名 D）
@@ -3664,7 +3664,7 @@ button:disabled{opacity:.6;cursor:not-allowed}
 <div class="box">
   <div class="brand">
     <div class="mark"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12h4l3-7 4 14 3-7h2"/></svg></div>
-    <div class="bt"><b>Hopline</b><span>Cloudflare 代理订阅面板</span></div>
+    <div class="bt"><b>Hopline</b><span>代理订阅面板</span></div>
   </div>
   <h1>登录</h1>
   <p>请输入管理用户名与密码以继续</p>
@@ -3709,7 +3709,7 @@ button:disabled{opacity:.6;cursor:not-allowed}
 // 读取顺序：isolate 内存 → Cache API（同机房共享）→ KV（已绑定时，全球共享）→ 网络（三个镜像并发，先到先用）
 // 面板拉不到时只有面板不可用（返回 503 说明页），代理与订阅完全不受影响
 // ---------------------------------------------------------------------------
-const PANEL_SHA256 = '726808a690ab1b7d0bfaa796285a0d863e0cf1c90789dce0d8768c1ee266ef63';
+const PANEL_SHA256 = '1e4ae0ea883b5914bb43c61ae4451126da1b91884da07c2d404922b761efa671';
 const PANEL_ASSET_PATH = '/dist/panel.html';
 const PANEL_MAX_BYTES = 1024 * 1024;
 const PANEL_FETCH_TIMEOUT = 6000;
