@@ -268,6 +268,12 @@ npm run lint            # eslint 静态检查（通过 npx 获取，仓库本身
 
 ## 更新日志
 
+### V2.4.5
+
+- **面板「检测更新」改为读取并复制 `obf_Hopline.js`**：点击面板里的版本号，比对仓库 `main` 分支 `obf_Hopline.js` 的版本号（取自文件顶部横幅 `/*!Hopline vX.Y.Z obfuscated:medium*/`），有新版本时把它的内容复制到剪贴板；此前读取的是 `Hopline.js`
+- `obf_Hopline.js` 由 CI 在 `Hopline.js` 更新后另行提交，发版后可能要等几十秒才检测到新版本；版本号与复制的代码始终来自同一个文件
+- 注意：之前直接部署 `Hopline.js` 的用户，检测更新后复制到的将是混淆版本
+
 ### V2.4.4
 
 - **WebSocket 下行 CPU 约降为原来的 1/5**：目标连接改用 64KB 缓冲的 BYOB 读取，一次取走已到达的全部数据（最多 64KB）作为一条消息发出，不再按约 4KB 逐块读取、也不再用 0ms 定时器探测后续数据。workerd 实测 64MB 下行：读取次数 16522 → 1040，每 MB CPU 约 5.9ms → 1.2ms，吞吐约 2.5 倍；看视频等大流量更不容易触发 `Worker exceeded CPU time limit`
