@@ -3,7 +3,7 @@
 const NODE_CAP = 500;
 
 // 根据 UA 或指定格式生成订阅
-async function generateSubscription(cfg, requestUrl, format, ua) {
+async function generateSubscription(env, cfg, requestUrl, format, ua) {
   // 明文端口节点只由「仅 TLS 端口」控制（默认开启）；ECH 只对 TLS 生效，开启时同样只下发 TLS 端口节点。
   // 自定义域名的明文端口需在 Cloudflare 关闭「始终使用 HTTPS」，否则被 301 重定向、WebSocket 握手失败
   const rc = Object.assign({}, cfg, { host: cfg.host || new URL(requestUrl).hostname });
@@ -82,7 +82,7 @@ async function generateSubscription(cfg, requestUrl, format, ua) {
   if (nodes.length > cap) nodes.length = cap;
   nodes = uniqueNodeNames(nodes);
   let type, body;
-  if (forced === 'clash' || forced === 'stash') { type = 'text/yaml'; body = generateClash(rc, nodes); }   // Stash 使用 Clash 格式（与按 UA 识别一致）
+  if (forced === 'clash' || forced === 'stash') { type = 'text/yaml'; body = generateClash(rc, nodes, await requireClashTemplate(env)); }   // Stash 使用 Clash 格式（与按 UA 识别一致）
   else if (forced === 'singbox' || forced === 'sing-box') { type = 'application/json'; body = generateSingbox(rc, nodes); }
   else if (forced === 'surge') { type = 'text/plain'; body = generateSurge(rc, nodes); }
   else if (forced === 'surfboard') { type = 'text/plain'; body = generateSurfboard(rc, nodes); }
@@ -95,7 +95,7 @@ async function generateSubscription(cfg, requestUrl, format, ua) {
     type = 'text/plain'; body = nodes.join('\n');
   }
   // UA 自动识别
-  else if (ua.includes('clash') || ua.includes('stash')) { type = 'text/yaml'; body = generateClash(rc, nodes); }
+  else if (ua.includes('clash') || ua.includes('stash')) { type = 'text/yaml'; body = generateClash(rc, nodes, await requireClashTemplate(env)); }
   else if (ua.includes('sing-box')) { type = 'application/json'; body = generateSingbox(rc, nodes); }
   else if (ua.includes('surge')) { type = 'text/plain'; body = generateSurge(rc, nodes); }
   else if (ua.includes('surfboard')) { type = 'text/plain'; body = generateSurfboard(rc, nodes); }

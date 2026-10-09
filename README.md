@@ -85,6 +85,7 @@
 | 面板提示「已禁用」 | 没有设置 `ADMIN` |
 | 保存时报错 / 无法保存 | 没有绑定 KV，变量名必须是 `CONFIG_KV` |
 | 打开面板提示「面板页面暂时无法加载」（503） | Worker 没能从 jsDelivr / GitHub 拉到当前版本（`v<版本号>` 标签）的面板页面。稍后刷新即可；一直如此请确认仓库里存在对应版本标签（自己 fork 的需把 `src/worker/update.js` 里的 `UPDATE_REPO` 改成自己的仓库）。代理与订阅不受影响 |
+| Clash / Stash 更新订阅失败（503，提示「Clash 配置模板暂时无法加载」） | 与上一条同理：Worker 没能拉到当前版本标签下的 `dist/clash-template.yaml`。稍后重试；一直如此请确认仓库存在对应版本标签（自己 fork 的需改 `UPDATE_REPO`）。其它格式的订阅不受影响 |
 | 客户端更新订阅提示「无效订阅」 | `*.workers.dev` 域名可能被限制，绑定自定义域名，或让客户端通过代理更新订阅 |
 | 登录后过一段时间被退出 | 24 小时未使用面板自动退出，最长 7 天需重新登录 |
 | 改了 `PATH` 后节点连不上 | 节点路径随 `PATH` 改变，客户端需要重新更新订阅 |
@@ -231,13 +232,15 @@
 | `src/panel/panel.css` | 面板样式（日间 / 夜间主题） |
 | `src/panel/panel.js` | 面板前端脚本（由字段表驱动的表单回填、收集、校验与错误提示） |
 | `src/panel/login.html` | 登录页（内嵌进 Worker，不依赖网络） |
-| `src/worker/panel-loader.js` | 面板页面加载器：按版本标签拉取 `dist/panel.html`、校验哈希、分层缓存、注入字段表 |
+| `src/worker/asset-loader.js` | 固定版本资源加载器：按版本标签拉取 `dist/panel.html`（面板）与 `dist/clash-template.yaml`（Clash 模板）、校验哈希、分层缓存；面板页面另外在这里注入字段表 |
 | `dist/panel.html` | 构建产物：面板 HTML + CSS + JS 合并去注释后的成品，按版本标签发布，**需提交** |
-| `build.mjs` | 构建脚本：拼接 `src/worker/*.js`、内联登录页（去注释），把面板合并为 `dist/panel.html` 并把它的 SHA-256 写进 worker，顶部加版本横幅后原样输出为 `Hopline.js`（不压缩、不重命名；如需混淆发布见下面的 `obfuscate.mjs`） |
+| `src/worker/clash-template.yaml` | Clash / Stash 订阅的配置模板（锚点、监听器、DNS、策略组与规则），**不内嵌进 `Hopline.js`**，运行时按版本标签拉取 |
+| `dist/clash-template.yaml` | 构建产物：模板原样复制，按版本标签发布，**需提交** |
+| `build.mjs` | 构建脚本：拼接 `src/worker/*.js`、内联登录页（去注释），把面板合并为 `dist/panel.html`、把 Clash 模板复制为 `dist/clash-template.yaml`，并把两者的 SHA-256 写进 worker，顶部加版本横幅后原样输出为 `Hopline.js`（不压缩、不重命名；如需混淆发布见下面的 `obfuscate.mjs`） |
 | `eslint.config.mjs` | 静态检查配置（`npm run lint`） |
 | `test/` | `node:test` 测试（模拟 KV 与 Workers 运行时，无需安装依赖） |
-| `.github/workflows/ci.yml` | 每次推送运行：`Hopline.js` / `dist/panel.html` 与 `src/` 同步检查 → 语法检查 → lint → 测试 |
-| `.github/workflows/tag.yml` | 推送到 `main` 后，若 `Hopline.js` 里的版本号还没有对应的 `v<版本号>` 标签就自动创建；标签已存在但 `dist/panel.html` 内容不同（改了面板却没升版本号）则失败 |
+| `.github/workflows/ci.yml` | 每次推送运行：`Hopline.js` / `dist/` 与 `src/` 同步检查 → 语法检查 → lint → 测试 |
+| `.github/workflows/tag.yml` | 推送到 `main` 后，若 `Hopline.js` 里的版本号还没有对应的 `v<版本号>` 标签就自动创建；标签已存在但其中的 `dist/panel.html` 或 `dist/clash-template.yaml` 内容不同（改了面板 / Clash 模板却没升版本号）则失败 |
 | `obfuscate.mjs` | 在 `Hopline.js` 基础上用 javascript-obfuscator 再混淆一层，产出 `obf_Hopline.js`（非部署必需，供不想公开可读源码的场景用）；light / medium / heavy 三档，通过 npx 获取（版本固定） |
 | `.github/workflows/obfuscate.yml` | 推送到 `main` 且 `Hopline.js` 有变化时自动重新生成并提交 `obf_Hopline.js`（默认 medium 档）；也可手动触发并选择强度 |
 
@@ -249,9 +252,9 @@ npm run lint            # eslint 静态检查（通过 npx 获取，仓库本身
 
 **新增一个面板配置项**：在 `src/worker/config-schema.js` 的 `CONFIG_SCHEMA` 中加一行（字段路径、类型、默认值、面板控件 id、校验规则），再在 `src/panel/panel.html` 放一个同 id 的控件即可——默认值、KV 读写白名单、保存校验、面板回填 / 收集 / 未保存标记 / 字段级错误提示都会自动生效；服务端通过 `cfg.<字段>` 读取。
 
-> 请勿直接编辑 `Hopline.js` 与 `dist/panel.html`：CI 会检查它们是否与 `src/` 同步。
+> 请勿直接编辑 `Hopline.js` 与 `dist/` 下的文件：CI 会检查它们是否与 `src/` 同步。
 >
-> **发版流程**：改动后在 `src/worker/update.js` 升 `VERSION` → `node build.mjs` → 提交（`Hopline.js` 与 `dist/panel.html` 一起）→ 合并到 `main`，`tag.yml` 会自动打上 `v<版本号>` 标签。Worker 按这个标签拉面板页面，所以**只改面板（哪怕一个字）也必须升版本号**，否则新 `Hopline.js` 里的哈希对不上旧标签里的页面。
+> **发版流程**：改动后在 `src/worker/update.js` 升 `VERSION` → `node build.mjs` → 提交（`Hopline.js` 与 `dist/` 下的文件一起）→ 合并到 `main`，`tag.yml` 会自动打上 `v<版本号>` 标签。Worker 按这个标签拉面板页面，所以**只改面板或 Clash 模板（哪怕一个字）也必须升版本号**，否则新 `Hopline.js` 里的哈希对不上旧标签里的页面。
 
 ---
 
@@ -270,6 +273,7 @@ npm run lint            # eslint 静态检查（通过 npx 获取，仓库本身
 - **修复：绑定域名留空时，节点链接和各客户端配置里的 SNI / Host 为空**（V2.3.0 起的问题：订阅生成时「留空则取访问域名」的回退值写错了字段，实际没有生效；所有订阅格式都受影响）。现已恢复，并新增测试覆盖 `sni` / `host` 以及 Clash、sing-box 的对应字段
 - **恢复长字段名**：撤销 V2.3.0 的 KV 配置字段 / 接口字段名更名（`uuid`、`path`、`host`、`relay.mode`、`filter.region`、`ipsrc.wetest` 等回到原名），不再使用 `uid`、`hst`、`rl.md` 这类短标识
 - **恢复文案**：撤销 V2.3.1 的「Cloudflare」文字中性化，面板、登录页、README 与源码注释恢复原有措辞；唯独面板名称保持「Hopline · 代理订阅面板」（不带 Cloudflare）
+- **Clash 配置模板不再内嵌进 `Hopline.js`**（约 15KB，`Hopline.js` 约 208KB → 约 194KB）：模板移到 `src/worker/clash-template.yaml`，构建时复制为 `dist/clash-template.yaml`，Worker 与面板页面一样按版本标签 `v<版本号>` 并发拉取、校验 SHA-256 后缓存（内存 → Cache API → KV）；拉取失败时只有 Clash / Stash 订阅返回 503，其它格式不受影响；`tag.yml` 同时校验两个 dist 文件
 - `Hopline.js` 不再经 terser 压缩，内容即 `src/` 原样拼接（保留注释与原始名称，约 208KB）；需要混淆发布时用 `obfuscate.mjs`
 - **升级注意**：V2.3.0 – V2.4.2 保存在 KV 里的配置使用短字段名，升级后不再识别，需要在面板里重新配置；那几个版本导出的备份也无法导入。环境变量不受影响
 

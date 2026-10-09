@@ -18,8 +18,12 @@ register('data:text/javascript,' + encodeURIComponent(hooks));
 // 面板页面由 Worker 运行时按版本标签从 GitHub 拉取：默认让这类请求返回本地的 dist/panel.html（SHA-256 与构建时写入 Worker 的一致），其余一律离线
 import { readFileSync } from 'node:fs';
 const PANEL_FILE = readFileSync(new URL('../dist/panel.html', import.meta.url));
+// Clash 配置模板同理：运行时按版本标签拉取，测试里默认返回本地的 dist/clash-template.yaml（withFetch 里也一样，除非用例把 CLASH_FROM_LOCAL 关掉来模拟拉取失败）
+const CLASH_FILE = readFileSync(new URL('../dist/clash-template.yaml', import.meta.url));
+let CLASH_FROM_LOCAL = true;
 globalThis.fetch = async (url) => {
   if (String(url).endsWith('/dist/panel.html')) return new Response(PANEL_FILE);
+  if (String(url).endsWith('/dist/clash-template.yaml')) return new Response(CLASH_FILE);
   throw new Error('offline in tests');
 };
 
@@ -554,7 +558,10 @@ const md5 = (s) => createHash('md5').update(s).digest('hex');
 async function withFetch(handler, fn) {
   const offline = globalThis.fetch;
   const calls = [];
-  globalThis.fetch = async (url, opts = {}) => { calls.push(String(url)); return handler(String(url), opts); };
+  globalThis.fetch = async (url, opts = {}) => {
+    if (CLASH_FROM_LOCAL && String(url).endsWith('/dist/clash-template.yaml')) return new Response(CLASH_FILE);
+    calls.push(String(url)); return handler(String(url), opts);
+  };
   try { return await fn(calls); } finally { globalThis.fetch = offline; }
 }
 const notFound = () => new Response('Not Found', { status: 404 });
@@ -2215,4 +2222,61 @@ test('主题：页面头部提前套用主题，登录页同样默认跟随系�
     assert.match(html, /<\/title>\n<script>\(function\(\)\{var t='auto'/, `${f}.html 头部有提前套用主题的脚本`);
     assert.ok(!html.includes("|| 'light'"), `${f}.html 不再默认日间`);
   }
+});
+
+// ---------------- Clash 配置模板：与面板同一套「版本标签 + SHA-256 + 分层缓存」加载 ----------------
+const clashSub = (w, env, path = 'sub/clash', ua = 'clash.meta') => w.fetch(new Request(`https://node.example.com/${UUID}/${path}`, { headers: { 'User-Agent': ua } }), env, {});
+const clashEnv = () => baseEnv({ CONFIG_KV: kv({ config: customCfg() }) });
+async function withRemoteClash(handler, fn) {   // 关闭本地直出，让 Clash 模板的请求走用例自己的 handler
+  CLASH_FROM_LOCAL = false;
+  try { return await withFetch((url, opts) => url.endsWith('/dist/clash-template.yaml') ? handler(url, opts) : nodesFetch(url), fn); }
+  finally { CLASH_FROM_LOCAL = true; }
+}
+
+test('Clash 模板：来源固定为版本标签 v<VERSION>，哈希与 dist/clash-template.yaml 一致，Hopline.js 不内嵌模板', async () => {
+  const w = await freshWorker(), urls = [];
+  await withRemoteClash((url) => { urls.push(url); return new Response(CLASH_FILE); }, async () => {
+    const res = await clashSub(w, clashEnv());
+    assert.equal(res.status, 200);
+    const body = await res.text();
+    assert.match(body, /^# Hopline 订阅\ntest-url:/);
+    assert.ok(body.includes('FilterHK') && body.includes('- GEOSITE,CN,直接连接'), '模板已拼在节点之后');
+    assert.ok(!body.includes('__HOPLINE_'), '占位符均已替换');
+  });
+  const src = readFileSync(new URL('../Hopline.js', import.meta.url), 'utf8');
+  const ver = src.match(/Hopline v(\d+\.\d+\.\d+)/)[1];
+  assert.equal(urls.length, 3, '三个镜像并发请求');
+  assert.ok(urls.every(u => u.includes('@v' + ver + '/dist/clash-template.yaml') || u.includes('/v' + ver + '/dist/clash-template.yaml')), urls.join('\n'));
+  assert.ok(src.includes(createHash('sha256').update(CLASH_FILE).digest('hex')), '哈希已写进 Worker');
+  assert.ok(!src.includes('FilterHK'), '模板不内嵌在 Hopline.js 里');
+});
+
+test('Clash 模板：拉取失败或被篡改时，只有 Clash / Stash 订阅返回 503，其它格式不受影响，也不缓存', async () => {
+  for (const handler of [() => new Response('boom', { status: 502 }), () => new Response(CLASH_FILE.toString() + 'evil: 1\n')]) {
+    const w = await freshWorker(), cache = memCache(), env = clashEnv();
+    await withGlobals({ caches: { default: cache } }, () => withRemoteClash(handler, async () => {
+      const res = await clashSub(w, env);
+      assert.equal(res.status, 503);
+      assert.equal(res.headers.get('Retry-After'), '15');
+      assert.match(await res.text(), /Clash 配置模板暂时无法加载/);
+      assert.equal((await clashSub(w, env, 'sub/clash', 'Stash/2.7')).status, 503, 'Stash 同样走 Clash 模板');
+      for (const [path, ua] of [['sub', 'v2rayN/7.0'], ['sub/singbox', 'sing-box/1.9'], ['sub/surge', 'Surge/5']]) {
+        assert.equal((await clashSub(w, env, path, ua)).status, 200, path);
+      }
+    }));
+    assert.deepEqual([...cache.m.keys()].filter(k => k.startsWith('https://hopline.invalid/clash/')), [], '校验失败的内容不进缓存');
+    assert.deepEqual([...env.CONFIG_KV.m.keys()].filter(k => k.startsWith('clash:')), [], '也不写 KV');
+  }
+});
+
+test('Clash 模板：成功后写入 Cache API 与 KV；新 isolate 直接命中缓存，不再请求网络', async () => {
+  const w1 = await freshWorker(), cache = memCache(), env = clashEnv();
+  const hash = createHash('sha256').update(CLASH_FILE).digest('hex');
+  await withGlobals({ caches: { default: cache } }, async () => {
+    await withRemoteClash(() => new Response(CLASH_FILE), async () => { assert.equal((await clashSub(w1, env)).status, 200); });
+    assert.ok(cache.m.has('https://hopline.invalid/clash/' + hash), '写入 Cache API');
+    assert.ok(env.CONFIG_KV.m.has('clash:' + hash), '写入 KV');
+    const w2 = await freshWorker();
+    await withRemoteClash(() => { throw new Error('不应请求网络'); }, async () => { assert.equal((await clashSub(w2, env)).status, 200); });
+  });
 });

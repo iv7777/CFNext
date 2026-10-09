@@ -18,7 +18,6 @@
 import { connect } from 'cloudflare:sockets';
 
 // @include worker/update.js
-// @include worker/clash-template.js
 // @include worker/constants.js
 // @include worker/config-schema.js
 // @include worker/utils.js
@@ -32,5 +31,5 @@ import { connect } from 'cloudflare:sockets';
 // @include worker/formats.js
 // @include worker/subscription.js
 // @include worker/pages.js
-// @include worker/panel-loader.js
+// @include worker/asset-loader.js
 // @include worker/router.js

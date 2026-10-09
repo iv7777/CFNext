@@ -1,13 +1,14 @@
 name: Tag release
 
 # 合并到 main 后，为 Hopline.js 里的版本号创建 v<版本号> 标签。
-# Worker 运行时按这个标签从 jsDelivr / GitHub 拉取 dist/panel.html，所以标签必须存在，且其中的 dist/panel.html 要与当前一致。
+# Worker 运行时按这个标签从 jsDelivr / GitHub 拉取 dist/panel.html 与 dist/clash-template.yaml，所以标签必须存在，且其中的这两个文件要与当前一致。
 on:
   push:
     branches: [main]
     paths:
       - Hopline.js
       - dist/panel.html
+      - dist/clash-template.yaml
 
 permissions:
   contents: write
@@ -28,13 +29,15 @@ jobs:
           [ -n "$v" ] || { echo "未在 Hopline.js 顶部找到版本横幅"; exit 1; }
           if git ls-remote --exit-code --tags origin "refs/tags/$v" >/dev/null 2>&1; then
             git fetch --depth=1 origin "refs/tags/$v:refs/tags/$v"
-            want=$(sha256sum dist/panel.html | cut -d' ' -f1)
-            have=$(git show "$v:dist/panel.html" | sha256sum | cut -d' ' -f1)
-            if [ "$want" != "$have" ]; then
-              echo "标签 $v 已存在，但其中的 dist/panel.html 与当前不同：改了面板却没有升版本号（src/worker/update.js 的 VERSION）。"
-              exit 1
-            fi
-            echo "标签 $v 已存在且面板一致，无需操作"
+            for f in dist/panel.html dist/clash-template.yaml; do
+              want=$(sha256sum "$f" | cut -d' ' -f1)
+              have=$(git show "$v:$f" | sha256sum | cut -d' ' -f1)
+              if [ "$want" != "$have" ]; then
+                echo "标签 $v 已存在，但其中的 $f 与当前不同：改了面板 / Clash 模板却没有升版本号（src/worker/update.js 的 VERSION）。"
+                exit 1
+              fi
+            done
+            echo "标签 $v 已存在且 dist 文件一致，无需操作"
             exit 0
           fi
           git tag "$v"

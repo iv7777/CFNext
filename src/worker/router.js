@@ -156,7 +156,7 @@ function formatConfigErrors(errors) {
 // 生成订阅：/sub 与面板预览共用同一流程，保证预览与客户端实际拿到的一致
 async function serveSubscription(request, env, cfg, fmt) {
   const UA = request.headers.get('User-Agent') || '';
-  return generateSubscription(Object.assign({}, cfg), request.url, fmt, UA);
+  return generateSubscription(env, Object.assign({}, cfg), request.url, fmt, UA);
 }
 
 // 必填环境变量检查：返回说明文字（有问题时），否则空串。PATH 必填；ADMIN 必填（缺失时面板与管理接口禁用，见面板入口处的提示）；
@@ -271,7 +271,8 @@ async function handleRequest(request, env, state) {
       const sub = await serveSubscription(request, env, cfg, fmt);
       return new Response(sub.body, { status: 200, headers: { 'Content-Type': sub.type + '; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Disposition': 'attachment; filename="Hopline"; filename*=utf-8\'\'Hopline' } });
     } catch (e) {
-      return new Response('订阅生成失败: ' + (e && e.message || e), { status: 500, headers: { 'Content-Type': 'text/plain; charset=utf-8' } });
+      const status = (e && e.status) || 500;
+      return new Response('订阅生成失败: ' + (e && e.message || e), { status, headers: status === 503 ? { 'Content-Type': 'text/plain; charset=utf-8', 'Retry-After': '15' } : { 'Content-Type': 'text/plain; charset=utf-8' } });
     }
   }
 
@@ -403,7 +404,7 @@ async function handleRequest(request, env, state) {
       try {
         const sub = await serveSubscription(request, env, cfg, fmt);
         return json({ ok: true, type: sub.type, body: sub.body, count: sub.count });
-      } catch (e) { return json({ ok: false, msg: '订阅生成失败: ' + (e.message || e) }, 500); }
+      } catch (e) { return json({ ok: false, msg: '订阅生成失败: ' + (e.message || e) }, (e && e.status) || 500); }
     }
 
     return json({ ok: false, msg: '未知 API: ' + apiName }, 404);

@@ -66,333 +66,6 @@ async function checkUpdate(){
   return UPDATE_CACHE.r;
 }
 
-const CLASH_TEMPLATE = `
-# ==================== 锚点配置 ====================
-# 代理提供者模板 - 订阅源基础配置
-
-# 节点筛选正则表达式 - 仅保留常用地区
-FilterHK: &FilterHK '^(?=.*(?i)(港|🇭🇰|HK|Hong|HKG))(?!.*5x).*$'
-FilterSG: &FilterSG '^(?=.*(?i)(坡|🇸🇬|SG|Sing|SIN|XSP))(?!.*5x).*$'
-FilterJP: &FilterJP '^(?=.*(?i)(日|🇯🇵|JP|Japan|NRT|HND|KIX|CTS|FUK))(?!.*(尼日利亚|5x)).*$'
-FilterUS: &FilterUS '^(?=.*(?i)(美|🇺🇸|US|USA|JFK|SJC|LAX|ORD|ATL|DFW|SFO|MIA|SEA|IAD))(?!.*(Plus|Australia|5x)).*$'
-# 注意：🇼🇸 是萨摩亚旗帜，不是台湾，已移除，避免误匹配
-FilterTW: &FilterTW '^(?=.*(?i)(台|🇹🇼|TW|tai|TPE|TSA|KHH))(?!.*5x).*$'
-
-# ==================== 监听器 ====================
-listeners:
-  # Shadowsocks监听器 - 远程连接家庭网络。密码由 Hopline 按 UUID 为本部署派生（每个部署不同），不再使用公开的默认密码；
-  # 如需对外开放请自行修改端口与密码
-  - {name: SS-IN,  type: shadowsocks, listen: '::', port: 10000, udp: true, password: "__HOPLINE_SS_PASSWORD__", cipher: aes-256-gcm}
-  # Mixed监听器 - 分地区专用端口 玩法：本地浏览器插件或手机APP配置代理，实现分地区访问
-  - {name: MIXED-SG, type: mixed, port: 50000, proxy: 新加坡节点}
-  - {name: MIXED-US, type: mixed, port: 50001, proxy: 美国节点}
-  - {name: MIXED-TW, type: mixed, port: 50002, proxy: 台湾节点}
-  - {name: MIXED-HK, type: mixed, port: 50003, proxy: 香港节点}
-  - {name: MIXED-JP, type: mixed, port: 50004, proxy: 日本节点}
-  - {name: MIXED-AL, type: mixed, port: 50007, proxy: 一键连接}
-
-# ==================== 核心配置 ====================
-mode: rule
-port: 7890
-socks-port: 7891
-redir-port: 7892
-mixed-port: 7893
-tproxy-port: 7895
-ipv6: true
-allow-lan: true
-unified-delay: true
-tcp-concurrent: true
-log-level: warning
-bind-address: '*'
-find-process-mode: 'always'
-keep-alive-interval: 15
-keep-alive-idle: 600
-
-# 认证配置：密码由 Hopline 按 UUID 为本部署派生（每个部署不同），不再使用公开的默认凭据
-authentication:
-  - "mihomo:__HOPLINE_AUTH_PASSWORD__"
-skip-auth-prefixes:
-  - 192.168.1.0/24
-  - 192.168.31.0/24
-  - 192.168.100.0/24
-  - 127.0.0.1/8
-
-# 实验性功能
-experimental:
-  quic-go-disable-gso: true
-
-# 管理面板配置
-external-ui-url: https://github.com/Zephyruso/zashboard/releases/latest/download/dist.zip
-external-ui-name: zashboard
-external-ui: ui
-external-controller: 127.0.0.1:9090
-secret: "__HOPLINE_API_SECRET__"    # 由 Hopline 按 UUID 为本部署派生，可自行修改
-# 允许跨域访问的面板来源（不再使用 "*"：任意网页都不能借浏览器访问本机控制接口）。使用其它在线面板时在此追加其域名
-external-controller-cors:
-  allow-origins:
-    - "http://127.0.0.1:9090"
-    - "http://localhost:9090"
-    - "https://board.zash.run.place"
-    - "https://metacubex.github.io"
-  allow-private-network: true
-
-# 配置存储
-profile:
-  store-selected: true
-  store-fake-ip: true
-
-# geosite / geoip 数据源（GEOSITE 规则依赖）：MetaCubeX 规则库，经 jsDelivr 镜像下载（GitHub release 国内常不可达）
-geox-url:
-  geoip: "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geoip.dat"
-  geosite: "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geosite.dat"
-  mmdb: "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/country.mmdb"
-
-# 流量嗅探
-sniffer:
-  enable: true
-  force-dns-mapping: true   # 强制 DNS 映射，提高分流准确度
-  parse-pure-ip: true       # 解析纯 IP 连接
-  override-destination: true
-  sniff:
-    HTTP:
-      ports: [80, 8080-8880]
-    TLS:
-      ports: [443, 8443]
-    QUIC:
-      ports: [443, 8443]
-  skip-domain:
-    - "+.push.apple.com"
-
-# TUN模式配置
-tun:
-  enable: false
-  stack: mixed
-  mtu: 1480
-  dns-hijack:
-    - "any:53"
-    - "tcp://any:53"
-  udp-timeout: 300
-  auto-route: true
-  strict-route: true
-  auto-redirect: true
-  auto-detect-interface: true
-  # 提示：系统级防泄露的最强手段是开启 TUN（自动劫持全部 DNS 流量）；
-  # 不开 TUN 时，请把系统 / 本机应用的 DNS 指向 127.0.0.1:1053；要给 LAN 设备提供 DNS，把下方 dns.listen 改为 0.0.0.0:1053（注意不要暴露到公网）。
-
-hosts:
-  miwifi.com: 192.168.31.2
-  "epdg.epc.mnc010.mcc234.pub.3gppnetwork.org": [87.194.8.8, 87.194.88.8, 87.194.89.8, 87.194.9.8]
-  services.googleapis.cn: services.googleapis.com
-  cn.bing.com: www4.bing.com
-
-# ==================== DNS 配置 ====================
-# 防泄露要点：
-#   1) respect-rules: true：DNS 服务器连接遵循路由规则（国外 DoH 走代理隧道、国内 DoH 直连），
-#      解析行为与规则分流一致，避免“规则走代理、解析却直连”的泄露。
-#   2) 默认 nameserver 用国内 DoH；只有“将走代理”的规则集才用国外 DoH，
-#      且其域名在 rules 中显式固定走代理。
-#   3) fake-ip-filter 补齐系统连通性检测 / 时间同步 / 运营商登录等域名，防止系统误判断网而回退运营商 DNS。
-dns:
-  enable: true
-  listen: 127.0.0.1:1053    # 仅本机监听（53 端口需要管理员权限且常被系统占用，监听 0.0.0.0 还可能成为公网开放解析器）
-  ipv6: true
-  prefer-h3: false          # respect-rules 下官方不推荐 DoH3；且 QUIC 已被规则拦截
-  cache-algorithm: arc      # 性能更优的 ARC 缓存算法
-  cache-size: 4096
-  enhanced-mode: fake-ip
-  fake-ip-range: 198.18.0.1/16
-  fake-ip-filter:
-    - "+.lan"
-    - "+.local"
-    - "+.localhost"
-    - "+.home.arpa"
-    - "+.internal"
-    # 系统连通性检测（防止 fake-ip 导致“无网络”判断，回退 ISP DNS 造成泄露）
-    - "+.msftconnecttest.com"
-    - "+.msftncsi.com"          # 通配已覆盖 dns.msftncsi.com
-    - "captive.apple.com"
-    - "connectivitycheck.gstatic.com"
-    - "detectportal.firefox.com"
-    # 时间同步
-    - "time.nist.gov"
-    - "+.pool.ntp.org"
-    - "time.*.com"              # 通配已覆盖 time.windows.com
-    - "ntp.*.com"               # 通配已覆盖 ntp.ubuntu.com
-    # 运营商 Wi-Fi 登录页
-    - "+.cmpassport.com"
-    - "id6.me"
-    - "open.e.189.cn"
-    - "mdn.open.wo.cn"
-    - "opencloud.wostore.cn"
-    - "auth.wosms.cn"
-    - "+.10099.com.cn"
-    # 原配置保留项
-    - "+.market.xiaomi.com"
-    - "+.pub.3gppnetwork.org"
-    - "+.push.apple.com"
-    - "+.bing.com"
-    - "+.miwifi.com"
-    - "+.docker.io"
-    # 国内应用登录（+.qq.com 已覆盖 localhost.ptlogin2.qq.com）
-    - "+.qq.com"
-    # 直连 / 国内类规则集：返回真实 IP
-    - rule-set:Direct
-    - rule-set:Private
-    - rule-set:China
-    - geosite:cn                # 国内域名返回真实 IP（geosite 库兜底，防 fake-ip 干扰国内应用）
-  use-hosts: true
-  respect-rules: true
-  # 引导用 DNS（解析 DoH/DoT 服务器自身的域名），必须是 IP
-  default-nameserver:
-    - 223.5.5.5
-    - 119.29.29.29
-  # 默认解析：未命中 nameserver-policy 的域名（国内 DoH，直连）
-  nameserver:
-    - "https://dns.alidns.com/dns-query"
-    - "https://doh.pub/dns-query"
-  # 直连出口的解析
-  direct-nameserver:
-    - "https://dns.alidns.com/dns-query"
-    - "https://doh.pub/dns-query"
-  # 解析代理节点域名（防套娃 / 防循环，用国内直连可达的 DoH）
-  proxy-server-nameserver:
-    - "https://dns.alidns.com/dns-query"
-    - "https://doh.pub/dns-query"
-  nameserver-policy:
-    # 广告域名直接返回空应答
-    "rule-set:Advertising,AWAvenueAds": rcode://success
-    # 直连类：国内 DoH（微软已并入直连，微软域名走国内解析后直连）
-    "rule-set:Direct,Private,China,Microsoft":
-      - "https://dns.alidns.com/dns-query"
-      - "https://doh.pub/dns-query"
-    # 走代理类：国外 DoH（连接本身经代理隧道，不直连暴露查询）
-    "rule-set:AI,Telegram,Twitter,SocialMedia,Netflix,YouTube,Spotify,TikTok,disney,Google,Proxy":
-      - "https://dns.google/dns-query"
-      - "https://cloudflare-dns.com/dns-query"
-
-# ==================== 代理策略组（9 个可见 + 6 个隐藏自动子组） ====================
-proxy-groups:
-  # 主入口：默认自动选择，可手动切换各地区 / 故障转移 / 全部节点 / 直接连接
-  - {name: 一键连接,     type: select, proxies: [自动选择, 故障转移, 香港节点, 台湾节点, 日本节点, 美国节点, 新加坡节点, 全部节点, 直接连接], icon: https://github.com/Koolson/Qure/raw/master/IconSet/Color/Static.png}
-  # 自动选择：隐藏（面板不可手动选择），纯自动优选延时最低节点；故障转移：按序自动切换
-  - {name: 自动选择,     type: url-test, include-all: true, url: 'https://www.google.com/generate_204', interval: 200, lazy: true, hidden: true, empty-fallback: REJECT, icon: https://github.com/Koolson/Qure/raw/master/IconSet/Color/Auto.png}
-  - {name: 故障转移,     type: fallback, proxies: [香港节点, 台湾节点, 日本节点, 美国节点, 新加坡节点, 全部节点], url: 'https://www.google.com/generate_204', interval: 200, lazy: true, empty-fallback: REJECT, icon: https://github.com/Koolson/Qure/raw/master/IconSet/Color/ULB.png}
-  # 常用地区节点组（select：默认选中“XX自动”=自动优选该地区最快节点，也可手动指定单个节点）
-  - {name: 香港节点,     type: select, include-all: true, filter: *FilterHK, proxies: [香港自动], icon: https://github.com/Koolson/Qure/raw/master/IconSet/Color/Hong_Kong.png}
-  - {name: 台湾节点,     type: select, include-all: true, filter: *FilterTW, proxies: [台湾自动], icon: https://github.com/Koolson/Qure/raw/master/IconSet/Color/Taiwan.png}
-  - {name: 日本节点,     type: select, include-all: true, filter: *FilterJP, proxies: [日本自动], icon: https://github.com/Koolson/Qure/raw/master/IconSet/Color/Japan.png}
-  - {name: 美国节点,     type: select, include-all: true, filter: *FilterUS, proxies: [美国自动], icon: https://github.com/Koolson/Qure/raw/master/IconSet/Color/United_States.png}
-  - {name: 新加坡节点,   type: select, include-all: true, filter: *FilterSG, proxies: [新加坡自动], icon: https://github.com/Koolson/Qure/raw/master/IconSet/Color/Singapore.png}
-  # 全部节点（手动挑选任意节点；首个选项“自动选择”=全部节点中最快）
-  - {name: 全部节点,     type: select, include-all: true, proxies: [自动选择], icon: https://github.com/Koolson/Qure/raw/master/IconSet/Color/Global.png}
-  # 各地区自动优选子组（隐藏，作为各地区分组内的“自动选择”选项）
-  - {name: 香港自动,     type: url-test, include-all: true, filter: *FilterHK, url: 'https://www.google.com/generate_204', interval: 200, lazy: true, empty-fallback: REJECT, hidden: true, icon: https://github.com/Koolson/Qure/raw/master/IconSet/Color/Auto.png}
-  - {name: 台湾自动,     type: url-test, include-all: true, filter: *FilterTW, url: 'https://www.google.com/generate_204', interval: 200, lazy: true, empty-fallback: REJECT, hidden: true, icon: https://github.com/Koolson/Qure/raw/master/IconSet/Color/Auto.png}
-  - {name: 日本自动,     type: url-test, include-all: true, filter: *FilterJP, url: 'https://www.google.com/generate_204', interval: 200, lazy: true, empty-fallback: REJECT, hidden: true, icon: https://github.com/Koolson/Qure/raw/master/IconSet/Color/Auto.png}
-  - {name: 美国自动,     type: url-test, include-all: true, filter: *FilterUS, url: 'https://www.google.com/generate_204', interval: 200, lazy: true, empty-fallback: REJECT, hidden: true, icon: https://github.com/Koolson/Qure/raw/master/IconSet/Color/Auto.png}
-  - {name: 新加坡自动,   type: url-test, include-all: true, filter: *FilterSG, url: 'https://www.google.com/generate_204', interval: 200, lazy: true, empty-fallback: REJECT, hidden: true, icon: https://github.com/Koolson/Qure/raw/master/IconSet/Color/Auto.png}
-  # 直连分组（放在最下方）
-  - {name: 直接连接,     type: select, proxies: [DIRECT], icon: https://github.com/Koolson/Qure/raw/master/IconSet/Color/Direct.png}
-
-# ==================== 规则路由 ====================
-rules:
-  # 广告拦截（常用：直接拒绝；如需临时放行可改为一键连接）
-  - RULE-SET,Tracking,REJECT
-  - RULE-SET,AWAvenueAds,REJECT
-  - RULE-SET,Advertising,REJECT
-  - GEOSITE,category-ads-all,REJECT        # geosite 广告分类兜底（覆盖规则集未收录的广告域名）
-
-  # DNS 服务器域名：解析通道固定，避免 DNS 流量走错路径（防泄露关键）
-  - DOMAIN-SUFFIX,alidns.com,直接连接
-  - DOMAIN-SUFFIX,doh.pub,直接连接
-  - DOMAIN,dns.google,一键连接
-  - DOMAIN,cloudflare-dns.com,一键连接
-
-  # 大陆直连优先（置于国外服务规则之前：大陆应用一律直连，不被国外服务规则集抢先命中）
-  - RULE-SET,Private,直接连接
-  - RULE-SET,Direct,直接连接
-  - RULE-SET,Download,直接连接
-  - RULE-SET,AppleCN,直接连接
-  - RULE-SET,Microsoft,直接连接        # 微软全家桶直连（Office / OneDrive / Windows 更新 / Teams / Xbox 等）
-  - RULE-SET,China,直接连接             # 国内域名直连
-  - GEOSITE,CN,直接连接                  # geosite 国内域名兜底（覆盖规则集未收录的国内域名，先于 GEOIP 命中）
-  # 阻止走代理的 QUIC（强制回退 TCP，避免 QUIC 绕过代理 / 被干扰）。
-  # 放在直连规则之后：直连 QUIC（大陆 / 微软 / 苹果）不受影响。如需 Telegram 语音等 UDP，可删除此行。
-  - AND,((DST-PORT,443),(NETWORK,UDP)),REJECT
-
-  # 常用国外服务（统一走一键连接）
-  - RULE-SET,AI,一键连接
-  - RULE-SET,Telegram,一键连接
-  - RULE-SET,Twitter,一键连接
-  - RULE-SET,SocialMedia,一键连接
-  - RULE-SET,Netflix,一键连接
-  - RULE-SET,YouTube,一键连接
-  - RULE-SET,Spotify,一键连接
-  - RULE-SET,TikTok,一键连接
-  - RULE-SET,disney,一键连接
-  - RULE-SET,Google,一键连接
-  - RULE-SET,github,一键连接
-  - RULE-SET,Proxy,一键连接
-
-  # IP规则
-  - RULE-SET,PrivateIP,直接连接,no-resolve
-  - RULE-SET,TelegramIP,一键连接,no-resolve
-  - RULE-SET,ProxyIP,一键连接,no-resolve
-  - RULE-SET,ChinaIP,直接连接,no-resolve
-
-  # 大陆 IP 兜底直连：覆盖规则集未收录的域名 / 纯 IP 连接的大陆应用（GEOIP 库覆盖面更全）
-  - GEOIP,CN,直接连接,no-resolve
-
-  # 兜底规则：其余（国外）走一键连接
-  - MATCH,一键连接
-
-# ==================== 规则集 ====================
-# 规则集行为模板
-BehaviorDN: &BehaviorDN {type: http, behavior: domain, format: mrs, interval: 86400}
-BehaviorDY: &BehaviorDY {type: http, behavior: domain, format: yaml, interval: 86400}
-BehaviorIP: &BehaviorIP {type: http, behavior: ipcidr, format: mrs, interval: 86400}
-ClassicalYaml: &ClassicalYaml {type: http, behavior: classical, interval: 3600, format: yaml, proxy: DIRECT}
-BehaviorCL: &BehaviorCL {type: http, behavior: classical, interval: 86400, format: yaml, proxy: DIRECT}   # 经典规则集（blackmatrix7 等，DOMAIN/DOMAIN-SUFFIX/DOMAIN-KEYWORD/PROCESS-NAME）
-
-# 规则提供者（仅保留常用）
-rule-providers:
-  # 广告
-  Tracking:       {<<: *BehaviorDN, url: https://github.com/666OS/rules/raw/release/mihomo/domain/Tracking.mrs}
-  Advertising:    {<<: *BehaviorDN, url: https://github.com/666OS/rules/raw/release/mihomo/domain/Advertising.mrs}
-  AWAvenueAds:    {<<: *BehaviorDY, url: https://raw.githubusercontent.com/TG-Twilight/AWAvenue-Ads-Rule/main/Filters/AWAvenue-Ads-Rule-Clash.yaml}
-  # 直连 / 国内
-  Direct:         {<<: *BehaviorDN, url: https://github.com/666OS/rules/raw/release/mihomo/domain/Direct.mrs}
-  Private:        {<<: *BehaviorDN, url: https://github.com/666OS/rules/raw/release/mihomo/domain/Private.mrs}
-  Download:       {<<: *BehaviorDN, url: https://github.com/666OS/rules/raw/release/mihomo/domain/Download.mrs}
-  AppleCN:        {<<: *BehaviorDN, url: https://github.com/666OS/rules/raw/release/mihomo/domain/AppleCN.mrs}
-  China:          {<<: *BehaviorCL, url: https://cdn.jsdelivr.net/gh/blackmatrix7/ios_rule_script@master/rule/Clash/ChinaMaxNoIP/ChinaMaxNoIP_No_Resolve.yaml}   # 大陆直连全量：ChinaMaxNoIP（11万+ 域名，含大陆可达国际服务），每日更新
-  # 常用国外服务
-  AI:             {<<: *BehaviorDN, url: https://github.com/666OS/rules/raw/release/mihomo/domain/AI.mrs}
-  Telegram:       {<<: *BehaviorDN, url: https://github.com/666OS/rules/raw/release/mihomo/domain/Telegram.mrs}
-  Twitter:        {<<: *BehaviorDN, url: https://github.com/666OS/rules/raw/release/mihomo/domain/Twitter.mrs}
-  SocialMedia:    {<<: *BehaviorDN, url: https://github.com/666OS/rules/raw/release/mihomo/domain/SocialMedia.mrs}
-  Netflix:        {<<: *BehaviorDN, url: https://github.com/666OS/rules/raw/release/mihomo/domain/Netflix.mrs}
-  YouTube:        {<<: *BehaviorDN, url: https://github.com/666OS/rules/raw/release/mihomo/domain/YouTube.mrs}
-  Google:         {<<: *BehaviorDN, url: https://github.com/666OS/rules/raw/release/mihomo/domain/Google.mrs}
-  Microsoft:      {<<: *BehaviorCL, url: https://cdn.jsdelivr.net/gh/blackmatrix7/ios_rule_script@master/rule/Clash/Microsoft/Microsoft.yaml}   # 微软全家桶全量：blackmatrix7（Office/OneDrive/Xbox/Teams/Skype/Bing/Azure 等）
-  Proxy:          {<<: *BehaviorDN, url: https://github.com/666OS/rules/raw/release/mihomo/domain/Proxy.mrs}
-  # 媒体（DustinWin）
-  Spotify:        {<<: *BehaviorDN, url: https://github.com/DustinWin/ruleset_geodata/releases/download/mihomo-ruleset/spotify.mrs}
-  TikTok:         {<<: *BehaviorDN, url: https://github.com/DustinWin/ruleset_geodata/releases/download/mihomo-ruleset/tiktok.mrs}
-  disney:         {<<: *BehaviorDN, url: https://github.com/DustinWin/ruleset_geodata/releases/download/mihomo-ruleset/disney.mrs}
-  # GitHub
-  github:          {<<: *ClassicalYaml, url: https://rule.kelee.one/Clash/GitHub.yaml}
-  # IP规则
-  PrivateIP:      {<<: *BehaviorIP, url: https://github.com/666OS/rules/raw/release/mihomo/ip/Private.mrs}
-  TelegramIP:     {<<: *BehaviorIP, url: https://github.com/666OS/rules/raw/release/mihomo/ip/Telegram.mrs}
-  ProxyIP:        {<<: *BehaviorIP, url: https://github.com/666OS/rules/raw/release/mihomo/ip/Proxy.mrs}
-  ChinaIP:        {<<: *BehaviorIP, url: https://github.com/666OS/rules/raw/release/mihomo/ip/China.mrs}
-
-# ==================== EOF ====================
-
-`;
-
-
 // ---------------------------------------------------------------------------
 // 常量
 // ---------------------------------------------------------------------------
@@ -3212,7 +2885,7 @@ function clashProxyYaml(p) {
   }
   return L.join('\n');
 }
-function generateClash(cfg, nodes) {
+function generateClash(cfg, nodes, clashTemplate) {
   const host = cfg.host;
   const path = '/' + cfg.path;
   // TLS 下 ws 路径携带 ed=2048：mihomo 据此启用 early data（首包预发进 Sec-WebSocket-Protocol，省 1 个 RTT）
@@ -3268,7 +2941,7 @@ function generateClash(cfg, nodes) {
   proxies.sort((a, b) => (a.port === 443 ? 0 : 1) - (b.port === 443 ? 0 : 1));
   // 模板中的本地凭据按 UUID 派生（同一部署每次订阅结果稳定，不同部署互不相同），避免所有人共用公开的默认密码
   const derive = (purpose) => sha224hex('hopline-clash|' + purpose + '|' + cfg.uuid).slice(0, 20);
-  const template = CLASH_TEMPLATE
+  const template = clashTemplate
     .split('__HOPLINE_SS_PASSWORD__').join(derive('ss'))
     .split('__HOPLINE_AUTH_PASSWORD__').join(derive('auth'))
     .split('__HOPLINE_API_SECRET__').join(derive('api'));
@@ -3521,7 +3194,7 @@ final, 🐟 漏网之鱼
 const NODE_CAP = 500;
 
 // 根据 UA 或指定格式生成订阅
-async function generateSubscription(cfg, requestUrl, format, ua) {
+async function generateSubscription(env, cfg, requestUrl, format, ua) {
   // 明文端口节点只由「仅 TLS 端口」控制（默认开启）；ECH 只对 TLS 生效，开启时同样只下发 TLS 端口节点。
   // 自定义域名的明文端口需在 Cloudflare 关闭「始终使用 HTTPS」，否则被 301 重定向、WebSocket 握手失败
   const rc = Object.assign({}, cfg, { host: cfg.host || new URL(requestUrl).hostname });
@@ -3600,7 +3273,7 @@ async function generateSubscription(cfg, requestUrl, format, ua) {
   if (nodes.length > cap) nodes.length = cap;
   nodes = uniqueNodeNames(nodes);
   let type, body;
-  if (forced === 'clash' || forced === 'stash') { type = 'text/yaml'; body = generateClash(rc, nodes); }   // Stash 使用 Clash 格式（与按 UA 识别一致）
+  if (forced === 'clash' || forced === 'stash') { type = 'text/yaml'; body = generateClash(rc, nodes, await requireClashTemplate(env)); }   // Stash 使用 Clash 格式（与按 UA 识别一致）
   else if (forced === 'singbox' || forced === 'sing-box') { type = 'application/json'; body = generateSingbox(rc, nodes); }
   else if (forced === 'surge') { type = 'text/plain'; body = generateSurge(rc, nodes); }
   else if (forced === 'surfboard') { type = 'text/plain'; body = generateSurfboard(rc, nodes); }
@@ -3613,7 +3286,7 @@ async function generateSubscription(cfg, requestUrl, format, ua) {
     type = 'text/plain'; body = nodes.join('\n');
   }
   // UA 自动识别
-  else if (ua.includes('clash') || ua.includes('stash')) { type = 'text/yaml'; body = generateClash(rc, nodes); }
+  else if (ua.includes('clash') || ua.includes('stash')) { type = 'text/yaml'; body = generateClash(rc, nodes, await requireClashTemplate(env)); }
   else if (ua.includes('sing-box')) { type = 'application/json'; body = generateSingbox(rc, nodes); }
   else if (ua.includes('surge')) { type = 'text/plain'; body = generateSurge(rc, nodes); }
   else if (ua.includes('surfboard')) { type = 'text/plain'; body = generateSurfboard(rc, nodes); }
@@ -3700,36 +3373,39 @@ button:disabled{opacity:.6;cursor:not-allowed}
 `;
 
 // ---------------------------------------------------------------------------
-// 面板页面加载：面板 HTML（约 90KB）不内嵌在 Worker 里，而是由 Worker 按版本标签从 GitHub 拉取，
-// 校验 SHA-256 后缓存，再注入字段表等运行时数据发给浏览器。
+// 固定版本资源加载：体积较大的静态内容不内嵌在 Worker 里，而是由 Worker 按版本标签从 GitHub 拉取，
+// 校验 SHA-256 后缓存。目前有两个资源：
+//   - 面板页面 dist/panel.html（约 90KB）：校验后再注入字段表等运行时数据发给浏览器
+//   - Clash 配置模板 dist/clash-template.yaml（约 15KB）：生成 Clash / Stash 订阅时拼在节点后面
+// 特点：
 //   - 浏览器始终只访问 Worker 自己的域名（无需访问第三方 CDN，CSP 也无需放行），路径伪装与登录鉴权不变
-//   - 拉取发生在 Cloudflare 边缘，不受用户所在地区对 jsDelivr / GitHub 访问限制的影响
+//   - 拉取发生在边缘，不受用户所在地区对 jsDelivr / GitHub 访问限制的影响
 //   - 缓存键就是内容的 SHA-256：升级版本后哈希变了，自然落到新键重新拉取，旧条目无需清理，由 TTL 自行过期
-//   - 来源固定为不可变的版本标签 v<VERSION>（构建时把 dist/panel.html 的哈希写进 Worker），永不拉取 main / latest
+//   - 来源固定为不可变的版本标签 v<VERSION>（构建时把各文件的哈希写进 Worker），永不拉取 main / latest
 // 读取顺序：isolate 内存 → Cache API（同机房共享）→ KV（已绑定时，全球共享）→ 网络（三个镜像并发，先到先用）
-// 面板拉不到时只有面板不可用（返回 503 说明页），代理与订阅完全不受影响
+// 拉不到时只影响用到它的功能：面板返回 503 说明页，Clash / Stash 订阅返回 503；其它订阅格式与代理完全不受影响
 // ---------------------------------------------------------------------------
-const PANEL_SHA256 = '1e4ae0ea883b5914bb43c61ae4451126da1b91884da07c2d404922b761efa671';
-const PANEL_ASSET_PATH = '/dist/panel.html';
-const PANEL_MAX_BYTES = 1024 * 1024;
-const PANEL_FETCH_TIMEOUT = 6000;
-const PANEL_RETRY_AFTER = 15000;                  // 全部来源失败后 15 秒内不再重试，避免面板打不开时每个请求都去打镜像
-const PANEL_CACHE_TTL = 30 * 86400;
-const PANEL_CACHE_KEY = 'https://hopline.invalid/panel/' + PANEL_SHA256;
-const PANEL_KV_KEY = 'panel:' + PANEL_SHA256;
+const ASSET_MAX_BYTES = 1024 * 1024;
+const ASSET_FETCH_TIMEOUT = 6000;
+const ASSET_RETRY_AFTER = 15000;                  // 全部来源失败后 15 秒内不再重试，避免打不开时每个请求都去打镜像
+const ASSET_CACHE_TTL = 30 * 86400;
 
-let PANEL_TEXT = null;       // 已校验的面板模板（每个 isolate 只加载一次）
-let PANEL_LOADING = null;    // 进行中的加载（并发请求共用）
-let PANEL_FAILED_AT = 0;
+function pinnedAsset(name, path, sha256) {
+  return { name, path, sha256, text: null, loading: null, failedAt: 0 };   // text：已校验的内容（每个 isolate 只加载一次）；loading：进行中的加载（并发请求共用）
+}
+const PANEL_ASSET = pinnedAsset('panel', '/dist/panel.html', '1e4ae0ea883b5914bb43c61ae4451126da1b91884da07c2d404922b761efa671');
+const CLASH_ASSET = pinnedAsset('clash', '/dist/clash-template.yaml', 'd838e14ef6be7bb3644e314fa5e085539d1ff307e40b08f44271bbd7cc7634fa');
 
-function panelSources() {
+function assetSources(a) {
   const tag = 'v' + VERSION;
   return [
-    'https://cdn.jsdelivr.net/gh/' + UPDATE_REPO + '@' + tag + PANEL_ASSET_PATH,
-    'https://fastly.jsdelivr.net/gh/' + UPDATE_REPO + '@' + tag + PANEL_ASSET_PATH,
-    'https://raw.githubusercontent.com/' + UPDATE_REPO + '/' + tag + PANEL_ASSET_PATH,
+    'https://cdn.jsdelivr.net/gh/' + UPDATE_REPO + '@' + tag + a.path,
+    'https://fastly.jsdelivr.net/gh/' + UPDATE_REPO + '@' + tag + a.path,
+    'https://raw.githubusercontent.com/' + UPDATE_REPO + '/' + tag + a.path,
   ];
 }
+const assetCacheKey = (a) => 'https://hopline.invalid/' + a.name + '/' + a.sha256;
+const assetKvKey = (a) => a.name + ':' + a.sha256;
 
 async function sha256Hex(buf) {
   const d = new Uint8Array(await crypto.subtle.digest('SHA-256', buf));
@@ -3738,86 +3414,95 @@ async function sha256Hex(buf) {
   return s;
 }
 // 字节 → 文本：大小超限或哈希不符一律视为无效（缓存损坏 / 镜像被篡改 / 标签内容不对）
-async function verifiedPanelText(buf) {
-  if (!buf || buf.byteLength > PANEL_MAX_BYTES) return null;
-  if ((await sha256Hex(buf)) !== PANEL_SHA256) return null;
+async function verifiedAssetText(a, buf) {
+  if (!buf || buf.byteLength > ASSET_MAX_BYTES) return null;
+  if ((await sha256Hex(buf)) !== a.sha256) return null;
   return new TextDecoder().decode(buf);
 }
 
-async function panelFromNetwork() {
+async function assetFromNetwork(a) {
   const ac = new AbortController();
   const one = async (url) => {
     const res = await fetch(url, { signal: ac.signal, headers: { 'User-Agent': 'Mozilla/5.0 (Hopline)' } });
     if (!res.ok) throw new Error('HTTP ' + res.status);
-    const text = await verifiedPanelText(await res.arrayBuffer());
+    const text = await verifiedAssetText(a, await res.arrayBuffer());
     if (!text) throw new Error('hash mismatch');
     return text;
   };
-  const timer = setTimeout(() => ac.abort(), PANEL_FETCH_TIMEOUT);
-  try { return await Promise.any(panelSources().map(one)); }
+  const timer = setTimeout(() => ac.abort(), ASSET_FETCH_TIMEOUT);
+  try { return await Promise.any(assetSources(a).map(one)); }
   catch (e) { return null; }
   finally { clearTimeout(timer); ac.abort(); }   // 先到的一路成功后，取消其余仍在进行的请求
 }
 
-function panelCache() {
+function assetCache() {
   try { return (typeof caches !== 'undefined' && caches.default) || null; } catch (e) { return null; }
 }
-async function panelFromCache() {
-  const c = panelCache();
+async function assetFromCache(a) {
+  const c = assetCache();
   if (!c) return null;
   try {
-    const res = await c.match(PANEL_CACHE_KEY);
-    return res ? await verifiedPanelText(await res.arrayBuffer()) : null;
+    const res = await c.match(assetCacheKey(a));
+    return res ? await verifiedAssetText(a, await res.arrayBuffer()) : null;
   } catch (e) { return null; }
 }
-async function panelToCache(text) {
-  const c = panelCache();
+async function assetToCache(a, text) {
+  const c = assetCache();
   if (!c) return;
   try {
-    await c.put(PANEL_CACHE_KEY, new Response(text, { headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'public, max-age=' + PANEL_CACHE_TTL } }));
+    await c.put(assetCacheKey(a), new Response(text, { headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'public, max-age=' + ASSET_CACHE_TTL } }));
   } catch (e) {}
 }
-async function panelFromKv(env) {
+async function assetFromKv(env, a) {
   const kv = kvStore(env);
   if (!kv || typeof kv.get !== 'function') return null;
   try {
-    const v = await kv.get(PANEL_KV_KEY);
-    return v ? await verifiedPanelText(new TextEncoder().encode(v)) : null;
+    const v = await kv.get(assetKvKey(a));
+    return v ? await verifiedAssetText(a, new TextEncoder().encode(v)) : null;
   } catch (e) { return null; }
 }
-async function panelToKv(env, text) {
+async function assetToKv(env, a, text) {
   const kv = kvStore(env);
   if (!kv || typeof kv.put !== 'function') return;
-  try { await kv.put(PANEL_KV_KEY, text, { expirationTtl: PANEL_CACHE_TTL }); } catch (e) {}
+  try { await kv.put(assetKvKey(a), text, { expirationTtl: ASSET_CACHE_TTL }); } catch (e) {}
 }
 
-async function fetchPanelTemplate(env) {
-  let text = await panelFromCache();
+async function fetchAsset(env, a) {
+  let text = await assetFromCache(a);
   if (text) return text;
-  text = await panelFromKv(env);
-  if (text) { await panelToCache(text); return text; }
-  text = await panelFromNetwork();
-  if (text) { await Promise.all([panelToCache(text), panelToKv(env, text)]); }
+  text = await assetFromKv(env, a);
+  if (text) { await assetToCache(a, text); return text; }
+  text = await assetFromNetwork(a);
+  if (text) { await Promise.all([assetToCache(a, text), assetToKv(env, a, text)]); }
   return text;
 }
 
-// 返回已校验的面板模板文本；拉取失败返回 null（调用方给出 503 说明页）
-async function loadPanelTemplate(env) {
-  if (PANEL_TEXT) return PANEL_TEXT;
-  if (PANEL_LOADING) return PANEL_LOADING;
-  if (Date.now() - PANEL_FAILED_AT < PANEL_RETRY_AFTER) return null;
-  PANEL_LOADING = fetchPanelTemplate(env).then((text) => {
-    if (text) PANEL_TEXT = text; else PANEL_FAILED_AT = Date.now();
+// 返回已校验的资源文本；拉取失败返回 null（调用方给出 503）
+async function loadAsset(env, a) {
+  if (a.text) return a.text;
+  if (a.loading) return a.loading;
+  if (Date.now() - a.failedAt < ASSET_RETRY_AFTER) return null;
+  a.loading = fetchAsset(env, a).then((text) => {
+    if (text) a.text = text; else a.failedAt = Date.now();
     return text;
-  }).finally(() => { PANEL_LOADING = null; });
-  return PANEL_LOADING;
+  }).finally(() => { a.loading = null; });
+  return a.loading;
+}
+
+// Clash 配置模板：拉不到时 Clash / Stash 订阅返回 503（其它格式不受影响）
+async function requireClashTemplate(env) {
+  const tpl = await loadAsset(env, CLASH_ASSET);
+  if (!tpl) {
+    throw Object.assign(new Error('Clash 配置模板暂时无法加载（已尝试 jsDelivr 与 GitHub 的 v' + VERSION + ' 版本），请稍后重试；其它格式的订阅不受影响。若一直如此，请确认仓库已存在版本标签 v' + VERSION + '，且 Worker 所在网络能访问 jsDelivr 或 raw.githubusercontent.com。'), { status: 503 });
+  }
+  return tpl;
 }
 
 // 面板页面：在模板上注入字段表与共用校验函数（每个 isolate 只组装一次）；加载失败返回 null
 let PANEL_PAGE = null;
 async function panelPage(env) {
   if (PANEL_PAGE) return PANEL_PAGE;
-  const tpl = await loadPanelTemplate(env);
+  const tpl = await loadAsset(env, PANEL_ASSET);
   if (!tpl) return null;
   PANEL_PAGE = tpl
     .replace('/*@HOPLINE_SCHEMA@*/null', () => JSON.stringify(clientSchema()).replace(/</g, '\\u003c'))
@@ -3988,7 +3673,7 @@ function formatConfigErrors(errors) {
 // 生成订阅：/sub 与面板预览共用同一流程，保证预览与客户端实际拿到的一致
 async function serveSubscription(request, env, cfg, fmt) {
   const UA = request.headers.get('User-Agent') || '';
-  return generateSubscription(Object.assign({}, cfg), request.url, fmt, UA);
+  return generateSubscription(env, Object.assign({}, cfg), request.url, fmt, UA);
 }
 
 // 必填环境变量检查：返回说明文字（有问题时），否则空串。PATH 必填；ADMIN 必填（缺失时面板与管理接口禁用，见面板入口处的提示）；
@@ -4103,7 +3788,8 @@ async function handleRequest(request, env, state) {
       const sub = await serveSubscription(request, env, cfg, fmt);
       return new Response(sub.body, { status: 200, headers: { 'Content-Type': sub.type + '; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Disposition': 'attachment; filename="Hopline"; filename*=utf-8\'\'Hopline' } });
     } catch (e) {
-      return new Response('订阅生成失败: ' + (e && e.message || e), { status: 500, headers: { 'Content-Type': 'text/plain; charset=utf-8' } });
+      const status = (e && e.status) || 500;
+      return new Response('订阅生成失败: ' + (e && e.message || e), { status, headers: status === 503 ? { 'Content-Type': 'text/plain; charset=utf-8', 'Retry-After': '15' } : { 'Content-Type': 'text/plain; charset=utf-8' } });
     }
   }
 
@@ -4235,7 +3921,7 @@ async function handleRequest(request, env, state) {
       try {
         const sub = await serveSubscription(request, env, cfg, fmt);
         return json({ ok: true, type: sub.type, body: sub.body, count: sub.count });
-      } catch (e) { return json({ ok: false, msg: '订阅生成失败: ' + (e.message || e) }, 500); }
+      } catch (e) { return json({ ok: false, msg: '订阅生成失败: ' + (e.message || e) }, (e && e.status) || 500); }
     }
 
     return json({ ok: false, msg: '未知 API: ' + apiName }, 404);

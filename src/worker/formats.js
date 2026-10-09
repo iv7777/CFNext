@@ -51,7 +51,7 @@ function clashProxyYaml(p) {
   }
   return L.join('\n');
 }
-function generateClash(cfg, nodes) {
+function generateClash(cfg, nodes, clashTemplate) {
   const host = cfg.host;
   const path = '/' + cfg.path;
   // TLS 下 ws 路径携带 ed=2048：mihomo 据此启用 early data（首包预发进 Sec-WebSocket-Protocol，省 1 个 RTT）
@@ -107,7 +107,7 @@ function generateClash(cfg, nodes) {
   proxies.sort((a, b) => (a.port === 443 ? 0 : 1) - (b.port === 443 ? 0 : 1));
   // 模板中的本地凭据按 UUID 派生（同一部署每次订阅结果稳定，不同部署互不相同），避免所有人共用公开的默认密码
   const derive = (purpose) => sha224hex('hopline-clash|' + purpose + '|' + cfg.uuid).slice(0, 20);
-  const template = CLASH_TEMPLATE
+  const template = clashTemplate
     .split('__HOPLINE_SS_PASSWORD__').join(derive('ss'))
     .split('__HOPLINE_AUTH_PASSWORD__').join(derive('auth'))
     .split('__HOPLINE_API_SECRET__').join(derive('api'));

@@ -1,15 +1,17 @@
 #!/usr/bin/env node
 // 构建脚本：把 src/ 下的源文件合并为可直接粘贴部署的单文件 Hopline.js
 //
-//   node build.mjs          生成 Hopline.js 与 dist/panel.html
-//   node build.mjs --check  仅校验 Hopline.js、dist/panel.html 是否与 src/ 同步（CI 使用，不同步时退出码 1）
+//   node build.mjs          生成 Hopline.js、dist/panel.html 与 dist/clash-template.yaml
+//   node build.mjs --check  仅校验这三个产物是否与 src/ 同步（CI 使用，不同步时退出码 1）
 //
 // 处理流程：
 //   1. 合并 src/worker.js 中的  // @include worker/xxx.js  （保持模块级顺序，保留注释与原始名称）
 //   2. 把登录页内联进 worker；面板 HTML / CSS / JS 合并成 dist/panel.html（按语言各自去掉注释，保留 @HOPLINE_ 占位注释），
 //      它不再内嵌进 Worker：Worker 运行时按版本标签 v<VERSION> 从 jsDelivr / GitHub 拉取并校验 SHA-256，
 //      该哈希在此处计算并写进 Worker（/* @panel-sha256 */ 占位）
-//   3. 顶部加一行版本横幅 /*!Hopline vX.Y.Z*/，供旧版「检测更新」从远端文件解析版本号
+//   3. Clash 配置模板 src/worker/clash-template.yaml 同样不内嵌：原样复制为 dist/clash-template.yaml，
+//      Worker 运行时按版本标签拉取并校验 SHA-256（/* @clash-sha256 */ 占位）
+//   4. 顶部加一行版本横幅 /*!Hopline vX.Y.Z*/，供旧版「检测更新」从远端文件解析版本号
 //
 // Hopline.js 不再经 terser 压缩/重命名：内容即 src/ 原样拼接（如需混淆发布，见 obfuscate.mjs）。
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
@@ -21,6 +23,8 @@ const ROOT = dirname(fileURLToPath(import.meta.url));
 const SRC = join(ROOT, 'src');
 const OUT = join(ROOT, 'Hopline.js');
 const PANEL_OUT = join(ROOT, 'dist', 'panel.html');   // 面板页面成品：按版本标签发布，由 Worker 运行时拉取
+const CLASH_SRC = join(SRC, 'worker', 'clash-template.yaml');
+const CLASH_OUT = join(ROOT, 'dist', 'clash-template.yaml');   // Clash 配置模板成品：同上
 const KEEP_COMMENT = /@HOPLINE_/;          // 内联面板代码时唯一保留的注释（运行时占位符）
 
 function read(path) {
@@ -114,9 +118,12 @@ export function assemblePanel() {
   const text = loadPanel(join(SRC, 'panel/panel.html'));
   return text.endsWith('\n') ? text : text + '\n';
 }
-export function panelSha256(text = assemblePanel()) {
-  return createHash('sha256').update(text, 'utf8').digest('hex');
-}
+const sha256Of = (text) => createHash('sha256').update(text, 'utf8').digest('hex');
+export function panelSha256(text = assemblePanel()) { return sha256Of(text); }
+
+// Clash 配置模板成品（原样复制；Worker 校验的就是这份内容的 SHA-256）
+export function assembleClash() { return read(CLASH_SRC); }
+export function clashSha256(text = assembleClash()) { return sha256Of(text); }
 
 // 合并出完整源码（含 worker 注释、登录页已去注释、保留 import / export）。这也是 Hopline.js 的内容。
 // 测试用它取内部纯函数（这些函数不对外导出，无法直接 import，需借 Function() 在作用域内求值取出）。
@@ -125,13 +132,14 @@ export function assemble() {
   const worker = expandWorker(read(entry), entry);
   const out = worker
     .replace(/\/\*\s*@panel-sha256\s*\*\/\s*''/g, () => `'${panelSha256()}'`)
+    .replace(/\/\*\s*@clash-sha256\s*\*\/\s*''/g, () => `'${clashSha256()}'`)
     .replace(/\/\*\s*@inline\s+(\S+)\s*\*\/\s*''/g, (_, name) => {
       const text = loadPanel(join(SRC, name));
       if (text.includes('`')) throw new Error(`${name}: 内联内容不能包含反引号 \``);
       if (text.includes('${')) throw new Error(`${name}: 内联内容不能包含 \${`);
       return 'String.raw`\n' + text + '`';
     });
-  if (/@inline|@panel-sha256/.test(out.replace(/\/\/.*$/gm, ''))) throw new Error('存在未处理的 @inline / @panel-sha256 标记');
+  if (/@inline|@panel-sha256|@clash-sha256/.test(out.replace(/\/\/.*$/gm, ''))) throw new Error('存在未处理的 @inline / @panel-sha256 / @clash-sha256 标记');
   return out;
 }
 
@@ -152,19 +160,18 @@ export function build() {
 const isMain = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];
 if (isMain) {
   const code = build();
-  const panel = assemblePanel();
+  const outputs = [[PANEL_OUT, assemblePanel()], [CLASH_OUT, assembleClash()]];
   if (process.argv.includes('--check')) {
-    const cur = existsSync(OUT) ? readFileSync(OUT, 'utf8') : '';
-    const curPanel = existsSync(PANEL_OUT) ? readFileSync(PANEL_OUT, 'utf8') : '';
-    if (cur !== code || curPanel !== panel) {
-      console.error('Hopline.js / dist/panel.html 与 src/ 不同步：请运行 `node build.mjs` 并提交生成结果。');
+    const stale = [OUT, ...outputs.map(([f]) => f)].filter((f, i) => (existsSync(f) ? readFileSync(f, 'utf8') : '') !== (i === 0 ? code : outputs[i - 1][1]));
+    if (stale.length) {
+      console.error('Hopline.js / dist/ 下的构建产物与 src/ 不同步：请运行 `node build.mjs` 并提交生成结果。不同步的文件：' + stale.map(f => f.slice(ROOT.length + 1)).join('、'));
       process.exit(1);
     }
-    console.log('Hopline.js 与 dist/panel.html 同步。');
+    console.log('Hopline.js、dist/panel.html 与 dist/clash-template.yaml 同步。');
   } else {
     writeFileSync(OUT, code);
     mkdirSync(dirname(PANEL_OUT), { recursive: true });
-    writeFileSync(PANEL_OUT, panel);
-    console.log(`已生成 Hopline.js（${code.length} 字符）与 dist/panel.html（${panel.length} 字符，sha256 ${panelSha256(panel).slice(0, 12)}…）`);
+    for (const [f, text] of outputs) writeFileSync(f, text);
+    console.log(`已生成 Hopline.js（${code.length} 字符）、dist/panel.html（${outputs[0][1].length} 字符，sha256 ${sha256Of(outputs[0][1]).slice(0, 12)}…）与 dist/clash-template.yaml（${outputs[1][1].length} 字符，sha256 ${sha256Of(outputs[1][1]).slice(0, 12)}…）`);
   }
 }

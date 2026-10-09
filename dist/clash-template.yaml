@@ -1,4 +1,4 @@
-const CLASH_TEMPLATE = `
+
 # ==================== 锚点配置 ====================
 # 代理提供者模板 - 订阅源基础配置
 
@@ -321,7 +321,4 @@ rule-providers:
   ChinaIP:        {<<: *BehaviorIP, url: https://github.com/666OS/rules/raw/release/mihomo/ip/China.mrs}
 
 # ==================== EOF ====================
-
-`;
-
 
