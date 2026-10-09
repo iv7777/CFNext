@@ -1,31 +1,26 @@
 #!/usr/bin/env node
-// 构建脚本：把 src/ 下的源文件合并、压缩为可直接粘贴部署的单文件 Hopline.js
+// 构建脚本：把 src/ 下的源文件合并为可直接粘贴部署的单文件 Hopline.js
 //
 //   node build.mjs          生成 Hopline.js 与 dist/panel.html
 //   node build.mjs --check  仅校验 Hopline.js、dist/panel.html 是否与 src/ 同步（CI 使用，不同步时退出码 1）
 //
 // 处理流程：
-//   1. 合并 src/worker.js 中的  // @include worker/xxx.js  （保持模块级顺序）
+//   1. 合并 src/worker.js 中的  // @include worker/xxx.js  （保持模块级顺序，保留注释与原始名称）
 //   2. 把登录页内联进 worker；面板 HTML / CSS / JS 合并成 dist/panel.html（按语言各自去掉注释，保留 @HOPLINE_ 占位注释），
 //      它不再内嵌进 Worker：Worker 运行时按版本标签 v<VERSION> 从 jsDelivr / GitHub 拉取并校验 SHA-256，
 //      该哈希在此处计算并写进 Worker（/* @panel-sha256 */ 占位）
-//   3. 用 terser 压缩合并后的 worker 代码：精简并重命名所有顶层与局部名称、删除全部注释；
-//      面板代码位于 String.raw 模板字符串内，terser 不会改动其内容（注释已在第 2 步去除）
-//   4. 顶部保留一行版本横幅 /*!Hopline vX.Y.Z*/，供旧版「检测更新」从远端文件解析版本号
+//   3. 顶部加一行版本横幅 /*!Hopline vX.Y.Z*/，供旧版「检测更新」从远端文件解析版本号
 //
-// terser 通过 npx 调用（与 `npm run lint` 使用 eslint 的方式一致），版本固定以保证 --check 可复现。
-import { readFileSync, writeFileSync, existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+// Hopline.js 不再经 terser 压缩/重命名：内容即 src/ 原样拼接（如需混淆发布，见 obfuscate.mjs）。
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { tmpdir } from 'node:os';
-import { execFileSync } from 'node:child_process';
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const SRC = join(ROOT, 'src');
 const OUT = join(ROOT, 'Hopline.js');
 const PANEL_OUT = join(ROOT, 'dist', 'panel.html');   // 面板页面成品：按版本标签发布，由 Worker 运行时拉取
-const TERSER = 'terser@5.51.2';            // 固定版本：保证不同机器 / CI 产出一致
 const KEEP_COMMENT = /@HOPLINE_/;          // 内联面板代码时唯一保留的注释（运行时占位符）
 
 function read(path) {
@@ -103,7 +98,7 @@ function loadPanel(file) {
   });
 }
 
-// --- worker：按出现顺序拼接 // @include worker/xxx.js（保留注释，terser 稍后统一去除） -------
+// --- worker：按出现顺序拼接 // @include worker/xxx.js（保留注释与原始名称） -------
 function expandWorker(text, file) {
   const dir = dirname(file);
   return text.replace(/^\/\/ @include[ \t]+(\S+)[ \t]*\n/gm, (_, name) => {
@@ -123,8 +118,8 @@ export function panelSha256(text = assemblePanel()) {
   return createHash('sha256').update(text, 'utf8').digest('hex');
 }
 
-// 合并出未压缩的完整源码（含 worker 注释、登录页已去注释、保留 import / export）。
-// 测试用它取内部纯函数（压缩产物里名称已被重命名，无法按名取用）。
+// 合并出完整源码（含 worker 注释、登录页已去注释、保留 import / export）。这也是 Hopline.js 的内容。
+// 测试用它取内部纯函数（这些函数不对外导出，无法直接 import，需借 Function() 在作用域内求值取出）。
 export function assemble() {
   const entry = join(SRC, 'worker.js');
   const worker = expandWorker(read(entry), entry);
@@ -146,27 +141,11 @@ function versionOf(src) {
   return m[1];
 }
 
-function runTerser(code, opts) {
-  const dir = mkdtempSync(join(tmpdir(), 'hopline-'));
-  try {
-    const inp = join(dir, 'in.js'), cfg = join(dir, 'opts.json');
-    writeFileSync(inp, code);
-    writeFileSync(cfg, JSON.stringify(opts));
-    return execFileSync('npx', ['--yes', TERSER, inp, '--config-file', cfg],
-      { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
-  } finally { rmSync(dir, { recursive: true, force: true }); }
-}
-
-// 生成压缩后的部署文件（CRLF，与仓库历史一致）
+// 生成部署文件（CRLF，与仓库历史一致）：src/ 原样拼接，只加版本横幅，不做压缩/重命名
 export function build() {
   const src = assemble();
   const version = versionOf(src);
-  const code = runTerser(src, {
-    module: true,
-    compress: { passes: 2 },
-    mangle: { toplevel: true },
-    format: { comments: false, preamble: `/*!Hopline v${version}*/` },
-  }).replace(/\n+$/, '');
+  const code = `/*!Hopline v${version}*/\n${src}`.replace(/\n+$/, '');
   return (code + '\n').replace(/\n/g, '\r\n');
 }
 

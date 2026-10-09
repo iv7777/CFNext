@@ -4,14 +4,14 @@
 //   node obfuscate.mjs [light|medium|heavy]   生成 obf_Hopline.js（默认 medium，也可用环境变量 OBFUSCATION_LEVEL 指定）
 //
 // 说明：
-//   - Hopline.js 本身已经过 terser 压缩（变量重命名、去注释），这一步在其之上叠加字符串数组加密 /
-//     控制流平坦化 / 死代码注入等，让代码更难被人工读懂，但不是用来防止运行时逆向的强保证。
+//   - Hopline.js 现为 src/ 原样拼接（不再经 terser 压缩/重命名），这一步在其之上做变量重命名、
+//     字符串数组加密 / 控制流平坦化 / 死代码注入等，让代码更难被人工读懂，但不是防止运行时逆向的强保证。
 //   - target 固定为 service-worker，selfDefending / debugProtection 固定关闭：
 //     这两个特性依赖 `Function(...)` 构造动态代码来获取全局对象引用或反调试，
 //     Cloudflare Workers 运行时默认禁止动态生成代码执行，开启会导致部署后直接报错或请求失败。
-//   - 混淆强度越高，产物体积和每次请求的 CPU 耗时都会上升（heavy 挡下 Hopline.js 体积约为原来的 6 倍），
+//   - 混淆强度越高，产物体积和每次请求的 CPU 耗时都会上升（heavy 挡下 obf_Hopline.js 体积约为 Hopline.js 的 2.5 倍），
 //     Workers 对每次请求有 CPU 时间限制，heavy 挡请谨慎用于生产，先实测再上线。
-//   - 通过 npx 调用（与 build.mjs 调用 terser 的方式一致），版本固定以保证 --check 可复现。
+//   - 通过 npx 调用（与 `npm run lint` 使用 eslint 的方式一致），版本固定以保证可复现。
 import { readFileSync, writeFileSync, existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';

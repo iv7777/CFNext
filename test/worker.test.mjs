@@ -410,8 +410,9 @@ test('面板页面注入字段表与共用校验函数', async () => {
   const schema = JSON.parse(schemaJson[1]);
   assert.ok(schema.some(d => d.key === 'uid' && d.el === 'a-uuid'));
   assert.ok(schema.every(d => !('check' in d)), '仅服务端属性不下发');
-  // 注入的校验函数可在页面独立执行（不依赖外部变量）；注入内容为单行（terser 压缩），独占一行以 ; 结尾
-  const src = html.match(/^var sharedCheck = (\(function[\s\S]+?\));\s*$/m);
+  // 注入的校验函数可在页面独立执行（不依赖外部变量）；用下一条语句（var SCHEMA_BY_KEY = {};）定位结尾，
+  // 不假设函数源码是单行（Hopline.js 不再经 terser 压缩，toString() 下来的是原始多行格式）
+  const src = html.match(/var sharedCheck = ([\s\S]+?);\nvar SCHEMA_BY_KEY = \{\};/);
   assert.ok(src, '校验函数已注入');
   const check = new Function('return ' + src[1])();
   assert.deepEqual(check({ type: 'int', min: 1, max: 99 }, '42'), { value: 42 });

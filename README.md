@@ -233,7 +233,7 @@
 | `src/panel/login.html` | 登录页（内嵌进 Worker，不依赖网络） |
 | `src/worker/panel-loader.js` | 面板页面加载器：按版本标签拉取 `dist/panel.html`、校验哈希、分层缓存、注入字段表 |
 | `dist/panel.html` | 构建产物：面板 HTML + CSS + JS 合并去注释后的成品，按版本标签发布，**需提交** |
-| `build.mjs` | 构建脚本：拼接 `src/worker/*.js`、内联登录页（去注释），把面板合并为 `dist/panel.html` 并把它的 SHA-256 写进 worker，再用 terser 压缩 worker 代码（精简并重命名所有名称、删除注释），输出 `Hopline.js`；terser 通过 npx 获取（与 eslint 一致，仓库本身仍无依赖） |
+| `build.mjs` | 构建脚本：拼接 `src/worker/*.js`、内联登录页（去注释），把面板合并为 `dist/panel.html` 并把它的 SHA-256 写进 worker，顶部加版本横幅后原样输出为 `Hopline.js`（不压缩、不重命名；如需混淆发布见下面的 `obfuscate.mjs`） |
 | `eslint.config.mjs` | 静态检查配置（`npm run lint`） |
 | `test/` | `node:test` 测试（模拟 KV 与 Workers 运行时，无需安装依赖） |
 | `.github/workflows/ci.yml` | 每次推送运行：`Hopline.js` / `dist/panel.html` 与 `src/` 同步检查 → 语法检查 → lint → 测试 |
@@ -242,7 +242,7 @@
 | `.github/workflows/obfuscate.yml` | 推送到 `main` 且 `Hopline.js` 有变化时自动重新生成并提交 `obf_Hopline.js`（默认 medium 档）；也可手动触发并选择强度 |
 
 ```bash
-node build.mjs          # 修改 src/ 后重新生成 Hopline.js（需 Node.js 20.6+，CI 使用 22；首次会通过 npx 拉取 terser）
+node build.mjs          # 修改 src/ 后重新生成 Hopline.js（需 Node.js 20.6+，CI 使用 22）
 npm test                # 校验 Hopline.js 与 src/ 同步，并运行测试
 npm run lint            # eslint 静态检查（通过 npx 获取，仓库本身仍无依赖）
 ```
