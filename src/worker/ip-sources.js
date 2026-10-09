@@ -15,7 +15,7 @@ function decodeUtf8OrGbk(buf) {
   return new TextDecoder().decode(bytes);
 }
 
-// 订阅时自动拉取最新优选 IP：HostMonit 优选 API（按移动 / 联通 / 电信分线路实测的边缘 IP），10 分钟缓存。
+// 订阅时自动拉取最新优选 IP：HostMonit 优选 API（按移动 / 联通 / 电信分线路实测的 Cloudflare IP），10 分钟缓存。
 // 调用其数据接口（key 为社区项目通用的公开 key，接口失效时由其它来源兜底）。
 // 节点名带运营商（如「移动-01」），面板「运营商偏好」筛选据此生效。失败时沿用上次成功结果，都没有则返回 null
 // 机房内共享缓存（Cache API）：第三方优选来源的结果放进 caches.default，同一机房的所有实例共用，10 分钟内只请求一次（内存缓存则每个新实例 / 冷启动都要重新请求）。Cache API 不可用（本地测试 / 部分域名下 put 不生效）时静默退回内存缓存
@@ -108,7 +108,7 @@ async function hostmonitFetch(maxCount) {
     r.items.push({ ip: g.ip, port: 443, name: g.label + '-' + g.seq });
     if (r.items.length >= maxCount) break;
   }
-  if (!r.items.length) r.error = '响应中没有边缘段 IP';
+  if (!r.items.length) r.error = '响应中没有 Cloudflare 段 IP';
   return r;
 }
 async function fetchLatestPreferredIPs(maxCount) {
@@ -121,7 +121,7 @@ async function fetchLatestPreferredIPs(maxCount) {
   return SUBPREF_CACHE.ips;   // 本次失败：沿用上次成功结果（可能为 null）
 }
 
-// uouin 分线路优选（api.uouin.com）：电信 / 联通 / 移动 / 多线（BGP）/ IPv6 各约 10 个实测边缘 IP。
+// uouin 分线路优选（api.uouin.com）：电信 / 联通 / 移动 / 多线（BGP）/ IPv6 各约 10 个实测 Cloudflare IP。
 // ⚠ 这不是对方的开放 API，而是其网站前端使用的内部接口：签名方式模仿网站前端
 //   key = md5( md5('DdlTxtN0sUOu') + '70cloudflareapikey' + 毫秒时间戳 )，签名错误时对方会提示「请使用开放API」。
 //   对方随时可能更换签名或封禁，失败时静默返回上次结果，由其它来源兜底；面板中默认关闭。
@@ -152,7 +152,7 @@ async function uouinFetch() {
     if (!isCloudflareIP(g.ip)) { r.dropped.push(g.ip); continue; }
     r.items.push({ ip: g.ip, port: 443, name: g.label + '-U' + g.seq });
   }
-  if (!r.items.length && !r.error) r.error = '响应中没有边缘段 IP';
+  if (!r.items.length && !r.error) r.error = '响应中没有 Cloudflare 段 IP';
   return r;
 }
 async function fetchUouinIPs(wantV4, wantV6) {
@@ -182,11 +182,11 @@ async function customApiFetch(url) {
   else if (!r.status) r.error = '请求失败或超时';
   else if (r.status < 200 || r.status >= 300) r.error = 'HTTP ' + r.status;
   for (const x of all) (isValidIp(x.ip) && isCloudflareIP(x.ip) ? r.items : r.dropped).push(isValidIp(x.ip) && isCloudflareIP(x.ip) ? x : x.ip);
-  if (!r.items.length && !r.error) r.error = r.dropped.length ? '解析到的地址都不是边缘段 IP' : '未能从响应中解析出 IP';
+  if (!r.items.length && !r.error) r.error = r.dropped.length ? '解析到的地址都不是 Cloudflare 段 IP' : '未能从响应中解析出 IP';
   return r;
 }
 
-// 微测网（wetest.vip）优选：服务端渲染的公开页面，IPv4 / IPv6 各一页，移动 / 联通 / 电信各 5 个实测边缘 IP，约每 15 分钟更新；
+// 微测网（wetest.vip）优选：服务端渲染的公开页面，IPv4 / IPv6 各一页，移动 / 联通 / 电信各 5 个实测 Cloudflare IP，约每 15 分钟更新；
 // 按线路命名并带来源后缀（IPv4「移动-W01」，IPv6「移动-W6-01」），运营商筛选按线路生效。
 // 页面是 HTML 表格而非开放 API：版式变化时该来源静默失效、由其它来源兜底；10 分钟缓存，且只拉取当前 IP 类型筛选需要的页面
 const WETEST_PAGES = {
@@ -210,7 +210,7 @@ async function wetestPageFetch(fam) {
     if (!isCloudflareIP(g.ip)) { r.dropped.push(g.ip); continue; }
     r.items.push({ ip: g.ip, port: 443, name: g.label + '-' + WETEST_PAGES[fam].tag + g.seq });
   }
-  if (!r.items.length) r.error = '页面中没有边缘段 IP';
+  if (!r.items.length) r.error = '页面中没有 Cloudflare 段 IP';
   return r;
 }
 // 面板「测试」：两页都拉取并合并（不读写缓存）
@@ -235,7 +235,7 @@ async function fetchWetestIPs(wantV4, wantV6) {
   return lists.flat();
 }
 
-// 面板「优选域名 → 测试」：逐个解析域名的 A 记录，看是否落在边缘段。
+// 面板「优选域名 → 测试」：逐个解析域名的 A 记录，看是否落在 Cloudflare 段。
 // 最多测前 PREF_DOMAIN_DOH_LIMIT 个（子请求预算）；返回格式同其它来源，另带 domains 明细
 async function domainsFetch(list) {
   const r = { status: 200, raw: '', items: [], dropped: [], error: '', domains: [] };
@@ -251,8 +251,8 @@ async function domainsFetch(list) {
   }));
   r.domains = rows;
   for (const row of rows) { if (row.ok) r.items.push({ ip: row.ips.find(isCloudflareIP), port: 443, name: row.domain }); else r.dropped.push(row.domain); }
-  r.raw = rows.map(x => x.domain + ' → ' + (x.failed ? '解析失败' : (x.ips.join(', ') || '无 A 记录')) + (x.ok ? '' : '（不在边缘段）')).join('\n');
+  r.raw = rows.map(x => x.domain + ' → ' + (x.failed ? '解析失败' : (x.ips.join(', ') || '无 A 记录')) + (x.ok ? '' : '（不在 Cloudflare 段）')).join('\n');
   if (list.length > names.length) r.raw += '\n… 另有 ' + (list.length - names.length) + ' 个域名未测试（单次最多测 ' + PREF_DOMAIN_DOH_LIMIT + ' 个）';
-  if (!r.items.length) r.error = '没有域名解析到边缘段 IP';
+  if (!r.items.length) r.error = '没有域名解析到 Cloudflare 段 IP';
   return r;
 }

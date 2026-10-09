@@ -2,7 +2,7 @@
   "name": "hopline",
   "private": true,
   "type": "module",
-  "description": "Hopline：Workers / Pages 平台代理订阅面板（src/ 为源码，Hopline.js 为构建产物）",
+  "description": "Hopline：Cloudflare Workers / Pages 代理订阅面板（src/ 为源码，Hopline.js 为构建产物）",
   "scripts": {
     "build": "node build.mjs",
     "obfuscate": "node obfuscate.mjs",

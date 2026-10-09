@@ -216,7 +216,7 @@ function renderStatus(d){
   var wd = !!(d.workersDev) || /\.workers\.dev$/i.test(location.hostname);
   $('wdwarn').style.display = wd ? 'block' : 'none';
   $('subHint').textContent = wd
-    ? '当前为 *.workers.dev 域名：平台可能限制该域名直连，若客户端更新订阅失败（提示无效订阅），请在客户端开启系统代理或「更新订阅使用代理」后重试；节点连接不受影响（直连优选 IP）。'
+    ? '当前为 *.workers.dev 域名：Cloudflare 可能限制该域名直连，若客户端更新订阅失败（提示无效订阅），请在客户端开启系统代理或「更新订阅使用代理」后重试；节点连接不受影响（直连优选 IP）。'
     : '';
   var kv = d.kv;
   var kvTxt = kv ? '已绑定（配置持久化）' : '未绑定（无法保存配置，仅环境变量生效）';
@@ -766,7 +766,7 @@ function renderIpTest(src, r){
   }
   var d = r.data;
   if (src === 'domains') { renderDomainTest(out, head, d); return; }
-  head.appendChild(mkEl('span', d.count ? 'ipt-ok' : 'ipt-err', d.count ? '✓ 可用 ' + d.count + ' 个边缘 IP' : '✗ ' + (d.error || '没有可用 IP')));
+  head.appendChild(mkEl('span', d.count ? 'ipt-ok' : 'ipt-err', d.count ? '✓ 可用 ' + d.count + ' 个 Cloudflare IP' : '✗ ' + (d.error || '没有可用 IP')));
   head.appendChild(mkEl('span', 'ipt-dim', 'HTTP ' + (d.status || '—') + ' · ' + d.ms + ' ms'));
   if (d.count && d.error) head.appendChild(mkEl('span', 'ipt-err', d.error));
   out.appendChild(head);
@@ -786,7 +786,7 @@ function renderIpTest(src, r){
     out.appendChild(mkEl('pre', 'code', lines.join('\n')));
   }
   if (d.droppedCount) {
-    out.appendChild(mkEl('div', 'ipt-dim', '已丢弃 ' + d.droppedCount + ' 个非边缘段地址：' + d.dropped.join(', ') + (d.droppedCount > d.dropped.length ? ' …' : '')));
+    out.appendChild(mkEl('div', 'ipt-dim', '已丢弃 ' + d.droppedCount + ' 个非 Cloudflare 段地址：' + d.dropped.join(', ') + (d.droppedCount > d.dropped.length ? ' …' : '')));
   }
   var det = mkEl('details');
   det.appendChild(mkEl('summary', '', '原始响应（' + (d.rawLength > d.raw.length ? '前 ' + d.raw.length + ' / 共 ' + d.rawLength : '共 ' + d.rawLength) + ' 字符）'));
@@ -795,15 +795,15 @@ function renderIpTest(src, r){
   out.appendChild(det);
 }
 
-// 优选域名测试结果：逐个域名显示解析到的 IP 以及是否在边缘段
+// 优选域名测试结果：逐个域名显示解析到的 IP 以及是否在 Cloudflare 段
 function renderDomainTest(out, head, d){
   var rows = d.domains || [], ok = rows.filter(function(x){ return x.ok; }).length;
-  head.appendChild(mkEl('span', ok ? 'ipt-ok' : 'ipt-err', ok ? '✓ ' + ok + ' / ' + rows.length + ' 个域名解析到边缘段' : '✗ ' + (d.error || '没有可用域名')));
+  head.appendChild(mkEl('span', ok ? 'ipt-ok' : 'ipt-err', ok ? '✓ ' + ok + ' / ' + rows.length + ' 个域名解析到 Cloudflare 段' : '✗ ' + (d.error || '没有可用域名')));
   head.appendChild(mkEl('span', 'ipt-dim', d.ms + ' ms'));
   out.appendChild(head);
   if (rows.length) {
     var lines = rows.map(function(x){
-      return (x.ok ? '✓ ' : '✗ ') + x.domain + '    ' + (x.failed ? '解析失败' : (x.ips.join(', ') || '无 A 记录') + (x.ok ? '' : '（不在边缘段，不建议使用）'));
+      return (x.ok ? '✓ ' : '✗ ') + x.domain + '    ' + (x.failed ? '解析失败' : (x.ips.join(', ') || '无 A 记录') + (x.ok ? '' : '（不在 Cloudflare 段，不建议使用）'));
     });
     out.appendChild(mkEl('pre', 'code', lines.join('\n')));
   }
