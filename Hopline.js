@@ -1,6 +1,6 @@
-/*!Hopline v2.4.2*/
+/*!Hopline v2.4.3*/
 // ============================================================================
-//  Hopline —— 代理订阅面板 · 全新独立编写
+//  Hopline —— Cloudflare 代理订阅面板 · 全新独立编写
 //  ----------------------------------------------------------------------------
 //  环境变量（必填 2 项，其余可选；旧版短变量名 U / D / S / K / ECH / TROJAN 仍然兼容）：
 //    PATH            【必填】面板、订阅与节点（WebSocket / XHTTP）共用的访问路径，如 mypanel（旧名 D）
@@ -18,7 +18,7 @@
 // ============================================================================
 import { connect } from 'cloudflare:sockets';
 
-const VERSION = '2.4.2';
+const VERSION = '2.4.3';
 
 // 更新检测：点击版本号后拉取仓库代码比对版本号；有新版本时返回最新代码供面板复制
 // 版本基准为仓库 main 分支根目录的 Hopline.js（由 build.mjs 生成的部署文件）
@@ -396,7 +396,7 @@ rule-providers:
 // ---------------------------------------------------------------------------
 // 常量
 // ---------------------------------------------------------------------------
-// 官方边缘 IPv4 地址段（入口 IP 校验）
+// Cloudflare 官方 IPv4 地址段（入口 IP 校验）
 const CLOUDFLARE_CIDRS = [
   '173.245.48.0/20', '103.21.244.0/22', '103.22.200.0/22', '103.31.4.0/22',
   '141.101.64.0/18', '108.162.192.0/18', '190.93.240.0/20', '188.114.96.0/20',
@@ -404,7 +404,7 @@ const CLOUDFLARE_CIDRS = [
   '104.24.0.0/14', '172.64.0.0/13', '131.0.72.0/22'
 ];
 
-// 官方边缘 IPv6 地址段（用于入口 IP 过滤）
+// Cloudflare 官方 IPv6 地址段（用于入口 IP 过滤）
 const CLOUDFLARE_CIDRS_V6 = [
   '2400:cb00::/32', '2606:4700::/32', '2803:f800::/32', '2405:b500::/32',
   '2405:8100::/32', '2a06:98c0::/29', '2c0f:f248::/32'
@@ -429,7 +429,7 @@ function ipInCidrV6(ip, cidr) {
   return bitStr(expand(ip)).slice(0, bits) === bitStr(expand(net)).slice(0, bits);
 }
 
-// 判断 IP 是否属于边缘 Anycast 段：节点入口必须是 CF 边缘 IP，
+// 判断 IP 是否属于 Cloudflare Anycast 段：节点入口必须是 CF 边缘 IP，
 // 非 CF IP（如各地区云服务器/落地 IP）无法把客户端 TLS 转发到 Worker，下发必然连不通
 function isCloudflareIP(ip) {
   ip = String(ip || '');
@@ -454,7 +454,7 @@ const REGION_CN = {
 // IPv4+IPv6 混合时只对前 N 个优选域名查询 AAAA（控制子请求数，见 generateSubscription 默认模式）
 const V6_DOMAIN_LIMIT = 12;
 
-// 内置地区反代域名池：proxyip.<地区>.cmliussss.net 社区反代服务（解析为非边缘 IP）
+// 内置地区反代域名池：proxyip.<地区>.cmliussss.net 社区反代服务（解析为非 Cloudflare IP）
 const RELAY_DOMAINS = {
   HK: 'proxyip.hk.cmliussss.net',
   US: 'proxyip.us.cmliussss.net',
@@ -523,77 +523,77 @@ const RESERVED_PATHS = ['login', 'version'];
 
 const CONFIG_SCHEMA = [
   // ---- 面板设置 ----
-  { key: 'uid', type: 'string', def: '', el: 'a-uuid', label: 'UUID', required: true, lower: true,
+  { key: 'uuid', type: 'string', def: '', el: 'a-uuid', label: 'UUID', required: true, lower: true,
     pattern: UUID_PATTERN, hint: 'UUID 格式不正确（应为 xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx，可点「生成」）' },
   // 面板 / 订阅 / 节点（WebSocket、XHTTP）共用的访问路径：由必填的环境变量 PATH 提供（面板中只读）
-  { key: 'pth', type: 'string', def: '', el: 'a-path', label: '面板路径', maxLen: 128, strip: ['^/+', '/+$'],
+  { key: 'path', type: 'string', def: '', el: 'a-path', label: '面板路径', maxLen: 128, strip: ['^/+', '/+$'],
     pattern: PATH_SEG_PATTERN, hint: '只能包含字母、数字及 . _ ~ -（不含 /）', reserved: RESERVED_PATHS, envLock: ENV_NAMES.path },
   // 自定义订阅路径：/<别名>/sub 输出订阅（不开放面板与管理接口）；留空为 /<UUID>/sub
-  { key: 'sbu', type: 'string', def: '', el: 'a-suburl', label: '自定义订阅路径', maxLen: 128, strip: ['^/+', '/+$', '/sub$', '/+$'],
+  { key: 'subUrl', type: 'string', def: '', el: 'a-suburl', label: '自定义订阅路径', maxLen: 128, strip: ['^/+', '/+$', '/sub$', '/+$'],
     pattern: PATH_SEG_PATTERN, hint: '只填一段别名，如 AAZ（字母、数字及 . _ ~ -）', reserved: RESERVED_PATHS },
   // 管理用户名：登录时与管理密码一起校验（区分大小写）；留空取默认 admin
-  { key: 'adu', type: 'string', def: 'admin', el: 'a-adminuser', label: '管理用户名', maxLen: 64, fillDefault: true,
+  { key: 'adminUser', type: 'string', def: 'admin', el: 'a-adminuser', label: '管理用户名', maxLen: 64, fillDefault: true,
     pattern: '^[^\\s\\x00-\\x1f\\x7f]+$', hint: '不能包含空格或控制字符', envLock: ENV_NAMES.adminUser },
-  { key: 'adp', type: 'secret', def: '', el: 'a-admin', label: '管理密码', trim: false, maxLen: 256, envLock: ENV_NAMES.admin, check: 'adminPass' },
+  { key: 'admin', type: 'secret', def: '', el: 'a-admin', label: '管理密码', trim: false, maxLen: 256, envLock: ENV_NAMES.admin, check: 'adminPass' },
   // 绑定域名：节点 SNI / Host，留空使用访问域名
-  { key: 'hst', type: 'string', def: '', el: 'a-host', label: '绑定域名', maxLen: 253, strip: ['^https?://', '[/?#].*$'],
+  { key: 'host', type: 'string', def: '', el: 'a-host', label: '绑定域名', maxLen: 253, strip: ['^https?://', '[/?#].*$'],
     pattern: HOSTNAME_PATTERN, hint: '请填写域名，如 node.example.com' },
   // ---- 协议开关 ----
-  { key: 'evl', type: 'bool', def: true, el: 'en-vless', label: 'VLESS 协议' },
-  { key: 'etr', type: 'bool', def: false, el: 'en-trojan', label: 'Trojan 协议' },
-  { key: 'trp', type: 'string', def: '', el: 'tp-pass', label: 'Trojan 密码', trim: false, maxLen: 256, noExport: true },   // noExport：面板「导出配置」不含此项（与管理密码一样不落进备份文件）
-  { key: 'exh', type: 'bool', def: true, el: 'en-xhttp', label: 'XHTTP 协议' },
+  { key: 'enableVless', type: 'bool', def: true, el: 'en-vless', label: 'VLESS 协议' },
+  { key: 'enableTrojan', type: 'bool', def: false, el: 'en-trojan', label: 'Trojan 协议' },
+  { key: 'trojanPassword', type: 'string', def: '', el: 'tp-pass', label: 'Trojan 密码', trim: false, maxLen: 256, noExport: true },   // noExport：面板「导出配置」不含此项（与管理密码一样不落进备份文件）
+  { key: 'enableXhttp', type: 'bool', def: true, el: 'en-xhttp', label: 'XHTTP 协议' },
   // ---- 传输参数 ----
-  { key: 'apn', type: 'string', def: '', el: 'alpn', label: 'ALPN', maxLen: 64,
+  { key: 'alpn', type: 'string', def: '', el: 'alpn', label: 'ALPN', maxLen: 64,
     pattern: '^[A-Za-z0-9./-]+(\\s*,\\s*[A-Za-z0-9./-]+)*$', hint: '以逗号分隔，如 h2,http/1.1' },
-  { key: 'ecn', type: 'bool', def: false, el: 'ech-on', label: 'ECH' },
+  { key: 'ech', type: 'bool', def: false, el: 'ech-on', label: 'ECH' },
   // ECH 查询域名（留空使用 cloudflare-ech.com）
-  { key: 'ehs', type: 'string', def: 'cloudflare-ech.com', el: 'ech-host', label: 'ECH 域名', fillDefault: true, maxLen: 253,
+  { key: 'echHost', type: 'string', def: 'cloudflare-ech.com', el: 'ech-host', label: 'ECH 域名', fillDefault: true, maxLen: 253,
     strip: ['^https?://', '[/?#].*$'], pattern: HOSTNAME_PATTERN, hint: '请填写域名，如 cloudflare-ech.com' },
   // 自定义 ECH DNS：客户端获取 ECH 配置的 DoH 地址（留空用默认 223.5.5.5）
-  { key: 'edn', type: 'string', def: '', el: 'ech-dns', label: 'ECH DNS', maxLen: 512,
+  { key: 'echDns', type: 'string', def: '', el: 'ech-dns', label: 'ECH DNS', maxLen: 512,
     pattern: '^https://\\S+$', hint: '须为 https:// 开头的 DoH 地址' },
   // TLS 控制：默认开启，只下发 TLS 端口节点；关闭后 443 节点另追加 80 明文节点，来源自带的明文端口原样下发（开启 ECH 时强制仅 TLS）
-  { key: 'tlo', type: 'bool', def: true, el: 'tls-only', label: '仅 TLS 端口' },
+  { key: 'tlsOnly', type: 'bool', def: true, el: 'tls-only', label: '仅 TLS 端口' },
   // ---- 落地与出站 ----
-  { key: 'pxy', type: 'string', def: '', el: 's-proxyIP', label: '反代 / 落地 IP', maxLen: 256,
+  { key: 'proxyIP', type: 'string', def: '', el: 's-proxyIP', label: '反代 / 落地 IP', maxLen: 256,
     pattern: '^[^\\s/]+$', hint: '格式为 host 或 host:port', check: 'hostPort' },
-  { key: 'obp', type: 'string', def: '', el: 's-outbound', label: '出站代理', maxLen: 1024,
+  { key: 'outboundProxy', type: 'string', def: '', el: 's-outbound', label: '出站代理', maxLen: 1024,
     pattern: '^\\S+$', hint: '出站代理不能包含空格', check: 'proxy' },
-  { key: 'obm', type: 'enum', def: '', el: 's-outmode', label: '出站方式', options: ['', 'no', 'only'] },
+  { key: 'outboundMode', type: 'enum', def: '', el: 's-outmode', label: '出站方式', options: ['', 'no', 'only'] },
   // ---- 优选域名：留空使用内置列表；填写后整体替换内置列表（每行一个纯主机名，最多 30 个） ----
-  { key: 'pfd', type: 'text', def: '', el: 'o-prefdomains', label: '优选域名', maxLen: 4096, check: 'domainList' },
+  { key: 'prefDomains', type: 'text', def: '', el: 'o-prefdomains', label: '优选域名', maxLen: 4096, check: 'domainList' },
   // ---- 内置地区反代：builtin 内置（默认，按机房自动选地区）/ custom 仅用自定义反代列表 / off 不使用地区反代 ----
-  { key: 'rl.md', type: 'enum', def: 'builtin', el: 'rl-mode', label: '地区反代模式', options: ['builtin', 'custom', 'off'] },
-  { key: 'rl.rg', type: 'enum', def: '', el: 'rl-region', label: '首选反代地区', options: ['', ...Object.keys(RELAY_DOMAINS)] },
-  { key: 'rl.r2', type: 'enum', def: '', el: 'rl-region2', label: '次选反代地区', options: ['', 'none', ...Object.keys(RELAY_DOMAINS)] },
-  { key: 'rl.cu', type: 'text', def: '', el: 'rl-custom', label: '自定义反代列表', maxLen: 1024, check: 'relayList' },
+  { key: 'relay.mode', type: 'enum', def: 'builtin', el: 'rl-mode', label: '地区反代模式', options: ['builtin', 'custom', 'off'] },
+  { key: 'relay.region', type: 'enum', def: '', el: 'rl-region', label: '首选反代地区', options: ['', ...Object.keys(RELAY_DOMAINS)] },
+  { key: 'relay.region2', type: 'enum', def: '', el: 'rl-region2', label: '次选反代地区', options: ['', 'none', ...Object.keys(RELAY_DOMAINS)] },
+  { key: 'relay.custom', type: 'text', def: '', el: 'rl-custom', label: '自定义反代列表', maxLen: 1024, check: 'relayList' },
   // ---- 订阅筛选（按节点名称中的地区/运营商标记 + 地址 IP 类型过滤下发） ----
-  { key: 'ft.rg', type: 'list', def: ['all'], label: '节点地区', options: ['all', 'HK', 'TW', 'US', 'SG', 'JP', 'KR', 'DE'],
+  { key: 'filter.region', type: 'list', def: ['all'], label: '节点地区', options: ['all', 'HK', 'TW', 'US', 'SG', 'JP', 'KR', 'DE'],
     exclusive: 'all', emptyValue: ['all'],
     els: { all: 'fl-region-all', HK: 'fl-region-HK', TW: 'fl-region-TW', US: 'fl-region-US', SG: 'fl-region-SG', JP: 'fl-region-JP', KR: 'fl-region-KR', DE: 'fl-region-DE' } },
   // 勾选的 IP 类型集合（全选或空 = 不过滤）
-  { key: 'ft.ip', type: 'list', def: ['IPv4'], label: 'IP 类型', options: ['IPv4', 'IPv6'],
+  { key: 'filter.ipType', type: 'list', def: ['IPv4'], label: 'IP 类型', options: ['IPv4', 'IPv6'],
     els: { IPv4: 'fl-ip4', IPv6: 'fl-ip6' } },
   // 勾选的运营商集合（全选 = 不过滤）
-  { key: 'ft.is', type: 'list', def: ['移动', '联通', '电信'], label: '运营商偏好', options: ['移动', '联通', '电信'],
+  { key: 'filter.isp', type: 'list', def: ['移动', '联通', '电信'], label: '运营商偏好', options: ['移动', '联通', '电信'],
     els: { '移动': 'fl-isp-m', '联通': 'fl-isp-c', '电信': 'fl-isp-t' } },
   // ---- 地址来源（订阅节点池由这三项组装） ----
-  { key: 'sc.nv', type: 'bool', def: false, el: 'fl-native', label: '原生地址' },
-  { key: 'sc.pd', type: 'bool', def: true, el: 'fl-pref-domain', label: '优选域名' },
-  { key: 'sc.pi', type: 'bool', def: true, el: 'fl-pref-ip', label: '优选 IP' },
-  // ---- 「优选 IP」的在线来源（默认模式；均只保留边缘段 IP，结果缓存 10 分钟） ----
-  { key: 'ix.hm', type: 'bool', def: true, el: 'ps-hostmonit', label: 'HostMonit 实时优选' },
+  { key: 'src.native', type: 'bool', def: false, el: 'fl-native', label: '原生地址' },
+  { key: 'src.prefDomain', type: 'bool', def: true, el: 'fl-pref-domain', label: '优选域名' },
+  { key: 'src.prefIp', type: 'bool', def: true, el: 'fl-pref-ip', label: '优选 IP' },
+  // ---- 「优选 IP」的在线来源（默认模式；均只保留 Cloudflare 段 IP，结果缓存 10 分钟） ----
+  { key: 'ipsrc.hostmonit', type: 'bool', def: true, el: 'ps-hostmonit', label: 'HostMonit 实时优选' },
   // uouin 分线路优选：借用 api.uouin.com 网站内部接口（非开放 API，对方可能随时更换签名或封禁），默认开启
-  { key: 'ix.uo', type: 'bool', def: true, el: 'ps-uouin', label: 'uouin 分线路优选' },
+  { key: 'ipsrc.uouin', type: 'bool', def: true, el: 'ps-uouin', label: 'uouin 分线路优选' },
   // 微测网优选：wetest.vip 公开页面（IPv4 / IPv6 各一页，移动 / 联通 / 电信各 5 个，约每 15 分钟更新），默认关闭
-  { key: 'ix.wt', type: 'bool', def: false, el: 'ps-wetest', label: '微测网优选' },
+  { key: 'ipsrc.wetest', type: 'bool', def: false, el: 'ps-wetest', label: '微测网优选' },
   // 两个自定义优选 API：填写返回 IP 列表的地址（纯 IP 行 / CSV / HTML 线路表 / base64 订阅 / vless 链接，支持 sub://）
-  { key: 'ix.a1', type: 'bool', def: false, el: 'ps-api1-on', label: '自定义优选 API 1' },
-  { key: 'ix.a1u', type: 'string', def: '', el: 'ps-api1-url', label: '自定义优选 API 1 地址', maxLen: 1024,
+  { key: 'ipsrc.api1', type: 'bool', def: false, el: 'ps-api1-on', label: '自定义优选 API 1' },
+  { key: 'ipsrc.api1Url', type: 'string', def: '', el: 'ps-api1-url', label: '自定义优选 API 1 地址', maxLen: 1024,
     pattern: '^(https?|sub)://\\S+$', hint: '须为 http(s):// 或 sub:// 开头的地址' },
-  { key: 'ix.a2', type: 'bool', def: false, el: 'ps-api2-on', label: '自定义优选 API 2' },
-  { key: 'ix.a2u', type: 'string', def: '', el: 'ps-api2-url', label: '自定义优选 API 2 地址', maxLen: 1024,
+  { key: 'ipsrc.api2', type: 'bool', def: false, el: 'ps-api2-on', label: '自定义优选 API 2' },
+  { key: 'ipsrc.api2Url', type: 'string', def: '', el: 'ps-api2-url', label: '自定义优选 API 2 地址', maxLen: 1024,
     pattern: '^(https?|sub)://\\S+$', hint: '须为 http(s):// 或 sub:// 开头的地址' },
 ];
 
@@ -784,16 +784,16 @@ function sanitizeConfigPatch(body, env) {
 // 跨字段校验（作用于合并后的完整配置）
 function crossCheckConfig(cfg) {
   const errors = [];
-  if (!cfg.evl && !cfg.etr && !cfg.exh) {
-    errors.push({ field: 'evl', label: '协议开关', msg: '至少启用一种协议，否则订阅中没有任何节点' });
+  if (!cfg.enableVless && !cfg.enableTrojan && !cfg.enableXhttp) {
+    errors.push({ field: 'enableVless', label: '协议开关', msg: '至少启用一种协议，否则订阅中没有任何节点' });
   }
-  if (cfg.rl && cfg.rl.md === 'custom' && !String(cfg.rl.cu || '').trim()) {
-    errors.push({ field: 'rl.cu', label: '自定义反代列表', msg: '已选择「仅使用自定义反代」，请至少填写一个反代地址（或改回内置 / 关闭）' });
+  if (cfg.relay && cfg.relay.mode === 'custom' && !String(cfg.relay.custom || '').trim()) {
+    errors.push({ field: 'relay.custom', label: '自定义反代列表', msg: '已选择「仅使用自定义反代」，请至少填写一个反代地址（或改回内置 / 关闭）' });
   }
   for (const n of [1, 2]) {
-    const s = cfg.ix || {};
-    if (s['a' + n] && !s['a' + n + 'u']) {
-      errors.push({ field: 'ix.a' + n + 'u', label: '自定义优选 API ' + n + ' 地址', msg: '已开启该来源，请填写 API 地址（或关闭开关）' });
+    const s = cfg.ipsrc || {};
+    if (s['api' + n] && !s['api' + n + 'Url']) {
+      errors.push({ field: 'ipsrc.api' + n + 'Url', label: '自定义优选 API ' + n + ' 地址', msg: '已开启该来源，请填写 API 地址（或关闭开关）' });
     }
   }
   return errors;
@@ -806,9 +806,9 @@ function clientSchema() {
 // 内置官方直连域名：节点池为空时的最后兜底（保证订阅不为空），以及仅勾选 IPv6 时的 AAAA 来源
 const BUILTIN_OFFICIAL_DOMAINS = ['cloudflare.com', 'www.cloudflare.com', 'speed.cloudflare.com'];
 
-// 内置默认优选域名：第三方 CNAME 域名，解析到边缘；节点 server 直接下发域名
+// 内置默认优选域名：第三方 CNAME 域名，解析到 Cloudflare 边缘；节点 server 直接下发域名
 // （客户端连接时动态 DNS 解析，拿到当前最优 CF 边缘 IP，可用性远高于静态 IP 快照）。
-// 均已用面板「优选域名 → 测试」验证：能解析且落在边缘段（解析失败或非 CF 段的域名无法作入口）。
+// 均已用面板「优选域名 → 测试」验证：能解析且落在 Cloudflare 段（解析失败或非 CF 段的域名无法作入口）。
 // 面板「优选域名」填写后会整体替换本列表
 const DEFAULT_PREFERRED_DOMAINS = [
   'cloudflare.182682.xyz', 'cdn.2020111.xyz', 'cf.0sm.com', 'cf.090227.xyz', 'cfip.1323123.xyz',
@@ -817,7 +817,7 @@ const DEFAULT_PREFERRED_DOMAINS = [
 ].join('\n');
 // 实际生效的优选域名：面板填写了就整体替换内置列表，留空用内置列表
 function effectivePrefDomains(cfg) {
-  const own = cfg && cfg.pfd ? String(cfg.pfd).trim() : '';
+  const own = cfg && cfg.prefDomains ? String(cfg.prefDomains).trim() : '';
   return own || DEFAULT_PREFERRED_DOMAINS;
 }
 // 取前 PREF_DOMAIN_DOH_LIMIT 个（逐个 DoH 解析的路径使用，控制子请求数）
@@ -826,7 +826,7 @@ function dohPrefDomains(text) {
 }
 
 
-// 明文 HTTP 端口：边缘在这些端口上不支持 TLS，节点必须走明文 ws（否则握手失败连不通）
+// 明文 HTTP 端口：Cloudflare 边缘在这些端口上不支持 TLS，节点必须走明文 ws（否则握手失败连不通）
 const HTTP_PORTS = new Set([80, 8080, 8880, 2052, 2082, 2086, 2095]);
 
 // 优选器预设数据源：微测网接口 + 优选 IP 来源
@@ -1032,7 +1032,7 @@ function json(obj, status, headers) {
 
 // ---------------------------------------------------------------------------
 // 配置加载：默认值 < 环境变量 < KV 图形化配置
-// KV 读取走 KV 内置边缘缓存 cacheTtl=30：请求/面板读配置命中边缘缓存，大幅减少 KV 读量；
+// KV 读取走 Cloudflare KV 内置边缘缓存 cacheTtl=30：请求/面板读配置命中边缘缓存，大幅减少 KV 读量；
 // 不使用模块级内存缓存（不同 isolate 不共享且会残留陈旧值）。KV 是最终一致的：同一机房写入后随即可见，
 // 其它机房最多约 1 分钟后同步（面板保存提示即此含义）。
 // ---------------------------------------------------------------------------
@@ -1054,7 +1054,7 @@ async function loadConfig(env) {
   }
   const cfg = buildConfig(env, kvCfg);
   if (kvError) cfg._kvError = kvError;
-  if (!cfg.uid && !kvError) await provisionUuid(env, kvCfg, cfg);
+  if (!cfg.uuid && !kvError) await provisionUuid(env, kvCfg, cfg);
   return cfg;
 }
 
@@ -1075,11 +1075,11 @@ async function provisionUuid(env, kvCfg, cfg) {
   let uuid = AUTO_UUIDS.get(kv);
   if (!uuid) {
     uuid = uuidv4();
-    try { await kv.put('config', JSON.stringify(Object.assign({}, kvCfg || {}, { uid: uuid }))); }
+    try { await kv.put('config', JSON.stringify(Object.assign({}, kvCfg || {}, { uuid }))); }
     catch (e) { cfg._kvError = 'unavailable'; return; }
     AUTO_UUIDS.set(kv, uuid);
   }
-  cfg.uid = uuid;
+  cfg.uuid = uuid;
 }
 
 // 面板路径（环境变量 PATH）：去掉首尾 /，只允许 字母 数字 . _ ~ -，且不能是保留路径。返回 { value, error }
@@ -1092,19 +1092,19 @@ function normalizePanelPath(raw) {
 }
 
 // 由「默认值 < 环境变量 < KV 配置 < 锁定的环境变量」组装完整配置（纯函数：保存接口用刚写入的数据直接组装，
-// 不经 KV 边缘缓存，避免保存后回读到旧配置）。cfg.uid 为空表示尚未设置（loadConfig 负责生成），cfg.pth 为空表示 PATH 未设置 / 非法
+// 不经 KV 边缘缓存，避免保存后回读到旧配置）。cfg.uuid 为空表示尚未设置（loadConfig 负责生成），cfg.path 为空表示 PATH 未设置 / 非法
 function buildConfig(env, kvCfg) {
   const cfg = schemaDefaults();
   const flag = (v) => v === true || v === 'true' || v === '1' || v === 1;
   // 环境变量
-  if (envVar(env, 'uuid')) cfg.uid = String(envVar(env, 'uuid')).toLowerCase();
-  if (env.HOST) cfg.hst = String(env.HOST).replace(/^https?:\/\//, '').split('/')[0];
-  if (env.PROXYIP) cfg.pxy = String(env.PROXYIP);
-  if (envVar(env, 'outbound')) cfg.obp = String(envVar(env, 'outbound'));
-  if (flag(envVar(env, 'ech'))) cfg.ecn = true;
-  if (flag(envVar(env, 'trojan'))) cfg.etr = true;
-  if (env.TROJAN_PASSWORD) cfg.trp = String(env.TROJAN_PASSWORD);
-  if (env.ALPN) cfg.apn = String(env.ALPN);
+  if (envVar(env, 'uuid')) cfg.uuid = String(envVar(env, 'uuid')).toLowerCase();
+  if (env.HOST) cfg.host = String(env.HOST).replace(/^https?:\/\//, '').split('/')[0];
+  if (env.PROXYIP) cfg.proxyIP = String(env.PROXYIP);
+  if (envVar(env, 'outbound')) cfg.outboundProxy = String(envVar(env, 'outbound'));
+  if (flag(envVar(env, 'ech'))) cfg.ech = true;
+  if (flag(envVar(env, 'trojan'))) cfg.enableTrojan = true;
+  if (env.TROJAN_PASSWORD) cfg.trojanPassword = String(env.TROJAN_PASSWORD);
+  if (env.ALPN) cfg.alpn = String(env.ALPN);
   // KV 图形化配置（更高优先级）：按字段表逐项合并，未登记的字段自动忽略
   if (kvCfg && typeof kvCfg === 'object') {
     for (const d of CONFIG_SCHEMA) {
@@ -1121,11 +1121,11 @@ function buildConfig(env, kvCfg) {
     setPath(cfg, key, v);
   }
   // UUID：KV 中为空或非法时回退环境变量；仍无效则留空（loadConfig 生成并保存）
-  cfg.uid = String(cfg.uid || '').toLowerCase();
-  if (!isUUID(cfg.uid)) cfg.uid = envUuid(env);
+  cfg.uuid = String(cfg.uuid || '').toLowerCase();
+  if (!isUUID(cfg.uuid)) cfg.uuid = envUuid(env);
   // 面板路径只认环境变量 PATH（不再回退 UUID）；非法值按未设置处理并记下原因
-  const np = normalizePanelPath(locked.pth ? env[locked.pth] : '');
-  cfg.pth = np.value;
+  const np = normalizePanelPath(locked.path ? env[locked.path] : '');
+  cfg.path = np.value;
   if (np.error) cfg._pathError = np.error;
   return cfg;
 }
@@ -1202,7 +1202,7 @@ function parseVlessHeader(data, cfg) {
   let offset = 0;
   if (view.getUint8(0) !== 0) throw new Error('不支持的 VLESS 版本');
   if (data.byteLength < 17) throw new Error('VLESS 头部过短');
-  const want = uuidToBytes(cfg && cfg.uid);
+  const want = uuidToBytes(cfg && cfg.uuid);
   let diff = 0;
   for (let i = 0; i < 16; i++) diff |= (view.getUint8(1 + i) ^ want[i]);
   if (diff !== 0) throw new Error('UUID 不匹配');
@@ -1256,7 +1256,7 @@ function parseTrojanHeader(data) {
   return { command, port, addr, password: TD.decode(data.subarray(0, 56)), headerLength: offset };
 }
 
-// Trojan 协议密码使用 SHA-224（56 字节 hex）——运行时 WebCrypto 不支持 SHA-224，手写实现（SHA-256 结构 + SHA-224 初始值）
+// Trojan 协议密码使用 SHA-224（56 字节 hex）——Cloudflare WebCrypto 不支持 SHA-224，手写实现（SHA-256 结构 + SHA-224 初始值）
 const SHA256_K = [
   0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
   0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
@@ -1318,14 +1318,14 @@ function trojanPasswordHash(pass) {
 }
 // Trojan 头判定：56 字节 SHA224 hex + CRLF；密码匹配或纯 hex 特征均可识别
 function detectTrojan(pending, cfg) {
-  if (!cfg.etr || !pending || pending.byteLength < 58) return false;
+  if (!cfg.enableTrojan || !pending || pending.byteLength < 58) return false;
   const head = pending.subarray(0, 56);
   // 仅密码哈希匹配才视为 Trojan（不能放行任意 56 位十六进制）
-  return TD.decode(head).toLowerCase() === trojanPasswordHash(cfg.trp || cfg.uid);
+  return TD.decode(head).toLowerCase() === trojanPasswordHash(cfg.trojanPassword || cfg.uuid);
 }
 
 // DoH 端点池（UDP/DNS → DoH 转换用，使 V2rayNG 关闭「本地 DNS」时远端 DNS 仍可用）
-// 首选端点优先（Worker 与其同机房，延迟最低，且用户的查询不必先经过第三方境内解析器），其余按序兜底
+// Cloudflare 优先（Worker 与其同机房，延迟最低，且用户的查询不必先经过第三方境内解析器），其余按序兜底
 const DOH_ENDPOINTS = [
   'https://cloudflare-dns.com/dns-query',
   'https://dns.google/dns-query',
@@ -1850,7 +1850,7 @@ function findBytes(hay, needle) {
 }
 
 // ---------------------------------------------------------------------------
-// 内置地区反代域名池：proxyip.<地区>.cmliussss.net 社区反代服务（解析为非边缘 IP）
+// 内置地区反代域名池：proxyip.<地区>.cmliussss.net 社区反代服务（解析为非 Cloudflare IP）
 // 出站兜底：直连与自定义反代均失败后使用，透明代理模式发送去掉 VLESS 头部的原始
 // TLS 数据，由对端按 SNI 路由到目标
 // ---------------------------------------------------------------------------
@@ -1955,7 +1955,7 @@ async function resolveProxyIPsUncached(host, port, txt) {
 }
 
 // 出站并发竞速：同时发起多路连接，取最先握手成功的一路，后到的成功连接立即关闭（释放 CF 同时连接配额）。
-// 比串行尝试更快：目标站在该平台上时直连会被回环保护拦截，串行要白等约 6s 才轮到反代
+// 比串行尝试更快：目标站在 Cloudflare 上时直连会被回环保护拦截，串行要白等约 6s 才轮到反代
 async function raceConnect(jobs) {
   if (!jobs || !jobs.length) return null;
   let settled = false;
@@ -1976,7 +1976,7 @@ async function raceConnect(jobs) {
   });
 }
 
-// 学习型路由：直连失败、由反代接通的目标（该平台上的站点，直连会被回环保护拦截）记下来，
+// 学习型路由：直连失败、由反代接通的目标（Cloudflare 上的站点，直连会被回环保护拦截）记下来，
 // 之后到该目标的连接直接走反代：不再发注定失败的直连，也不需要任何 DNS 查询。
 // 只在直连「确实失败」（报错 / 超时）时记录；直连只是慢、超出优先窗口但最终能通的站点不记录（继续直连优先）。
 // 记录 30 分钟；按记录走反代却失败时删除记录并回落直连
@@ -2053,19 +2053,19 @@ function sniffPayloadKind(bytes) {
 //   custom  → 自定义列表（最多 3 个，第一个取 2 个 IP，其余各 1 个）
 //   builtin → 首选地区（relay.region，留空按机房自动选）取 2 个 IP + 次选地区（relay.region2，留空取默认的另一地区，'none' 不用）取 1 个 IP
 function relayPlan(cfg, colo) {
-  const rl = cfg.rl || {};
-  const mode = rl.md || 'builtin';
+  const rl = cfg.relay || {};
+  const mode = rl.mode || 'builtin';
   if (mode === 'off') return [];
   if (mode === 'custom') {
-    return String(rl.cu || '').split('\n').map(s => s.trim()).filter(Boolean).slice(0, RELAY_CUSTOM_MAX).map((entry, i) => {
+    return String(rl.custom || '').split('\n').map(s => s.trim()).filter(Boolean).slice(0, RELAY_CUSTOM_MAX).map((entry, i) => {
       const { host, port } = parseHostPort(entry, 443);
       return { host, port, take: i === 0 ? 2 : 1 };
     });
   }
-  const primary = RELAY_DOMAINS[rl.rg] ? rl.rg : selectRelayRegion(colo);
+  const primary = RELAY_DOMAINS[rl.region] ? rl.region : selectRelayRegion(colo);
   const plan = [{ host: RELAY_DOMAINS[primary], port: 443, take: 2, txt: false }];   // 内置域名只有 A 记录
-  if (rl.r2 !== 'none') {
-    const second = (RELAY_DOMAINS[rl.r2] && rl.r2 !== primary) ? rl.r2 : Object.keys(RELAY_DOMAINS).find(r => r !== primary);
+  if (rl.region2 !== 'none') {
+    const second = (RELAY_DOMAINS[rl.region2] && rl.region2 !== primary) ? rl.region2 : Object.keys(RELAY_DOMAINS).find(r => r !== primary);
     plan.push({ host: RELAY_DOMAINS[second], port: 443, take: 1, txt: false });
   }
   return plan;
@@ -2076,8 +2076,8 @@ function relayPlan(cfg, colo) {
 // 出站模式语义：only = 仅走出站代理（失败用地区反代兜底，地区反代设为 off 时不兜底）；'' 默认 = 出站代理优先，失败后直连 ∥ 反代；
 // no = 直连 ∥ 反代优先，都不通时最后用出站代理
 async function openOutbound(parsed, cfg, colo, payloadKind) {
-  const proxy = parseProxyAddress(cfg.obp);
-  const mode = cfg.obm || '';
+  const proxy = parseProxyAddress(cfg.outboundProxy);
+  const mode = cfg.outboundMode || '';
   const allowSniRelay = payloadKind !== 'nontls';
 
   const viaProxy = proxy ? (proxy.type === 'http' || proxy.type === 'https'
@@ -2091,7 +2091,7 @@ async function openOutbound(parsed, cfg, colo, payloadKind) {
   const fail = () => { throw lastErr || new Error('所有出站方式均失败'); };
 
   // 1) 用户填写的「反代 / 落地 IP」：作为固定出口优先使用（多个解析结果并发竞速），失败再走下面的流程
-  const relay = cfg.pxy ? parseHostPort(cfg.pxy, 443) : null;
+  const relay = cfg.proxyIP ? parseHostPort(cfg.proxyIP, 443) : null;
   if (relay && relay.host && allowSniRelay) {
     let customTargets = await resolveProxyIPs(relay.host, relay.port);
     if (!customTargets.length) customTargets = [{ hostname: relay.host, port: relay.port }];
@@ -2209,7 +2209,7 @@ function decodeEarlyData(header, cfg) {
   if (!bytes.byteLength || bytes.byteLength > 6144) return null;
   if (bytes.byteLength >= 17 && bytes[0] === 0) {
     let want;
-    try { want = uuidToBytes(cfg.uid); } catch (e) { return null; }
+    try { want = uuidToBytes(cfg.uuid); } catch (e) { return null; }
     for (let i = 0; i < 16; i++) if (bytes[i + 1] !== want[i]) return null;
     return bytes;
   }
@@ -2259,7 +2259,7 @@ async function handleWebSocketProxy(request, cfg) {
       if (!isTrojan && pending[0] !== 0 && pending.byteLength < 58) return;
       isVless = !isTrojan;
       // 面板关闭 VLESS 后服务端也不再接受 VLESS 连接（XHTTP 走独立入口，由 enableXhttp 控制）
-      if (isVless && cfg.evl === false) throw new Error('VLESS 协议未启用');
+      if (isVless && cfg.enableVless === false) throw new Error('VLESS 协议未启用');
       parsed = isTrojan ? parseTrojanHeader(pending) : parseVlessHeader(pending, cfg);
     } catch (err) {
       if (/头部过短/.test(err.message || '')) return;   // 等下一个分片
@@ -2401,7 +2401,7 @@ function decodeUtf8OrGbk(buf) {
   return new TextDecoder().decode(bytes);
 }
 
-// 订阅时自动拉取最新优选 IP：HostMonit 优选 API（按移动 / 联通 / 电信分线路实测的边缘 IP），10 分钟缓存。
+// 订阅时自动拉取最新优选 IP：HostMonit 优选 API（按移动 / 联通 / 电信分线路实测的 Cloudflare IP），10 分钟缓存。
 // 调用其数据接口（key 为社区项目通用的公开 key，接口失效时由其它来源兜底）。
 // 节点名带运营商（如「移动-01」），面板「运营商偏好」筛选据此生效。失败时沿用上次成功结果，都没有则返回 null
 // 机房内共享缓存（Cache API）：第三方优选来源的结果放进 caches.default，同一机房的所有实例共用，10 分钟内只请求一次（内存缓存则每个新实例 / 冷启动都要重新请求）。Cache API 不可用（本地测试 / 部分域名下 put 不生效）时静默退回内存缓存
@@ -2494,7 +2494,7 @@ async function hostmonitFetch(maxCount) {
     r.items.push({ ip: g.ip, port: 443, name: g.label + '-' + g.seq });
     if (r.items.length >= maxCount) break;
   }
-  if (!r.items.length) r.error = '响应中没有边缘段 IP';
+  if (!r.items.length) r.error = '响应中没有 Cloudflare 段 IP';
   return r;
 }
 async function fetchLatestPreferredIPs(maxCount) {
@@ -2507,7 +2507,7 @@ async function fetchLatestPreferredIPs(maxCount) {
   return SUBPREF_CACHE.ips;   // 本次失败：沿用上次成功结果（可能为 null）
 }
 
-// uouin 分线路优选（api.uouin.com）：电信 / 联通 / 移动 / 多线（BGP）/ IPv6 各约 10 个实测边缘 IP。
+// uouin 分线路优选（api.uouin.com）：电信 / 联通 / 移动 / 多线（BGP）/ IPv6 各约 10 个实测 Cloudflare IP。
 // ⚠ 这不是对方的开放 API，而是其网站前端使用的内部接口：签名方式模仿网站前端
 //   key = md5( md5('DdlTxtN0sUOu') + '70cloudflareapikey' + 毫秒时间戳 )，签名错误时对方会提示「请使用开放API」。
 //   对方随时可能更换签名或封禁，失败时静默返回上次结果，由其它来源兜底；面板中默认关闭。
@@ -2538,7 +2538,7 @@ async function uouinFetch() {
     if (!isCloudflareIP(g.ip)) { r.dropped.push(g.ip); continue; }
     r.items.push({ ip: g.ip, port: 443, name: g.label + '-U' + g.seq });
   }
-  if (!r.items.length && !r.error) r.error = '响应中没有边缘段 IP';
+  if (!r.items.length && !r.error) r.error = '响应中没有 Cloudflare 段 IP';
   return r;
 }
 async function fetchUouinIPs(wantV4, wantV6) {
@@ -2568,11 +2568,11 @@ async function customApiFetch(url) {
   else if (!r.status) r.error = '请求失败或超时';
   else if (r.status < 200 || r.status >= 300) r.error = 'HTTP ' + r.status;
   for (const x of all) (isValidIp(x.ip) && isCloudflareIP(x.ip) ? r.items : r.dropped).push(isValidIp(x.ip) && isCloudflareIP(x.ip) ? x : x.ip);
-  if (!r.items.length && !r.error) r.error = r.dropped.length ? '解析到的地址都不是边缘段 IP' : '未能从响应中解析出 IP';
+  if (!r.items.length && !r.error) r.error = r.dropped.length ? '解析到的地址都不是 Cloudflare 段 IP' : '未能从响应中解析出 IP';
   return r;
 }
 
-// 微测网（wetest.vip）优选：服务端渲染的公开页面，IPv4 / IPv6 各一页，移动 / 联通 / 电信各 5 个实测边缘 IP，约每 15 分钟更新；
+// 微测网（wetest.vip）优选：服务端渲染的公开页面，IPv4 / IPv6 各一页，移动 / 联通 / 电信各 5 个实测 Cloudflare IP，约每 15 分钟更新；
 // 按线路命名并带来源后缀（IPv4「移动-W01」，IPv6「移动-W6-01」），运营商筛选按线路生效。
 // 页面是 HTML 表格而非开放 API：版式变化时该来源静默失效、由其它来源兜底；10 分钟缓存，且只拉取当前 IP 类型筛选需要的页面
 const WETEST_PAGES = {
@@ -2596,7 +2596,7 @@ async function wetestPageFetch(fam) {
     if (!isCloudflareIP(g.ip)) { r.dropped.push(g.ip); continue; }
     r.items.push({ ip: g.ip, port: 443, name: g.label + '-' + WETEST_PAGES[fam].tag + g.seq });
   }
-  if (!r.items.length) r.error = '页面中没有边缘段 IP';
+  if (!r.items.length) r.error = '页面中没有 Cloudflare 段 IP';
   return r;
 }
 // 面板「测试」：两页都拉取并合并（不读写缓存）
@@ -2621,7 +2621,7 @@ async function fetchWetestIPs(wantV4, wantV6) {
   return lists.flat();
 }
 
-// 面板「优选域名 → 测试」：逐个解析域名的 A 记录，看是否落在边缘段。
+// 面板「优选域名 → 测试」：逐个解析域名的 A 记录，看是否落在 Cloudflare 段。
 // 最多测前 PREF_DOMAIN_DOH_LIMIT 个（子请求预算）；返回格式同其它来源，另带 domains 明细
 async function domainsFetch(list) {
   const r = { status: 200, raw: '', items: [], dropped: [], error: '', domains: [] };
@@ -2637,9 +2637,9 @@ async function domainsFetch(list) {
   }));
   r.domains = rows;
   for (const row of rows) { if (row.ok) r.items.push({ ip: row.ips.find(isCloudflareIP), port: 443, name: row.domain }); else r.dropped.push(row.domain); }
-  r.raw = rows.map(x => x.domain + ' → ' + (x.failed ? '解析失败' : (x.ips.join(', ') || '无 A 记录')) + (x.ok ? '' : '（不在边缘段）')).join('\n');
+  r.raw = rows.map(x => x.domain + ' → ' + (x.failed ? '解析失败' : (x.ips.join(', ') || '无 A 记录')) + (x.ok ? '' : '（不在 Cloudflare 段）')).join('\n');
   if (list.length > names.length) r.raw += '\n… 另有 ' + (list.length - names.length) + ' 个域名未测试（单次最多测 ' + PREF_DOMAIN_DOH_LIMIT + ' 个）';
-  if (!r.items.length) r.error = '没有域名解析到边缘段 IP';
+  if (!r.items.length) r.error = '没有域名解析到 Cloudflare 段 IP';
   return r;
 }
 // ---------------------------------------------------------------------------
@@ -2650,7 +2650,7 @@ async function domainsFetch(list) {
 // 其余三项为固定混淆策略。V2rayN（extra JSON，camelCase）与 mihomo
 // （xhttp-opts，kebab-case）共用同一份派生结果。
 function xhttpPadding(cfg) {
-  const u = cfg.uid || '';
+  const u = cfg.uuid || '';
   return {
     xPaddingObfsMode: true, xPaddingMethod: 'tokenish', xPaddingPlacement: 'queryInHeader',
     xPaddingHeader: u.slice(1, 7), xPaddingKey: '_' + u.slice(25, 31)
@@ -2698,7 +2698,7 @@ function alpnParam(alpn) {
 }
 
 function vlessNode(cfg, server, port, name, extra = {}) {
-  const host = cfg.hst;
+  const host = cfg.host;
   const addr = server.includes(':') && !server.startsWith('[') ? `[${server}]` : server;  // IPv6 需方括号
   const isTls = !HTTP_PORTS.has(Number(port));
   const enc = encodeURIComponent;
@@ -2715,30 +2715,30 @@ function vlessNode(cfg, server, port, name, extra = {}) {
   }
   else q += '&type=ws';   // 明文端口与默认路径均走 ws
   // TLS 下的 ws 路径携带 ed=2048（WS 0-RTT 早数据，见 decodeEarlyData）；明文端口与 xhttp 不带
-  q += '&path=' + enc('/' + cfg.pth + (!isXhttp && isTls ? '?ed=2048' : ''));
+  q += '&path=' + enc('/' + cfg.path + (!isXhttp && isTls ? '?ed=2048' : ''));
   // ALPN：面板设置优先；XHTTP stream-one 依赖 HTTP/2 双向流，未设置时显式指定 h2（与 Clash 输出一致），不依赖客户端内核的默认值
-  if (isTls && (cfg.apn || isXhttp)) q += '&alpn=' + (cfg.apn ? alpnParam(cfg.apn) : 'h2');
-  if (cfg.ecn && isTls) {
+  if (isTls && (cfg.alpn || isXhttp)) q += '&alpn=' + (cfg.alpn ? alpnParam(cfg.alpn) : 'h2');
+  if (cfg.ech && isTls) {
     // ECH：输出 "查询域名+DoH"（xray/V2rayN 客户端本地查询 ECH 配置，Worker 端拉取会与用户边缘密钥不匹配导致握手失败）
-    q += '&ech=' + enc((cfg.ehs || 'cloudflare-ech.com') + '+' + (cfg.edn || 'https://223.5.5.5/dns-query'));
+    q += '&ech=' + enc((cfg.echHost || 'cloudflare-ech.com') + '+' + (cfg.echDns || 'https://223.5.5.5/dns-query'));
   }
-  return `vless://${cfg.uid}@${addr}:${port}?${q}#${uriFragName(name)}`;
+  return `vless://${cfg.uuid}@${addr}:${port}?${q}#${uriFragName(name)}`;
 }
 
 function trojanNode(cfg, server, port, name) {
-  const host = cfg.hst;
+  const host = cfg.host;
   const addr = server.includes(':') && !server.startsWith('[') ? `[${server}]` : server;  // IPv6 需方括号
   const enc = encodeURIComponent;
   const isTls = !HTTP_PORTS.has(Number(port));
   // 明文端口（80/8080/8880/2052/2082/2086/2095）：走 security=none 明文 ws（不被 TLS 指纹检测，可用性高）；
   // TLS 端口：security=tls + sni/fp
-  const path = enc('/' + cfg.pth + (isTls ? '?ed=2048' : ''));   // TLS 下携带 ed=2048（WS 0-RTT）
+  const path = enc('/' + cfg.path + (isTls ? '?ed=2048' : ''));   // TLS 下携带 ed=2048（WS 0-RTT）
   let q = isTls
     ? 'security=tls&sni=' + enc(host) + '&fp=chrome&host=' + enc(host) + '&type=ws&path=' + path
     : 'security=none&host=' + enc(host) + '&type=ws&path=' + path;
-  if (cfg.apn && isTls) q += '&alpn=' + alpnParam(cfg.apn);
-  if (cfg.ecn && isTls) q += '&ech=' + enc((cfg.ehs || 'cloudflare-ech.com') + '+' + (cfg.edn || 'https://223.5.5.5/dns-query'));   // ECH：仅 TLS 端口有效
-  return `trojan://${cfg.trp || cfg.uid}@${addr}:${port}?${q}#${uriFragName(name)}`;
+  if (cfg.alpn && isTls) q += '&alpn=' + alpnParam(cfg.alpn);
+  if (cfg.ech && isTls) q += '&ech=' + enc((cfg.echHost || 'cloudflare-ech.com') + '+' + (cfg.echDns || 'https://223.5.5.5/dns-query'));   // ECH：仅 TLS 端口有效
+  return `trojan://${cfg.trojanPassword || cfg.uuid}@${addr}:${port}?${q}#${uriFragName(name)}`;
 }
 
 // 优选域名 / 优选 API 的 DNS 解析缓存（TTL 10 分钟：域名或 URL → IP 列表）
@@ -2760,7 +2760,7 @@ function fetchTimeout(url, opts, ms) {
   });
 }
 // 解析优选域名/优选API为 IP：URL 数据源与域名并发拉取（避免串行拖垮订阅墙钟）；按输入顺序均衡截断 maxTotal，保证各地区节点都有
-// filterCF：true（订阅生成）只保留边缘段 IP，保证可达；false 仅用于面板「测试」按钮，需要看到被丢弃的非 CF 段地址
+// filterCF：true（订阅生成）只保留 Cloudflare 段 IP，保证可达；false 仅用于面板「测试」按钮，需要看到被丢弃的非 CF 段地址
 // v6：默认 IPv4 模式跳过 AAAA 查询（省一半 DNS 子请求）；仅筛选含 IPv6 时传 true
 // opts.fresh：不读缓存、失败不回退旧缓存（面板「测试」按钮用）；opts.onRaw(url, status, text)：回传优选 API 的原始响应
 async function resolvePreferredDomains(domainsStr, limitPerDomain = 100, maxTotal = 300, filterCF = true, v6 = false, opts = {}) {
@@ -2979,7 +2979,7 @@ async function buildNodes(cfg, cap = NODE_CAP) {
   const nodes = [];
   const used = new Set();
   // 筛选含 IPv6 时才需要交替排列 v4 / v6（见下方 preferredIPs 重排）
-  const ipT = (cfg.ft && cfg.ft.ip) || [];
+  const ipT = (cfg.filter && cfg.filter.ipType) || [];
   const wantV6 = ipT.includes('IPv6');
   const onlyV6 = ipT.length === 1 && ipT[0] === 'IPv6';
   // 节点形态：端口原样单端口下发（固定 443、不随机 TLS 端口、不追加明文端口变体）。
@@ -2991,19 +2991,19 @@ async function buildNodes(cfg, cap = NODE_CAP) {
     if (used.has(key)) return;
     used.add(key);
     const isTls = !HTTP_PORTS.has(Number(port));
-    if (cfg.tlo && !isTls) return;   // TLS 控制：仅下发 TLS 端口节点，明文端口跳过
+    if (cfg.tlsOnly && !isTls) return;   // TLS 控制：仅下发 TLS 端口节点，明文端口跳过
     // 节点端口按源端口原样下发（通常是 443），不做 TLS 端口随机（443 全域可达性最佳）
     const finalPort = Number(port);
-    const nm = protoNames(name, cfg.evl, cfg.etr, cfg.exh && isTls);
-    if (cfg.evl) nodes.push(vlessNode(cfg, server, finalPort, nm.v));
-    if (cfg.etr) nodes.push(trojanNode(cfg, server, finalPort, nm.t));  // Trojan 明文/TLS 端口均下发
-    if (cfg.exh && isTls) nodes.push(vlessNode(cfg, server, finalPort, nm.x, { type: 'xhttp' }));  // XHTTP 仅 TLS 端口
+    const nm = protoNames(name, cfg.enableVless, cfg.enableTrojan, cfg.enableXhttp && isTls);
+    if (cfg.enableVless) nodes.push(vlessNode(cfg, server, finalPort, nm.v));
+    if (cfg.enableTrojan) nodes.push(trojanNode(cfg, server, finalPort, nm.t));  // Trojan 明文/TLS 端口均下发
+    if (cfg.enableXhttp && isTls) nodes.push(vlessNode(cfg, server, finalPort, nm.x, { type: 'xhttp' }));  // XHTTP 仅 TLS 端口
   };
   // 按源端口（通常 443）下发；关闭「仅 TLS 端口」时，443 节点另追加一个 80 明文端口节点（名称加「·80」）
   const multiPort = (server, port, name) => {
     port = Number(port) || 443;
     push(server, port, name);
-    if (!cfg.tlo && port === 443) push(server, 80, name + '·80');
+    if (!cfg.tlsOnly && port === 443) push(server, 80, name + '·80');
   };
   const domains = String(cfg.preferredDomains || '').split(/[\n,;]+/).map(s => s.trim()).filter(s => s && !s.includes('://'));  // URL 数据源由 resolvePreferredDomains 解析，不作为服务器地址
   domains.forEach((d, i) => {
@@ -3117,10 +3117,10 @@ const FILTER_IPTYPES = ['IPv4', 'IPv6'];
 // 按面板筛选配置过滤节点（region 按名称地区标记、ipType 按地址类型、isp 按名称运营商标记）
 // 任何维度筛选后为空时逐级放宽（isp → ipType → region），保证订阅永不为空（避免客户端「无效订阅」）
 function filterNodes(nodes, filter) {
-  if (!filter || !filter.rg && !filter.ip && !filter.is) return nodes;
-  const region = Array.isArray(filter.rg) && filter.rg.length ? filter.rg : ['all'];
-  const ipType = filter.ip || FILTER_IPTYPES;
-  const isp = filter.is || FILTER_ISPS;
+  if (!filter || !filter.region && !filter.ipType && !filter.isp) return nodes;
+  const region = Array.isArray(filter.region) && filter.region.length ? filter.region : ['all'];
+  const ipType = filter.ipType || FILTER_IPTYPES;
+  const isp = filter.isp || FILTER_ISPS;
   // 预解析节点（名称解析一次，供各轮过滤与池标记检查复用）
   const meta = nodes.map(n => {
     const { host } = parseNodeServer(n);
@@ -3213,11 +3213,11 @@ function clashProxyYaml(p) {
   return L.join('\n');
 }
 function generateClash(cfg, nodes) {
-  const host = cfg.hst;
-  const path = '/' + cfg.pth;
+  const host = cfg.host;
+  const path = '/' + cfg.path;
   // TLS 下 ws 路径携带 ed=2048：mihomo 据此启用 early data（首包预发进 Sec-WebSocket-Protocol，省 1 个 RTT）
   const wsPath = path + '?ed=2048';
-  const alpnArr = alpnList(cfg.apn);   // 面板 ALPN 设置；未设置时 ws 用 http/1.1、xhttp 用 h2
+  const alpnArr = alpnList(cfg.alpn);   // 面板 ALPN 设置；未设置时 ws 用 http/1.1、xhttp 用 h2
   const seen = new Set();
   // XHTTP 节点按 mihomo xhttp-opts 规范输出（含 x-padding 混淆参数），与 WS/Trojan 一并下发
   const proxies = nodes.map((n) => {
@@ -3237,7 +3237,7 @@ function generateClash(cfg, nodes) {
     const base = {
       name, server: srv, port: prt, udp: true,
       ...(tls ? { tls: true, 'skip-cert-verify': false, servername: host, 'client-fingerprint': 'chrome', alpn: alpnArr || ['http/1.1'] } : {}),
-      ...(cfg.ecn && tls ? { 'ech-opts': { enable: true, 'query-server-name': cfg.ehs || 'cloudflare-ech.com' } } : {})   // mihomo ECH 格式为顶层 ech-opts（enable + query-server-name）
+      ...(cfg.ech && tls ? { 'ech-opts': { enable: true, 'query-server-name': cfg.echHost || 'cloudflare-ech.com' } } : {})   // mihomo ECH 格式为顶层 ech-opts（enable + query-server-name）
     };
     if (isTrojan) {
       return { ...base, type: 'trojan', password: user, network: 'ws', 'ws-opts': { path: tls ? wsPath : path, headers: { Host: host } } };
@@ -3267,7 +3267,7 @@ function generateClash(cfg, nodes) {
   // 节点排序：443端口优先（非标准端口如8443在mihomo下HTTPS握手易被GFW干扰，放后面避免默认选中）
   proxies.sort((a, b) => (a.port === 443 ? 0 : 1) - (b.port === 443 ? 0 : 1));
   // 模板中的本地凭据按 UUID 派生（同一部署每次订阅结果稳定，不同部署互不相同），避免所有人共用公开的默认密码
-  const derive = (purpose) => sha224hex('hopline-clash|' + purpose + '|' + cfg.uid).slice(0, 20);
+  const derive = (purpose) => sha224hex('hopline-clash|' + purpose + '|' + cfg.uuid).slice(0, 20);
   const template = CLASH_TEMPLATE
     .split('__HOPLINE_SS_PASSWORD__').join(derive('ss'))
     .split('__HOPLINE_AUTH_PASSWORD__').join(derive('auth'))
@@ -3286,8 +3286,8 @@ ${template}
 // 服务端仅在启用 Trojan 时才接受 Trojan 连接，且密码可能与 UUID 不同，改写出的节点连不上。
 // 未启用 Trojan 时无节点可用，直接报错提示，而不是输出一份全部失效的配置。
 function generateSurfboard(cfg, nodes) {
-  const host = cfg.hst, path = '/' + cfg.pth;
-  if (!cfg.etr) throw new Error('Surfboard 只支持 Trojan 节点：请先在「节点配置」中启用 Trojan 协议');
+  const host = cfg.host, path = '/' + cfg.path;
+  if (!cfg.enableTrojan) throw new Error('Surfboard 只支持 Trojan 节点：请先在「节点配置」中启用 Trojan 协议');
   const sb = nodes.filter(n => n.startsWith('trojan://') && n.indexOf('security=none') < 0);
   if (!sb.length) throw new Error('没有可用于 Surfboard 的 Trojan TLS 节点（明文端口节点已被过滤）');
   const lines = sb.map((n, i) => {
@@ -3325,9 +3325,9 @@ const SINGBOX_RULE_SETS = [
 // MetaCubeX 规则库 sing 分支的二进制规则集（.srs），经 jsDelivr 直连下载（国内可达）
 const SINGBOX_RULE_BASE = 'https://cdn.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/';
 function generateSingbox(cfg, nodes) {
-  const host = cfg.hst;
-  const path = '/' + cfg.pth;
-  const alpnArr = alpnList(cfg.apn);
+  const host = cfg.host;
+  const path = '/' + cfg.path;
+  const alpnArr = alpnList(cfg.alpn);
   const seen = new Set();
   // 官方 sing-box 内核没有 xhttp 传输（仅部分第三方分支支持），含 xhttp 出站的配置整体无法加载，因此不下发 XHTTP 节点
   const outbounds = nodes.filter(n => getParam(n, 'type') !== 'xhttp').map((n, i) => {
@@ -3421,7 +3421,7 @@ function dropXhttp(nodes, client) {
 // ---------- Surge ----------
 function generateSurge(cfg, nodes) {
   nodes = dropXhttp(nodes, 'Surge');
-  const host = cfg.hst, path = '/' + cfg.pth;
+  const host = cfg.host, path = '/' + cfg.path;
   const proxies = nodes.map((n, i) => {
     const { user, srv, prt, name, isTrojan, tls } = parseShareNode(n, i);
     const tlsPart = tls ? ', tls=true, skip-cert-verify=false, sni=' + host : ', tls=false';
@@ -3451,7 +3451,7 @@ FINAL,🐟 漏网之鱼
 // ---------- Loon ----------
 function generateLoon(cfg, nodes) {
   nodes = dropXhttp(nodes, 'Loon');
-  const host = cfg.hst, path = '/' + cfg.pth;
+  const host = cfg.host, path = '/' + cfg.path;
   const proxies = nodes.map((n, i) => {
     const { user, srv, prt, name, isTrojan, tls } = parseShareNode(n, i);
     const tlsPart = tls ? ', tls=true, skip-cert-verify=false, sni=' + host : ', tls=false';
@@ -3480,7 +3480,7 @@ FINAL,🐟 漏网之鱼
 // ---------- Quantumult X ----------
 function generateQuanX(cfg, nodes) {
   nodes = dropXhttp(nodes, 'Quantumult X');
-  const host = cfg.hst, path = '/' + cfg.pth;
+  const host = cfg.host, path = '/' + cfg.path;
   // QuanX 的 ip:port 格式中 IPv6 必须带方括号（裸 v6 与端口冒号歧义）
   const qxHost = (srv) => srv.indexOf(':') >= 0 ? '[' + srv + ']' : srv;
   const servers = nodes.map((n, i) => {
@@ -3523,25 +3523,25 @@ const NODE_CAP = 500;
 // 根据 UA 或指定格式生成订阅
 async function generateSubscription(cfg, requestUrl, format, ua) {
   // 明文端口节点只由「仅 TLS 端口」控制（默认开启）；ECH 只对 TLS 生效，开启时同样只下发 TLS 端口节点。
-  // 自定义域名的明文端口需在域名平台关闭「始终使用 HTTPS」，否则被 301 重定向、WebSocket 握手失败
-  const rc = Object.assign({}, cfg, { host: cfg.hst || new URL(requestUrl).hostname });
+  // 自定义域名的明文端口需在 Cloudflare 关闭「始终使用 HTTPS」，否则被 301 重定向、WebSocket 握手失败
+  const rc = Object.assign({}, cfg, { host: cfg.host || new URL(requestUrl).hostname });
   const prefList = effectivePrefDomains(cfg);   // 面板填写的优选域名（整体替换内置列表）或内置列表
-  if (rc.ecn) rc.tlo = true;
+  if (rc.ech) rc.tlsOnly = true;
   // 筛选含 IPv6 时查询 AAAA 记录并生成 IPv6 节点（默认双选 IPv4+IPv6 同样生效）；
   // 仅勾选 IPv6（单选）时全部走 IPv6 来源
-  const ipT = (cfg.ft && cfg.ft.ip) || [];
+  const ipT = (cfg.filter && cfg.filter.ipType) || [];
   const wantV6 = ipT.includes('IPv6');
   const onlyV6 = ipT.length === 1 && ipT[0] === 'IPv6';
   // 节点池由「地址来源」三项组装（rc.preferredDomains / rc.preferredIPs 只是本次订阅的内部中间结果，不是配置项）——
   // 1) 原生地址（src.native）：工作器域名直接作为节点 server 下发（默认关闭）；
   // 2) 优选域名（src.prefDomain）：第三方优选域名直接作为节点 server 下发（客户端连接时动态 DNS 解析，拿到当前最优 CF 边缘 IP）；
   // 3) 优选 IP（src.prefIp）：自定义优选 API / HostMonit / uouin / 微测网等在线来源（「优选配置 → 优选 IP 来源」）。
-  // 这些来源都是任播 IP / 域名，大多不带地区标记（任播 IP 的落地机房取决于客户端所在网络），
-  // 因此面板「节点地区」筛选通常不改变节点构成；来源一律只保留边缘段，非 CF 段 IP 无法转发到 Worker
-  const src = cfg.sc || {};
-  const useNative = src.nv === true;            // 启用原生地址（工作器域名）
-  const useDomain = src.pd !== false;       // 启用优选域名（默认开）
-  const useIp = src.pi !== false;               // 启用优选 IP（内置池 + 实时拉取，默认开）
+  // 这些来源都是 Cloudflare 任播 IP / 域名，大多不带地区标记（任播 IP 的落地机房取决于客户端所在网络），
+  // 因此面板「节点地区」筛选通常不改变节点构成；来源一律只保留 Cloudflare 段，非 CF 段 IP 无法转发到 Worker
+  const src = cfg.src || {};
+  const useNative = src.native === true;            // 启用原生地址（工作器域名）
+  const useDomain = src.prefDomain !== false;       // 启用优选域名（默认开）
+  const useIp = src.prefIp !== false;               // 启用优选 IP（内置池 + 实时拉取，默认开）
   rc.preferredDomains = '';
   rc.preferredIPs = [];
   // 原生地址（工作器域名，IPv4 入口）：仅勾选 IPv6 时跳过，避免 v4 域名混入
@@ -3554,16 +3554,16 @@ async function generateSubscription(cfg, requestUrl, format, ua) {
   // 「优选 IP」的在线来源（面板「优选配置 → 优选 IP 来源」开关控制，并行拉取，每个来源 1 个子请求、缓存 10 分钟）：
   // 自定义优选 API 1 / 2（用户自选来源排最前）→ HostMonit → uouin → 微测网。HostMonit 为纯 IPv4，仅勾选 IPv6 时跳过；微测网只拉取所选 IP 类型对应的页面
   if (useIp) {
-    const ps = cfg.ix || {};
-    const apiSrc = (n) => (ps['a' + n] && ps['a' + n + 'u'])
-      ? resolvePreferredDomains(ps['a' + n + 'u'], 200, 300, true, false).catch(() => [])
+    const ps = cfg.ipsrc || {};
+    const apiSrc = (n) => (ps['api' + n] && ps['api' + n + 'Url'])
+      ? resolvePreferredDomains(ps['api' + n + 'Url'], 200, 300, true, false).catch(() => [])
       : Promise.resolve([]);
     const results = await Promise.all([
       apiSrc(1),
       apiSrc(2),
-      (ps.hm !== false && !onlyV6) ? fetchLatestPreferredIPs(150).catch(() => null) : null,
-      ps.uo === true ? fetchUouinIPs(!onlyV6, wantV6).catch(() => []) : null,
-      ps.wt === true ? fetchWetestIPs(!onlyV6, wantV6).catch(() => []) : null,
+      (ps.hostmonit !== false && !onlyV6) ? fetchLatestPreferredIPs(150).catch(() => null) : null,
+      ps.uouin === true ? fetchUouinIPs(!onlyV6, wantV6).catch(() => []) : null,
+      ps.wetest === true ? fetchWetestIPs(!onlyV6, wantV6).catch(() => []) : null,
     ]);
     for (const list of results) if (list && list.length) rc.preferredIPs.push(...list);
   }
@@ -3589,11 +3589,11 @@ async function generateSubscription(cfg, requestUrl, format, ua) {
   const forced = (format || '').toLowerCase();
   const cap = NODE_CAP;
   // 不做任何测活剔除：Worker 边缘连通性 ≠ 客户端连通性，且 Workers 无法连接 CF 段 IP；全量按顺序下发由客户端自行择优
-  let nodes = filterNodes(await buildNodes(rc, cap), cfg.ft);
+  let nodes = filterNodes(await buildNodes(rc, cap), cfg.filter);
   // 所有来源都没有产出节点时（如在线来源全部失败），用官方域名节点兜底，保证订阅不为空
   // （客户端不会收到「无效订阅」）；域名节点由客户端自行解析，IPv4 / IPv6 均可
   if (!nodes.length) {
-    const fb = Object.assign({}, rc, { preferredDomains: BUILTIN_OFFICIAL_DOMAINS.map((d, i) => d + '#域名-' + String(i + 1).padStart(2, '0')).join('\n'), preferredIPs: [], tlo: true });
+    const fb = Object.assign({}, rc, { preferredDomains: BUILTIN_OFFICIAL_DOMAINS.map((d, i) => d + '#域名-' + String(i + 1).padStart(2, '0')).join('\n'), preferredIPs: [], tlsOnly: true });
     nodes = await buildNodes(fb, cap);
   }
   // 严格封顶：多协议膨胀可能越过上限，统一截断（节点数量只做上限，来源不足时按实际数量下发）
@@ -3664,7 +3664,7 @@ button:disabled{opacity:.6;cursor:not-allowed}
 <div class="box">
   <div class="brand">
     <div class="mark"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12h4l3-7 4 14 3-7h2"/></svg></div>
-    <div class="bt"><b>Hopline</b><span>代理订阅面板</span></div>
+    <div class="bt"><b>Hopline</b><span>Cloudflare 代理订阅面板</span></div>
   </div>
   <h1>登录</h1>
   <p>请输入管理用户名与密码以继续</p>
@@ -3674,7 +3674,7 @@ button:disabled{opacity:.6;cursor:not-allowed}
     <input type="password" id="pwd" placeholder="管理密码" autocomplete="current-password">
     <button type="submit" id="btn">登录</button>
   </form>
-  <div class="foot">配置保存在 KV 中，24 小时未使用面板自动退出，最长 7 天需重新登录</div>
+  <div class="foot">配置保存在 Cloudflare KV 中，24 小时未使用面板自动退出，最长 7 天需重新登录</div>
 </div>
 <script>
 (function(){
@@ -3709,7 +3709,7 @@ button:disabled{opacity:.6;cursor:not-allowed}
 // 读取顺序：isolate 内存 → Cache API（同机房共享）→ KV（已绑定时，全球共享）→ 网络（三个镜像并发，先到先用）
 // 面板拉不到时只有面板不可用（返回 503 说明页），代理与订阅完全不受影响
 // ---------------------------------------------------------------------------
-const PANEL_SHA256 = 'ea80076f0a9bd26cb7dc2685d021d4c544bb5e286d21cd8c5d25a9ee7db6f2c7';
+const PANEL_SHA256 = '726808a690ab1b7d0bfaa796285a0d863e0cf1c90789dce0d8768c1ee266ef63';
 const PANEL_ASSET_PATH = '/dist/panel.html';
 const PANEL_MAX_BYTES = 1024 * 1024;
 const PANEL_FETCH_TIMEOUT = 6000;
@@ -3887,9 +3887,9 @@ const AUTH_TTL_MS = 24 * 60 * 60 * 1000;
 const AUTH_MAX_MS = 7 * 24 * 60 * 60 * 1000;
 const AUTH_REFRESH_MIN_MS = 10 * 60 * 1000;   // 新有效期至少比当前晚 10 分钟才重新签发（连续操作时不必每个请求都换 Cookie）
 // 当前生效的管理用户名（KV 中为空等异常情况回落默认 admin）
-function adminUserOf(cfg) { return String(cfg.adu || '') || 'admin'; }
+function adminUserOf(cfg) { return String(cfg.adminUser || '') || 'admin'; }
 // 会话签名密钥含用户名：修改用户名与修改密码一样，使其它浏览器的登录态失效
-function authKey(cfg) { return 'hopline-auth|' + String(cfg.adp) + '|' + String(cfg.uid) + '|' + adminUserOf(cfg); }
+function authKey(cfg) { return 'hopline-auth|' + String(cfg.admin) + '|' + String(cfg.uuid) + '|' + adminUserOf(cfg); }
 // iat：登录时间（续期时沿用，保证 7 天上限从首次登录算起）；返回 { token, exp }
 async function makeAuthToken(cfg, iat) {
   const now = Date.now();
@@ -3900,7 +3900,7 @@ async function makeAuthToken(cfg, iat) {
 // 校验登录 Cookie：有效时返回会话 { exp, iat }，否则 false。
 // 传入 state 时顺便判断是否需要续期，需要则把新 Cookie 放到 state.setCookie（由 fetch 入口附加到响应上）
 async function requireAuth(request, cfg, state) {
-  if (!cfg.adp) return false;
+  if (!cfg.admin) return false;
   const cookies = request.headers.get('Cookie') || '';
   const m = cookies.match(/(?:^|;\s*)hopline_auth=([^;]+)/);
   if (!m) return false;
@@ -3968,10 +3968,10 @@ function authCookie(token, exp) {
 function publicConfig(cfg, env) {
   const out = pickSchema(cfg);
   out.version = VERSION;
-  out.adpSet = !!cfg.adp;
-  delete out.adp;
-  out.pth = cfg.pth;                              // 环境变量 PATH 提供（面板中只读）
-  out.panelPath = cfg.pth;                         // 当前生效的面板路径
+  out.adminSet = !!cfg.admin;
+  delete out.admin;
+  out.path = cfg.path;                              // 环境变量 PATH 提供（面板中只读）
+  out.panelPath = cfg.path;                         // 当前生效的面板路径
   out.envLocked = envLockedFields(env);             // { 字段: 环境变量名 }：面板中只读
   out.kv = !!(kvStore(env) && typeof kvStore(env).put === 'function');
   out.builtinPrefDomains = DEFAULT_PREFERRED_DOMAINS.split('\n');   // 面板「载入内置列表」使用
@@ -3995,7 +3995,7 @@ async function serveSubscription(request, env, cfg, fmt) {
 // UUID 可选——未绑定 KV 时没有地方保存自动生成的 UUID，此时必须手动设置
 function setupProblems(env, cfg) {
   const lines = [];
-  if (!cfg.pth) {
+  if (!cfg.path) {
     lines.push(cfg._pathError
       ? '环境变量 PATH 的值不正确：' + cfg._pathError + '。'
       : 'Hopline 尚未完成配置：请在 Worker 环境变量中设置 PATH（面板、订阅与节点共用的访问路径，如 mypanel）和 ADMIN（管理密码），然后重新访问。从旧版升级时：旧版的默认路径就是 UUID，把 PATH 设为原来的 UUID（或之前用 D 设置的路径）即可保持节点与订阅地址不变。');
@@ -4029,7 +4029,7 @@ async function handleRequest(request, env, state) {
   // 必填项缺失：PATH（面板 / 订阅 / 节点的访问路径）未设置或非法，或没有 UUID 又无处保存。没有路径就无法路由任何请求，统一返回设置说明
   const setupMsg = setupProblems(env, cfg);
   if (setupMsg) return new Response(setupMsg, { status: 503, headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' } });
-  const panelPath = cfg.pth;
+  const panelPath = cfg.path;
   const path = url.pathname.replace(/^\/+|\/+$/g, '');
   const segs = path.split('/');
 
@@ -4042,7 +4042,7 @@ async function handleRequest(request, env, state) {
   // ---------- 登录 ----------
   if (segs[0] === 'login') {
     // 未设置 ADMIN 时登录页不存在（避免暴露面板路径）
-    if (!cfg.adp) return new Response('Not Found', { status: 404 });
+    if (!cfg.admin) return new Response('Not Found', { status: 404 });
     if (request.method === 'POST') {
       const clientIp = request.headers.get('CF-Connecting-IP') || 'unknown';
       const body = await request.text();
@@ -4051,7 +4051,7 @@ async function handleRequest(request, env, state) {
       if (loginBlocked(clientIp)) return json({ ok: false, msg: '尝试次数过多，请 15 分钟后再试' }, 429);
       // 用户名与密码都校验完再判定（密码校验总会执行，不因用户名错误提前返回），错误提示不区分是哪一项
       const userOk = timingSafeEqual(params.get('username') || '', adminUserOf(cfg));
-      const passOk = await verifyAdminPassword(cfg.adp, params.get('password') || '');
+      const passOk = await verifyAdminPassword(cfg.admin, params.get('password') || '');
       if (userOk && passOk) {
         loginSuccess(clientIp);
         const t = await makeAuthToken(cfg);
@@ -4073,8 +4073,8 @@ async function handleRequest(request, env, state) {
   // 订阅入口：自定义订阅路径（如 /AAZ/sub），留空则为 /<UUID>/sub（面板路径自定义时也是 UUID）；
   // 面板路径下的 /sub 继续可用（兼容已导入的旧订阅地址）。
   // 面板入口、管理 API 与代理入口只认 panelPath，订阅入口下不开放面板与管理接口
-  const subAlias = String(cfg.sbu || '').trim().replace(/^\/+/, '').replace(/\/+$/, '');
-  const subRoot = subAlias || cfg.uid;
+  const subAlias = String(cfg.subUrl || '').trim().replace(/^\/+/, '').replace(/\/+$/, '');
+  const subRoot = subAlias || cfg.uuid;
   const isPanelRoot = segs[0] === panelPath;
   const isSubRoot = isPanelRoot || segs[0] === subRoot;
 
@@ -4089,7 +4089,7 @@ async function handleRequest(request, env, state) {
       return handleWebSocketProxy(request, cfg);
     }
     if (request.method === 'POST') {
-      if (cfg.exh) {
+      if (cfg.enableXhttp) {
         try { return await handleXhttpProxy(request, cfg); }
         catch (e) { return json({ ok: false, msg: 'xhttp 代理错误: ' + (e.message || e) }, 500); }
       }
@@ -4109,7 +4109,7 @@ async function handleRequest(request, env, state) {
 
   // ---------- 面板（浏览器访问） ----------
   if (isPanelRoot && segs.length === 1 && isBrowserUA(UA)) {
-    if (!cfg.adp) {
+    if (!cfg.admin) {
       return new Response('面板已禁用：请先在 Worker 环境变量中设置 ADMIN（管理密码），然后重新访问。', { status: 403, headers: { 'Content-Type': 'text/plain; charset=utf-8' } });
     }
     if (!(await requireAuth(request, cfg, state))) {
@@ -4153,14 +4153,14 @@ async function handleRequest(request, env, state) {
           const crossErrors = crossCheckConfig(merged);
           if (crossErrors.length) return json({ ok: false, msg: formatConfigErrors(crossErrors), errors: crossErrors, ignored }, 400);
           // KV 里的管理密码只存摘要：面板新设的密码（以及 KV 中已有的明文密码）都在这里转成摘要
-          if (merged.adp && !isAdminHash(merged.adp) && !envLockedFields(env).adp) merged.adp = await hashAdminPassword(merged.adp);
+          if (merged.admin && !isAdminHash(merged.admin) && !envLockedFields(env).admin) merged.admin = await hashAdminPassword(merged.admin);
           const stored = await saveConfig(env, merged);
           // 直接用刚写入的数据组装新配置（不回读 KV：边缘缓存可能仍是旧值）
           const fresh = buildConfig(env, stored);
           // UUID / 管理密码 / 管理用户名变更会使登录态签名失效：当前会话已通过鉴权，直接签发新令牌，面板无需重新登录
           // （沿用原登录时间，7 天上限不因此重置）
           const headers = {};
-          if (fresh.adp && authKey(fresh) !== authKey(cfg)) { const t = await makeAuthToken(fresh, authed.iat); headers['Set-Cookie'] = authCookie(t.token, t.exp); }
+          if (fresh.admin && authKey(fresh) !== authKey(cfg)) { const t = await makeAuthToken(fresh, authed.iat); headers['Set-Cookie'] = authCookie(t.token, t.exp); }
           return json({ ok: true, data: publicConfig(fresh, env), ignored, msg: '已保存：本地区立即生效，其他地区约 1 分钟内同步' }, 200, headers);
         } catch (e) { return json({ ok: false, msg: '保存失败: ' + (e.message || e) }, 500); }
       }
@@ -4217,7 +4217,7 @@ async function handleRequest(request, env, state) {
         r = await domainsFetch(chk.value ? chk.value.split('\n') : DEFAULT_PREFERRED_DOMAINS.split('\n'));
       }
       else if (source === 'api1' || source === 'api2') {
-        const chk = checkFieldValue(SCHEMA_BY_KEY.get('ix.a' + source.slice(3) + 'u'), body.url);
+        const chk = checkFieldValue(SCHEMA_BY_KEY.get('ipsrc.' + source + 'Url'), body.url);
         if (chk.error || !chk.value) return json({ ok: false, msg: chk.error || '请先填写 API 地址' }, 400);
         r = await customApiFetch(chk.value);
       } else return json({ ok: false, msg: '未知来源：' + source }, 400);

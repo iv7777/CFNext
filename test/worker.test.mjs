@@ -283,6 +283,24 @@ test('面板路径只认 PATH：节点路径为 /<PATH>，UUID 仅作节点身�
   assert.equal(log.length, 0);
 });
 
+test('绑定域名留空时 SNI / Host 取访问域名；填写后用绑定域名（链接、Clash、sing-box 均如此）', async () => {
+  const sub = (env, ua, fmt = '') => withFetch(nodesFetch, async () => (await (await call(env, `/${UUID}/sub${fmt}`, { ua })).text()));
+  const blank = baseEnv({ CONFIG_KV: kv({ config: customCfg({ enableTrojan: true }) }) });
+  const links = (await sub(blank, 'v2rayN/7.0')).split('\n').filter(l => /^(vless|trojan):\/\//.test(l));
+  assert.ok(links.some(l => l.startsWith('vless://')) && links.some(l => l.startsWith('trojan://')));
+  for (const l of links) {
+    assert.match(l, /[?&]sni=node\.example\.com(&|#)/, l);
+    assert.match(l, /[?&]host=node\.example\.com(&|#)/, l);
+  }
+  assert.match(await sub(blank, 'clash.meta', '?fmt=clash'), /servername: node\.example\.com/);
+  assert.match(await sub(blank, 'sing-box/1.9', '?fmt=singbox'), /"server_name":\s*"node\.example\.com"/);
+  const bound = baseEnv({ CONFIG_KV: kv({ config: customCfg({ host: 'sub.example.org' }) }) });
+  for (const l of (await sub(bound, 'v2rayN/7.0')).split('\n').filter(l => /^vless:\/\//.test(l))) {
+    assert.match(l, /[?&]sni=sub\.example\.org(&|#)/, l);
+    assert.match(l, /[?&]host=sub\.example\.org(&|#)/, l);
+  }
+});
+
 test('UUID 可选：未设置时首次访问随机生成并保存到 KV，之后一直沿用，面板可查看与修改；保留 KV 中已有的其它设置', async () => {
   const env = baseEnv({ UUID: undefined, CONFIG_KV: kv({ config: { alpn: 'h2' } }) });
   const cookie = await login(env);
