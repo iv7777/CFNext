@@ -6,12 +6,12 @@ const NODE_CAP = 500;
 async function generateSubscription(cfg, requestUrl, format, ua) {
   // 明文端口节点只由「仅 TLS 端口」控制（默认开启）；ECH 只对 TLS 生效，开启时同样只下发 TLS 端口节点。
   // 自定义域名的明文端口需在 Cloudflare 关闭「始终使用 HTTPS」，否则被 301 重定向、WebSocket 握手失败
-  const rc = Object.assign({}, cfg, { host: cfg.hst || new URL(requestUrl).hostname });
+  const rc = Object.assign({}, cfg, { host: cfg.host || new URL(requestUrl).hostname });
   const prefList = effectivePrefDomains(cfg);   // 面板填写的优选域名（整体替换内置列表）或内置列表
-  if (rc.ecn) rc.tlo = true;
+  if (rc.ech) rc.tlsOnly = true;
   // 筛选含 IPv6 时查询 AAAA 记录并生成 IPv6 节点（默认双选 IPv4+IPv6 同样生效）；
   // 仅勾选 IPv6（单选）时全部走 IPv6 来源
-  const ipT = (cfg.ft && cfg.ft.ip) || [];
+  const ipT = (cfg.filter && cfg.filter.ipType) || [];
   const wantV6 = ipT.includes('IPv6');
   const onlyV6 = ipT.length === 1 && ipT[0] === 'IPv6';
   // 节点池由「地址来源」三项组装（rc.preferredDomains / rc.preferredIPs 只是本次订阅的内部中间结果，不是配置项）——
@@ -20,10 +20,10 @@ async function generateSubscription(cfg, requestUrl, format, ua) {
   // 3) 优选 IP（src.prefIp）：自定义优选 API / HostMonit / uouin / 微测网等在线来源（「优选配置 → 优选 IP 来源」）。
   // 这些来源都是 Cloudflare 任播 IP / 域名，大多不带地区标记（任播 IP 的落地机房取决于客户端所在网络），
   // 因此面板「节点地区」筛选通常不改变节点构成；来源一律只保留 Cloudflare 段，非 CF 段 IP 无法转发到 Worker
-  const src = cfg.sc || {};
-  const useNative = src.nv === true;            // 启用原生地址（工作器域名）
-  const useDomain = src.pd !== false;       // 启用优选域名（默认开）
-  const useIp = src.pi !== false;               // 启用优选 IP（内置池 + 实时拉取，默认开）
+  const src = cfg.src || {};
+  const useNative = src.native === true;            // 启用原生地址（工作器域名）
+  const useDomain = src.prefDomain !== false;       // 启用优选域名（默认开）
+  const useIp = src.prefIp !== false;               // 启用优选 IP（内置池 + 实时拉取，默认开）
   rc.preferredDomains = '';
   rc.preferredIPs = [];
   // 原生地址（工作器域名，IPv4 入口）：仅勾选 IPv6 时跳过，避免 v4 域名混入
@@ -36,16 +36,16 @@ async function generateSubscription(cfg, requestUrl, format, ua) {
   // 「优选 IP」的在线来源（面板「优选配置 → 优选 IP 来源」开关控制，并行拉取，每个来源 1 个子请求、缓存 10 分钟）：
   // 自定义优选 API 1 / 2（用户自选来源排最前）→ HostMonit → uouin → 微测网。HostMonit 为纯 IPv4，仅勾选 IPv6 时跳过；微测网只拉取所选 IP 类型对应的页面
   if (useIp) {
-    const ps = cfg.ix || {};
-    const apiSrc = (n) => (ps['a' + n] && ps['a' + n + 'u'])
-      ? resolvePreferredDomains(ps['a' + n + 'u'], 200, 300, true, false).catch(() => [])
+    const ps = cfg.ipsrc || {};
+    const apiSrc = (n) => (ps['api' + n] && ps['api' + n + 'Url'])
+      ? resolvePreferredDomains(ps['api' + n + 'Url'], 200, 300, true, false).catch(() => [])
       : Promise.resolve([]);
     const results = await Promise.all([
       apiSrc(1),
       apiSrc(2),
-      (ps.hm !== false && !onlyV6) ? fetchLatestPreferredIPs(150).catch(() => null) : null,
-      ps.uo === true ? fetchUouinIPs(!onlyV6, wantV6).catch(() => []) : null,
-      ps.wt === true ? fetchWetestIPs(!onlyV6, wantV6).catch(() => []) : null,
+      (ps.hostmonit !== false && !onlyV6) ? fetchLatestPreferredIPs(150).catch(() => null) : null,
+      ps.uouin === true ? fetchUouinIPs(!onlyV6, wantV6).catch(() => []) : null,
+      ps.wetest === true ? fetchWetestIPs(!onlyV6, wantV6).catch(() => []) : null,
     ]);
     for (const list of results) if (list && list.length) rc.preferredIPs.push(...list);
   }
@@ -71,11 +71,11 @@ async function generateSubscription(cfg, requestUrl, format, ua) {
   const forced = (format || '').toLowerCase();
   const cap = NODE_CAP;
   // 不做任何测活剔除：Worker 边缘连通性 ≠ 客户端连通性，且 Workers 无法连接 CF 段 IP；全量按顺序下发由客户端自行择优
-  let nodes = filterNodes(await buildNodes(rc, cap), cfg.ft);
+  let nodes = filterNodes(await buildNodes(rc, cap), cfg.filter);
   // 所有来源都没有产出节点时（如在线来源全部失败），用官方域名节点兜底，保证订阅不为空
   // （客户端不会收到「无效订阅」）；域名节点由客户端自行解析，IPv4 / IPv6 均可
   if (!nodes.length) {
-    const fb = Object.assign({}, rc, { preferredDomains: BUILTIN_OFFICIAL_DOMAINS.map((d, i) => d + '#域名-' + String(i + 1).padStart(2, '0')).join('\n'), preferredIPs: [], tlo: true });
+    const fb = Object.assign({}, rc, { preferredDomains: BUILTIN_OFFICIAL_DOMAINS.map((d, i) => d + '#域名-' + String(i + 1).padStart(2, '0')).join('\n'), preferredIPs: [], tlsOnly: true });
     nodes = await buildNodes(fb, cap);
   }
   // 严格封顶：多协议膨胀可能越过上限，统一截断（节点数量只做上限，来源不足时按实际数量下发）

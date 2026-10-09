@@ -6,7 +6,7 @@
 // 其余三项为固定混淆策略。V2rayN（extra JSON，camelCase）与 mihomo
 // （xhttp-opts，kebab-case）共用同一份派生结果。
 function xhttpPadding(cfg) {
-  const u = cfg.uid || '';
+  const u = cfg.uuid || '';
   return {
     xPaddingObfsMode: true, xPaddingMethod: 'tokenish', xPaddingPlacement: 'queryInHeader',
     xPaddingHeader: u.slice(1, 7), xPaddingKey: '_' + u.slice(25, 31)
@@ -54,7 +54,7 @@ function alpnParam(alpn) {
 }
 
 function vlessNode(cfg, server, port, name, extra = {}) {
-  const host = cfg.hst;
+  const host = cfg.host;
   const addr = server.includes(':') && !server.startsWith('[') ? `[${server}]` : server;  // IPv6 需方括号
   const isTls = !HTTP_PORTS.has(Number(port));
   const enc = encodeURIComponent;
@@ -71,30 +71,30 @@ function vlessNode(cfg, server, port, name, extra = {}) {
   }
   else q += '&type=ws';   // 明文端口与默认路径均走 ws
   // TLS 下的 ws 路径携带 ed=2048（WS 0-RTT 早数据，见 decodeEarlyData）；明文端口与 xhttp 不带
-  q += '&path=' + enc('/' + cfg.pth + (!isXhttp && isTls ? '?ed=2048' : ''));
+  q += '&path=' + enc('/' + cfg.path + (!isXhttp && isTls ? '?ed=2048' : ''));
   // ALPN：面板设置优先；XHTTP stream-one 依赖 HTTP/2 双向流，未设置时显式指定 h2（与 Clash 输出一致），不依赖客户端内核的默认值
-  if (isTls && (cfg.apn || isXhttp)) q += '&alpn=' + (cfg.apn ? alpnParam(cfg.apn) : 'h2');
-  if (cfg.ecn && isTls) {
+  if (isTls && (cfg.alpn || isXhttp)) q += '&alpn=' + (cfg.alpn ? alpnParam(cfg.alpn) : 'h2');
+  if (cfg.ech && isTls) {
     // ECH：输出 "查询域名+DoH"（xray/V2rayN 客户端本地查询 ECH 配置，Worker 端拉取会与用户边缘密钥不匹配导致握手失败）
-    q += '&ech=' + enc((cfg.ehs || 'cloudflare-ech.com') + '+' + (cfg.edn || 'https://223.5.5.5/dns-query'));
+    q += '&ech=' + enc((cfg.echHost || 'cloudflare-ech.com') + '+' + (cfg.echDns || 'https://223.5.5.5/dns-query'));
   }
-  return `vless://${cfg.uid}@${addr}:${port}?${q}#${uriFragName(name)}`;
+  return `vless://${cfg.uuid}@${addr}:${port}?${q}#${uriFragName(name)}`;
 }
 
 function trojanNode(cfg, server, port, name) {
-  const host = cfg.hst;
+  const host = cfg.host;
   const addr = server.includes(':') && !server.startsWith('[') ? `[${server}]` : server;  // IPv6 需方括号
   const enc = encodeURIComponent;
   const isTls = !HTTP_PORTS.has(Number(port));
   // 明文端口（80/8080/8880/2052/2082/2086/2095）：走 security=none 明文 ws（不被 TLS 指纹检测，可用性高）；
   // TLS 端口：security=tls + sni/fp
-  const path = enc('/' + cfg.pth + (isTls ? '?ed=2048' : ''));   // TLS 下携带 ed=2048（WS 0-RTT）
+  const path = enc('/' + cfg.path + (isTls ? '?ed=2048' : ''));   // TLS 下携带 ed=2048（WS 0-RTT）
   let q = isTls
     ? 'security=tls&sni=' + enc(host) + '&fp=chrome&host=' + enc(host) + '&type=ws&path=' + path
     : 'security=none&host=' + enc(host) + '&type=ws&path=' + path;
-  if (cfg.apn && isTls) q += '&alpn=' + alpnParam(cfg.apn);
-  if (cfg.ecn && isTls) q += '&ech=' + enc((cfg.ehs || 'cloudflare-ech.com') + '+' + (cfg.edn || 'https://223.5.5.5/dns-query'));   // ECH：仅 TLS 端口有效
-  return `trojan://${cfg.trp || cfg.uid}@${addr}:${port}?${q}#${uriFragName(name)}`;
+  if (cfg.alpn && isTls) q += '&alpn=' + alpnParam(cfg.alpn);
+  if (cfg.ech && isTls) q += '&ech=' + enc((cfg.echHost || 'cloudflare-ech.com') + '+' + (cfg.echDns || 'https://223.5.5.5/dns-query'));   // ECH：仅 TLS 端口有效
+  return `trojan://${cfg.trojanPassword || cfg.uuid}@${addr}:${port}?${q}#${uriFragName(name)}`;
 }
 
 // 优选域名 / 优选 API 的 DNS 解析缓存（TTL 10 分钟：域名或 URL → IP 列表）
@@ -335,7 +335,7 @@ async function buildNodes(cfg, cap = NODE_CAP) {
   const nodes = [];
   const used = new Set();
   // 筛选含 IPv6 时才需要交替排列 v4 / v6（见下方 preferredIPs 重排）
-  const ipT = (cfg.ft && cfg.ft.ip) || [];
+  const ipT = (cfg.filter && cfg.filter.ipType) || [];
   const wantV6 = ipT.includes('IPv6');
   const onlyV6 = ipT.length === 1 && ipT[0] === 'IPv6';
   // 节点形态：端口原样单端口下发（固定 443、不随机 TLS 端口、不追加明文端口变体）。
@@ -347,19 +347,19 @@ async function buildNodes(cfg, cap = NODE_CAP) {
     if (used.has(key)) return;
     used.add(key);
     const isTls = !HTTP_PORTS.has(Number(port));
-    if (cfg.tlo && !isTls) return;   // TLS 控制：仅下发 TLS 端口节点，明文端口跳过
+    if (cfg.tlsOnly && !isTls) return;   // TLS 控制：仅下发 TLS 端口节点，明文端口跳过
     // 节点端口按源端口原样下发（通常是 443），不做 TLS 端口随机（443 全域可达性最佳）
     const finalPort = Number(port);
-    const nm = protoNames(name, cfg.evl, cfg.etr, cfg.exh && isTls);
-    if (cfg.evl) nodes.push(vlessNode(cfg, server, finalPort, nm.v));
-    if (cfg.etr) nodes.push(trojanNode(cfg, server, finalPort, nm.t));  // Trojan 明文/TLS 端口均下发
-    if (cfg.exh && isTls) nodes.push(vlessNode(cfg, server, finalPort, nm.x, { type: 'xhttp' }));  // XHTTP 仅 TLS 端口
+    const nm = protoNames(name, cfg.enableVless, cfg.enableTrojan, cfg.enableXhttp && isTls);
+    if (cfg.enableVless) nodes.push(vlessNode(cfg, server, finalPort, nm.v));
+    if (cfg.enableTrojan) nodes.push(trojanNode(cfg, server, finalPort, nm.t));  // Trojan 明文/TLS 端口均下发
+    if (cfg.enableXhttp && isTls) nodes.push(vlessNode(cfg, server, finalPort, nm.x, { type: 'xhttp' }));  // XHTTP 仅 TLS 端口
   };
   // 按源端口（通常 443）下发；关闭「仅 TLS 端口」时，443 节点另追加一个 80 明文端口节点（名称加「·80」）
   const multiPort = (server, port, name) => {
     port = Number(port) || 443;
     push(server, port, name);
-    if (!cfg.tlo && port === 443) push(server, 80, name + '·80');
+    if (!cfg.tlsOnly && port === 443) push(server, 80, name + '·80');
   };
   const domains = String(cfg.preferredDomains || '').split(/[\n,;]+/).map(s => s.trim()).filter(s => s && !s.includes('://'));  // URL 数据源由 resolvePreferredDomains 解析，不作为服务器地址
   domains.forEach((d, i) => {
@@ -473,10 +473,10 @@ const FILTER_IPTYPES = ['IPv4', 'IPv6'];
 // 按面板筛选配置过滤节点（region 按名称地区标记、ipType 按地址类型、isp 按名称运营商标记）
 // 任何维度筛选后为空时逐级放宽（isp → ipType → region），保证订阅永不为空（避免客户端「无效订阅」）
 function filterNodes(nodes, filter) {
-  if (!filter || !filter.rg && !filter.ip && !filter.is) return nodes;
-  const region = Array.isArray(filter.rg) && filter.rg.length ? filter.rg : ['all'];
-  const ipType = filter.ip || FILTER_IPTYPES;
-  const isp = filter.is || FILTER_ISPS;
+  if (!filter || !filter.region && !filter.ipType && !filter.isp) return nodes;
+  const region = Array.isArray(filter.region) && filter.region.length ? filter.region : ['all'];
+  const ipType = filter.ipType || FILTER_IPTYPES;
+  const isp = filter.isp || FILTER_ISPS;
   // 预解析节点（名称解析一次，供各轮过滤与池标记检查复用）
   const meta = nodes.map(n => {
     const { host } = parseNodeServer(n);

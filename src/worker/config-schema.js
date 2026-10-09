@@ -50,77 +50,77 @@ const RESERVED_PATHS = ['login', 'version'];
 
 const CONFIG_SCHEMA = [
   // ---- 面板设置 ----
-  { key: 'uid', type: 'string', def: '', el: 'a-uuid', label: 'UUID', required: true, lower: true,
+  { key: 'uuid', type: 'string', def: '', el: 'a-uuid', label: 'UUID', required: true, lower: true,
     pattern: UUID_PATTERN, hint: 'UUID 格式不正确（应为 xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx，可点「生成」）' },
   // 面板 / 订阅 / 节点（WebSocket、XHTTP）共用的访问路径：由必填的环境变量 PATH 提供（面板中只读）
-  { key: 'pth', type: 'string', def: '', el: 'a-path', label: '面板路径', maxLen: 128, strip: ['^/+', '/+$'],
+  { key: 'path', type: 'string', def: '', el: 'a-path', label: '面板路径', maxLen: 128, strip: ['^/+', '/+$'],
     pattern: PATH_SEG_PATTERN, hint: '只能包含字母、数字及 . _ ~ -（不含 /）', reserved: RESERVED_PATHS, envLock: ENV_NAMES.path },
   // 自定义订阅路径：/<别名>/sub 输出订阅（不开放面板与管理接口）；留空为 /<UUID>/sub
-  { key: 'sbu', type: 'string', def: '', el: 'a-suburl', label: '自定义订阅路径', maxLen: 128, strip: ['^/+', '/+$', '/sub$', '/+$'],
+  { key: 'subUrl', type: 'string', def: '', el: 'a-suburl', label: '自定义订阅路径', maxLen: 128, strip: ['^/+', '/+$', '/sub$', '/+$'],
     pattern: PATH_SEG_PATTERN, hint: '只填一段别名，如 AAZ（字母、数字及 . _ ~ -）', reserved: RESERVED_PATHS },
   // 管理用户名：登录时与管理密码一起校验（区分大小写）；留空取默认 admin
-  { key: 'adu', type: 'string', def: 'admin', el: 'a-adminuser', label: '管理用户名', maxLen: 64, fillDefault: true,
+  { key: 'adminUser', type: 'string', def: 'admin', el: 'a-adminuser', label: '管理用户名', maxLen: 64, fillDefault: true,
     pattern: '^[^\\s\\x00-\\x1f\\x7f]+$', hint: '不能包含空格或控制字符', envLock: ENV_NAMES.adminUser },
-  { key: 'adp', type: 'secret', def: '', el: 'a-admin', label: '管理密码', trim: false, maxLen: 256, envLock: ENV_NAMES.admin, check: 'adminPass' },
+  { key: 'admin', type: 'secret', def: '', el: 'a-admin', label: '管理密码', trim: false, maxLen: 256, envLock: ENV_NAMES.admin, check: 'adminPass' },
   // 绑定域名：节点 SNI / Host，留空使用访问域名
-  { key: 'hst', type: 'string', def: '', el: 'a-host', label: '绑定域名', maxLen: 253, strip: ['^https?://', '[/?#].*$'],
+  { key: 'host', type: 'string', def: '', el: 'a-host', label: '绑定域名', maxLen: 253, strip: ['^https?://', '[/?#].*$'],
     pattern: HOSTNAME_PATTERN, hint: '请填写域名，如 node.example.com' },
   // ---- 协议开关 ----
-  { key: 'evl', type: 'bool', def: true, el: 'en-vless', label: 'VLESS 协议' },
-  { key: 'etr', type: 'bool', def: false, el: 'en-trojan', label: 'Trojan 协议' },
-  { key: 'trp', type: 'string', def: '', el: 'tp-pass', label: 'Trojan 密码', trim: false, maxLen: 256, noExport: true },   // noExport：面板「导出配置」不含此项（与管理密码一样不落进备份文件）
-  { key: 'exh', type: 'bool', def: true, el: 'en-xhttp', label: 'XHTTP 协议' },
+  { key: 'enableVless', type: 'bool', def: true, el: 'en-vless', label: 'VLESS 协议' },
+  { key: 'enableTrojan', type: 'bool', def: false, el: 'en-trojan', label: 'Trojan 协议' },
+  { key: 'trojanPassword', type: 'string', def: '', el: 'tp-pass', label: 'Trojan 密码', trim: false, maxLen: 256, noExport: true },   // noExport：面板「导出配置」不含此项（与管理密码一样不落进备份文件）
+  { key: 'enableXhttp', type: 'bool', def: true, el: 'en-xhttp', label: 'XHTTP 协议' },
   // ---- 传输参数 ----
-  { key: 'apn', type: 'string', def: '', el: 'alpn', label: 'ALPN', maxLen: 64,
+  { key: 'alpn', type: 'string', def: '', el: 'alpn', label: 'ALPN', maxLen: 64,
     pattern: '^[A-Za-z0-9./-]+(\\s*,\\s*[A-Za-z0-9./-]+)*$', hint: '以逗号分隔，如 h2,http/1.1' },
-  { key: 'ecn', type: 'bool', def: false, el: 'ech-on', label: 'ECH' },
+  { key: 'ech', type: 'bool', def: false, el: 'ech-on', label: 'ECH' },
   // ECH 查询域名（留空使用 cloudflare-ech.com）
-  { key: 'ehs', type: 'string', def: 'cloudflare-ech.com', el: 'ech-host', label: 'ECH 域名', fillDefault: true, maxLen: 253,
+  { key: 'echHost', type: 'string', def: 'cloudflare-ech.com', el: 'ech-host', label: 'ECH 域名', fillDefault: true, maxLen: 253,
     strip: ['^https?://', '[/?#].*$'], pattern: HOSTNAME_PATTERN, hint: '请填写域名，如 cloudflare-ech.com' },
   // 自定义 ECH DNS：客户端获取 ECH 配置的 DoH 地址（留空用默认 223.5.5.5）
-  { key: 'edn', type: 'string', def: '', el: 'ech-dns', label: 'ECH DNS', maxLen: 512,
+  { key: 'echDns', type: 'string', def: '', el: 'ech-dns', label: 'ECH DNS', maxLen: 512,
     pattern: '^https://\\S+$', hint: '须为 https:// 开头的 DoH 地址' },
   // TLS 控制：默认开启，只下发 TLS 端口节点；关闭后 443 节点另追加 80 明文节点，来源自带的明文端口原样下发（开启 ECH 时强制仅 TLS）
-  { key: 'tlo', type: 'bool', def: true, el: 'tls-only', label: '仅 TLS 端口' },
+  { key: 'tlsOnly', type: 'bool', def: true, el: 'tls-only', label: '仅 TLS 端口' },
   // ---- 落地与出站 ----
-  { key: 'pxy', type: 'string', def: '', el: 's-proxyIP', label: '反代 / 落地 IP', maxLen: 256,
+  { key: 'proxyIP', type: 'string', def: '', el: 's-proxyIP', label: '反代 / 落地 IP', maxLen: 256,
     pattern: '^[^\\s/]+$', hint: '格式为 host 或 host:port', check: 'hostPort' },
-  { key: 'obp', type: 'string', def: '', el: 's-outbound', label: '出站代理', maxLen: 1024,
+  { key: 'outboundProxy', type: 'string', def: '', el: 's-outbound', label: '出站代理', maxLen: 1024,
     pattern: '^\\S+$', hint: '出站代理不能包含空格', check: 'proxy' },
-  { key: 'obm', type: 'enum', def: '', el: 's-outmode', label: '出站方式', options: ['', 'no', 'only'] },
+  { key: 'outboundMode', type: 'enum', def: '', el: 's-outmode', label: '出站方式', options: ['', 'no', 'only'] },
   // ---- 优选域名：留空使用内置列表；填写后整体替换内置列表（每行一个纯主机名，最多 30 个） ----
-  { key: 'pfd', type: 'text', def: '', el: 'o-prefdomains', label: '优选域名', maxLen: 4096, check: 'domainList' },
+  { key: 'prefDomains', type: 'text', def: '', el: 'o-prefdomains', label: '优选域名', maxLen: 4096, check: 'domainList' },
   // ---- 内置地区反代：builtin 内置（默认，按机房自动选地区）/ custom 仅用自定义反代列表 / off 不使用地区反代 ----
-  { key: 'rl.md', type: 'enum', def: 'builtin', el: 'rl-mode', label: '地区反代模式', options: ['builtin', 'custom', 'off'] },
-  { key: 'rl.rg', type: 'enum', def: '', el: 'rl-region', label: '首选反代地区', options: ['', ...Object.keys(RELAY_DOMAINS)] },
-  { key: 'rl.r2', type: 'enum', def: '', el: 'rl-region2', label: '次选反代地区', options: ['', 'none', ...Object.keys(RELAY_DOMAINS)] },
-  { key: 'rl.cu', type: 'text', def: '', el: 'rl-custom', label: '自定义反代列表', maxLen: 1024, check: 'relayList' },
+  { key: 'relay.mode', type: 'enum', def: 'builtin', el: 'rl-mode', label: '地区反代模式', options: ['builtin', 'custom', 'off'] },
+  { key: 'relay.region', type: 'enum', def: '', el: 'rl-region', label: '首选反代地区', options: ['', ...Object.keys(RELAY_DOMAINS)] },
+  { key: 'relay.region2', type: 'enum', def: '', el: 'rl-region2', label: '次选反代地区', options: ['', 'none', ...Object.keys(RELAY_DOMAINS)] },
+  { key: 'relay.custom', type: 'text', def: '', el: 'rl-custom', label: '自定义反代列表', maxLen: 1024, check: 'relayList' },
   // ---- 订阅筛选（按节点名称中的地区/运营商标记 + 地址 IP 类型过滤下发） ----
-  { key: 'ft.rg', type: 'list', def: ['all'], label: '节点地区', options: ['all', 'HK', 'TW', 'US', 'SG', 'JP', 'KR', 'DE'],
+  { key: 'filter.region', type: 'list', def: ['all'], label: '节点地区', options: ['all', 'HK', 'TW', 'US', 'SG', 'JP', 'KR', 'DE'],
     exclusive: 'all', emptyValue: ['all'],
     els: { all: 'fl-region-all', HK: 'fl-region-HK', TW: 'fl-region-TW', US: 'fl-region-US', SG: 'fl-region-SG', JP: 'fl-region-JP', KR: 'fl-region-KR', DE: 'fl-region-DE' } },
   // 勾选的 IP 类型集合（全选或空 = 不过滤）
-  { key: 'ft.ip', type: 'list', def: ['IPv4'], label: 'IP 类型', options: ['IPv4', 'IPv6'],
+  { key: 'filter.ipType', type: 'list', def: ['IPv4'], label: 'IP 类型', options: ['IPv4', 'IPv6'],
     els: { IPv4: 'fl-ip4', IPv6: 'fl-ip6' } },
   // 勾选的运营商集合（全选 = 不过滤）
-  { key: 'ft.is', type: 'list', def: ['移动', '联通', '电信'], label: '运营商偏好', options: ['移动', '联通', '电信'],
+  { key: 'filter.isp', type: 'list', def: ['移动', '联通', '电信'], label: '运营商偏好', options: ['移动', '联通', '电信'],
     els: { '移动': 'fl-isp-m', '联通': 'fl-isp-c', '电信': 'fl-isp-t' } },
   // ---- 地址来源（订阅节点池由这三项组装） ----
-  { key: 'sc.nv', type: 'bool', def: false, el: 'fl-native', label: '原生地址' },
-  { key: 'sc.pd', type: 'bool', def: true, el: 'fl-pref-domain', label: '优选域名' },
-  { key: 'sc.pi', type: 'bool', def: true, el: 'fl-pref-ip', label: '优选 IP' },
+  { key: 'src.native', type: 'bool', def: false, el: 'fl-native', label: '原生地址' },
+  { key: 'src.prefDomain', type: 'bool', def: true, el: 'fl-pref-domain', label: '优选域名' },
+  { key: 'src.prefIp', type: 'bool', def: true, el: 'fl-pref-ip', label: '优选 IP' },
   // ---- 「优选 IP」的在线来源（默认模式；均只保留 Cloudflare 段 IP，结果缓存 10 分钟） ----
-  { key: 'ix.hm', type: 'bool', def: true, el: 'ps-hostmonit', label: 'HostMonit 实时优选' },
+  { key: 'ipsrc.hostmonit', type: 'bool', def: true, el: 'ps-hostmonit', label: 'HostMonit 实时优选' },
   // uouin 分线路优选：借用 api.uouin.com 网站内部接口（非开放 API，对方可能随时更换签名或封禁），默认开启
-  { key: 'ix.uo', type: 'bool', def: true, el: 'ps-uouin', label: 'uouin 分线路优选' },
+  { key: 'ipsrc.uouin', type: 'bool', def: true, el: 'ps-uouin', label: 'uouin 分线路优选' },
   // 微测网优选：wetest.vip 公开页面（IPv4 / IPv6 各一页，移动 / 联通 / 电信各 5 个，约每 15 分钟更新），默认关闭
-  { key: 'ix.wt', type: 'bool', def: false, el: 'ps-wetest', label: '微测网优选' },
+  { key: 'ipsrc.wetest', type: 'bool', def: false, el: 'ps-wetest', label: '微测网优选' },
   // 两个自定义优选 API：填写返回 IP 列表的地址（纯 IP 行 / CSV / HTML 线路表 / base64 订阅 / vless 链接，支持 sub://）
-  { key: 'ix.a1', type: 'bool', def: false, el: 'ps-api1-on', label: '自定义优选 API 1' },
-  { key: 'ix.a1u', type: 'string', def: '', el: 'ps-api1-url', label: '自定义优选 API 1 地址', maxLen: 1024,
+  { key: 'ipsrc.api1', type: 'bool', def: false, el: 'ps-api1-on', label: '自定义优选 API 1' },
+  { key: 'ipsrc.api1Url', type: 'string', def: '', el: 'ps-api1-url', label: '自定义优选 API 1 地址', maxLen: 1024,
     pattern: '^(https?|sub)://\\S+$', hint: '须为 http(s):// 或 sub:// 开头的地址' },
-  { key: 'ix.a2', type: 'bool', def: false, el: 'ps-api2-on', label: '自定义优选 API 2' },
-  { key: 'ix.a2u', type: 'string', def: '', el: 'ps-api2-url', label: '自定义优选 API 2 地址', maxLen: 1024,
+  { key: 'ipsrc.api2', type: 'bool', def: false, el: 'ps-api2-on', label: '自定义优选 API 2' },
+  { key: 'ipsrc.api2Url', type: 'string', def: '', el: 'ps-api2-url', label: '自定义优选 API 2 地址', maxLen: 1024,
     pattern: '^(https?|sub)://\\S+$', hint: '须为 http(s):// 或 sub:// 开头的地址' },
 ];
 
@@ -311,16 +311,16 @@ function sanitizeConfigPatch(body, env) {
 // 跨字段校验（作用于合并后的完整配置）
 function crossCheckConfig(cfg) {
   const errors = [];
-  if (!cfg.evl && !cfg.etr && !cfg.exh) {
-    errors.push({ field: 'evl', label: '协议开关', msg: '至少启用一种协议，否则订阅中没有任何节点' });
+  if (!cfg.enableVless && !cfg.enableTrojan && !cfg.enableXhttp) {
+    errors.push({ field: 'enableVless', label: '协议开关', msg: '至少启用一种协议，否则订阅中没有任何节点' });
   }
-  if (cfg.rl && cfg.rl.md === 'custom' && !String(cfg.rl.cu || '').trim()) {
-    errors.push({ field: 'rl.cu', label: '自定义反代列表', msg: '已选择「仅使用自定义反代」，请至少填写一个反代地址（或改回内置 / 关闭）' });
+  if (cfg.relay && cfg.relay.mode === 'custom' && !String(cfg.relay.custom || '').trim()) {
+    errors.push({ field: 'relay.custom', label: '自定义反代列表', msg: '已选择「仅使用自定义反代」，请至少填写一个反代地址（或改回内置 / 关闭）' });
   }
   for (const n of [1, 2]) {
-    const s = cfg.ix || {};
-    if (s['a' + n] && !s['a' + n + 'u']) {
-      errors.push({ field: 'ix.a' + n + 'u', label: '自定义优选 API ' + n + ' 地址', msg: '已开启该来源，请填写 API 地址（或关闭开关）' });
+    const s = cfg.ipsrc || {};
+    if (s['api' + n] && !s['api' + n + 'Url']) {
+      errors.push({ field: 'ipsrc.api' + n + 'Url', label: '自定义优选 API ' + n + ' 地址', msg: '已开启该来源，请填写 API 地址（或关闭开关）' });
     }
   }
   return errors;
@@ -344,7 +344,7 @@ const DEFAULT_PREFERRED_DOMAINS = [
 ].join('\n');
 // 实际生效的优选域名：面板填写了就整体替换内置列表，留空用内置列表
 function effectivePrefDomains(cfg) {
-  const own = cfg && cfg.pfd ? String(cfg.pfd).trim() : '';
+  const own = cfg && cfg.prefDomains ? String(cfg.prefDomains).trim() : '';
   return own || DEFAULT_PREFERRED_DOMAINS;
 }
 // 取前 PREF_DOMAIN_DOH_LIMIT 个（逐个 DoH 解析的路径使用，控制子请求数）

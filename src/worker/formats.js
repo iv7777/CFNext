@@ -52,11 +52,11 @@ function clashProxyYaml(p) {
   return L.join('\n');
 }
 function generateClash(cfg, nodes) {
-  const host = cfg.hst;
-  const path = '/' + cfg.pth;
+  const host = cfg.host;
+  const path = '/' + cfg.path;
   // TLS 下 ws 路径携带 ed=2048：mihomo 据此启用 early data（首包预发进 Sec-WebSocket-Protocol，省 1 个 RTT）
   const wsPath = path + '?ed=2048';
-  const alpnArr = alpnList(cfg.apn);   // 面板 ALPN 设置；未设置时 ws 用 http/1.1、xhttp 用 h2
+  const alpnArr = alpnList(cfg.alpn);   // 面板 ALPN 设置；未设置时 ws 用 http/1.1、xhttp 用 h2
   const seen = new Set();
   // XHTTP 节点按 mihomo xhttp-opts 规范输出（含 x-padding 混淆参数），与 WS/Trojan 一并下发
   const proxies = nodes.map((n) => {
@@ -76,7 +76,7 @@ function generateClash(cfg, nodes) {
     const base = {
       name, server: srv, port: prt, udp: true,
       ...(tls ? { tls: true, 'skip-cert-verify': false, servername: host, 'client-fingerprint': 'chrome', alpn: alpnArr || ['http/1.1'] } : {}),
-      ...(cfg.ecn && tls ? { 'ech-opts': { enable: true, 'query-server-name': cfg.ehs || 'cloudflare-ech.com' } } : {})   // mihomo ECH 格式为顶层 ech-opts（enable + query-server-name）
+      ...(cfg.ech && tls ? { 'ech-opts': { enable: true, 'query-server-name': cfg.echHost || 'cloudflare-ech.com' } } : {})   // mihomo ECH 格式为顶层 ech-opts（enable + query-server-name）
     };
     if (isTrojan) {
       return { ...base, type: 'trojan', password: user, network: 'ws', 'ws-opts': { path: tls ? wsPath : path, headers: { Host: host } } };
@@ -106,7 +106,7 @@ function generateClash(cfg, nodes) {
   // 节点排序：443端口优先（非标准端口如8443在mihomo下HTTPS握手易被GFW干扰，放后面避免默认选中）
   proxies.sort((a, b) => (a.port === 443 ? 0 : 1) - (b.port === 443 ? 0 : 1));
   // 模板中的本地凭据按 UUID 派生（同一部署每次订阅结果稳定，不同部署互不相同），避免所有人共用公开的默认密码
-  const derive = (purpose) => sha224hex('hopline-clash|' + purpose + '|' + cfg.uid).slice(0, 20);
+  const derive = (purpose) => sha224hex('hopline-clash|' + purpose + '|' + cfg.uuid).slice(0, 20);
   const template = CLASH_TEMPLATE
     .split('__HOPLINE_SS_PASSWORD__').join(derive('ss'))
     .split('__HOPLINE_AUTH_PASSWORD__').join(derive('auth'))
@@ -125,8 +125,8 @@ ${template}
 // 服务端仅在启用 Trojan 时才接受 Trojan 连接，且密码可能与 UUID 不同，改写出的节点连不上。
 // 未启用 Trojan 时无节点可用，直接报错提示，而不是输出一份全部失效的配置。
 function generateSurfboard(cfg, nodes) {
-  const host = cfg.hst, path = '/' + cfg.pth;
-  if (!cfg.etr) throw new Error('Surfboard 只支持 Trojan 节点：请先在「节点配置」中启用 Trojan 协议');
+  const host = cfg.host, path = '/' + cfg.path;
+  if (!cfg.enableTrojan) throw new Error('Surfboard 只支持 Trojan 节点：请先在「节点配置」中启用 Trojan 协议');
   const sb = nodes.filter(n => n.startsWith('trojan://') && n.indexOf('security=none') < 0);
   if (!sb.length) throw new Error('没有可用于 Surfboard 的 Trojan TLS 节点（明文端口节点已被过滤）');
   const lines = sb.map((n, i) => {
@@ -164,9 +164,9 @@ const SINGBOX_RULE_SETS = [
 // MetaCubeX 规则库 sing 分支的二进制规则集（.srs），经 jsDelivr 直连下载（国内可达）
 const SINGBOX_RULE_BASE = 'https://cdn.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/';
 function generateSingbox(cfg, nodes) {
-  const host = cfg.hst;
-  const path = '/' + cfg.pth;
-  const alpnArr = alpnList(cfg.apn);
+  const host = cfg.host;
+  const path = '/' + cfg.path;
+  const alpnArr = alpnList(cfg.alpn);
   const seen = new Set();
   // 官方 sing-box 内核没有 xhttp 传输（仅部分第三方分支支持），含 xhttp 出站的配置整体无法加载，因此不下发 XHTTP 节点
   const outbounds = nodes.filter(n => getParam(n, 'type') !== 'xhttp').map((n, i) => {
@@ -260,7 +260,7 @@ function dropXhttp(nodes, client) {
 // ---------- Surge ----------
 function generateSurge(cfg, nodes) {
   nodes = dropXhttp(nodes, 'Surge');
-  const host = cfg.hst, path = '/' + cfg.pth;
+  const host = cfg.host, path = '/' + cfg.path;
   const proxies = nodes.map((n, i) => {
     const { user, srv, prt, name, isTrojan, tls } = parseShareNode(n, i);
     const tlsPart = tls ? ', tls=true, skip-cert-verify=false, sni=' + host : ', tls=false';
@@ -290,7 +290,7 @@ FINAL,🐟 漏网之鱼
 // ---------- Loon ----------
 function generateLoon(cfg, nodes) {
   nodes = dropXhttp(nodes, 'Loon');
-  const host = cfg.hst, path = '/' + cfg.pth;
+  const host = cfg.host, path = '/' + cfg.path;
   const proxies = nodes.map((n, i) => {
     const { user, srv, prt, name, isTrojan, tls } = parseShareNode(n, i);
     const tlsPart = tls ? ', tls=true, skip-cert-verify=false, sni=' + host : ', tls=false';
@@ -319,7 +319,7 @@ FINAL,🐟 漏网之鱼
 // ---------- Quantumult X ----------
 function generateQuanX(cfg, nodes) {
   nodes = dropXhttp(nodes, 'Quantumult X');
-  const host = cfg.hst, path = '/' + cfg.pth;
+  const host = cfg.host, path = '/' + cfg.path;
   // QuanX 的 ip:port 格式中 IPv6 必须带方括号（裸 v6 与端口冒号歧义）
   const qxHost = (srv) => srv.indexOf(':') >= 0 ? '[' + srv + ']' : srv;
   const servers = nodes.map((n, i) => {

@@ -202,19 +202,19 @@ function sniffPayloadKind(bytes) {
 //   custom  → 自定义列表（最多 3 个，第一个取 2 个 IP，其余各 1 个）
 //   builtin → 首选地区（relay.region，留空按机房自动选）取 2 个 IP + 次选地区（relay.region2，留空取默认的另一地区，'none' 不用）取 1 个 IP
 function relayPlan(cfg, colo) {
-  const rl = cfg.rl || {};
-  const mode = rl.md || 'builtin';
+  const rl = cfg.relay || {};
+  const mode = rl.mode || 'builtin';
   if (mode === 'off') return [];
   if (mode === 'custom') {
-    return String(rl.cu || '').split('\n').map(s => s.trim()).filter(Boolean).slice(0, RELAY_CUSTOM_MAX).map((entry, i) => {
+    return String(rl.custom || '').split('\n').map(s => s.trim()).filter(Boolean).slice(0, RELAY_CUSTOM_MAX).map((entry, i) => {
       const { host, port } = parseHostPort(entry, 443);
       return { host, port, take: i === 0 ? 2 : 1 };
     });
   }
-  const primary = RELAY_DOMAINS[rl.rg] ? rl.rg : selectRelayRegion(colo);
+  const primary = RELAY_DOMAINS[rl.region] ? rl.region : selectRelayRegion(colo);
   const plan = [{ host: RELAY_DOMAINS[primary], port: 443, take: 2, txt: false }];   // 内置域名只有 A 记录
-  if (rl.r2 !== 'none') {
-    const second = (RELAY_DOMAINS[rl.r2] && rl.r2 !== primary) ? rl.r2 : Object.keys(RELAY_DOMAINS).find(r => r !== primary);
+  if (rl.region2 !== 'none') {
+    const second = (RELAY_DOMAINS[rl.region2] && rl.region2 !== primary) ? rl.region2 : Object.keys(RELAY_DOMAINS).find(r => r !== primary);
     plan.push({ host: RELAY_DOMAINS[second], port: 443, take: 1, txt: false });
   }
   return plan;
@@ -225,8 +225,8 @@ function relayPlan(cfg, colo) {
 // 出站模式语义：only = 仅走出站代理（失败用地区反代兜底，地区反代设为 off 时不兜底）；'' 默认 = 出站代理优先，失败后直连 ∥ 反代；
 // no = 直连 ∥ 反代优先，都不通时最后用出站代理
 async function openOutbound(parsed, cfg, colo, payloadKind) {
-  const proxy = parseProxyAddress(cfg.obp);
-  const mode = cfg.obm || '';
+  const proxy = parseProxyAddress(cfg.outboundProxy);
+  const mode = cfg.outboundMode || '';
   const allowSniRelay = payloadKind !== 'nontls';
 
   const viaProxy = proxy ? (proxy.type === 'http' || proxy.type === 'https'
@@ -240,7 +240,7 @@ async function openOutbound(parsed, cfg, colo, payloadKind) {
   const fail = () => { throw lastErr || new Error('所有出站方式均失败'); };
 
   // 1) 用户填写的「反代 / 落地 IP」：作为固定出口优先使用（多个解析结果并发竞速），失败再走下面的流程
-  const relay = cfg.pxy ? parseHostPort(cfg.pxy, 443) : null;
+  const relay = cfg.proxyIP ? parseHostPort(cfg.proxyIP, 443) : null;
   if (relay && relay.host && allowSniRelay) {
     let customTargets = await resolveProxyIPs(relay.host, relay.port);
     if (!customTargets.length) customTargets = [{ hostname: relay.host, port: relay.port }];

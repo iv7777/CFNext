@@ -42,7 +42,7 @@ function parseVlessHeader(data, cfg) {
   let offset = 0;
   if (view.getUint8(0) !== 0) throw new Error('不支持的 VLESS 版本');
   if (data.byteLength < 17) throw new Error('VLESS 头部过短');
-  const want = uuidToBytes(cfg && cfg.uid);
+  const want = uuidToBytes(cfg && cfg.uuid);
   let diff = 0;
   for (let i = 0; i < 16; i++) diff |= (view.getUint8(1 + i) ^ want[i]);
   if (diff !== 0) throw new Error('UUID 不匹配');
@@ -158,10 +158,10 @@ function trojanPasswordHash(pass) {
 }
 // Trojan 头判定：56 字节 SHA224 hex + CRLF；密码匹配或纯 hex 特征均可识别
 function detectTrojan(pending, cfg) {
-  if (!cfg.etr || !pending || pending.byteLength < 58) return false;
+  if (!cfg.enableTrojan || !pending || pending.byteLength < 58) return false;
   const head = pending.subarray(0, 56);
   // 仅密码哈希匹配才视为 Trojan（不能放行任意 56 位十六进制）
-  return TD.decode(head).toLowerCase() === trojanPasswordHash(cfg.trp || cfg.uid);
+  return TD.decode(head).toLowerCase() === trojanPasswordHash(cfg.trojanPassword || cfg.uuid);
 }
 
 // DoH 端点池（UDP/DNS → DoH 转换用，使 V2rayNG 关闭「本地 DNS」时远端 DNS 仍可用）

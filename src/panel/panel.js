@@ -232,9 +232,9 @@ function renderStatus(d){
 function protoText(){
   if (!CFG) return '—';
   var a = [];
-  if (CFG.evl !== false) a.push('VLESS');
-  if (CFG.etr) a.push('Trojan');
-  if (CFG.exh) a.push('XHTTP');
+  if (CFG.enableVless !== false) a.push('VLESS');
+  if (CFG.enableTrojan) a.push('Trojan');
+  if (CFG.enableXhttp) a.push('XHTTP');
   return a.length ? a.join(' / ') : '未启用';
 }
 function renderAll(){
@@ -547,8 +547,8 @@ function subUrlOf(fmt){
   // 自定义订阅路径优先：自动保留当前域名（location.origin），只替换路径段；
   // 用户只填 UUID/别名段（如 AAZ），拼成 https://当前域名/AAZ/sub；留空用 UUID（https://当前域名/<UUID>/sub）。
   // 填了 /sub 结尾或带前后斜杠时自动归一，格式后缀（clash/singbox 等）拼为 /sub/<格式>
-  var custom = (window.CFG && CFG.sbu) ? String(CFG.sbu).trim().replace(/^\/+/, '').replace(/\/sub$/, '').replace(/\/+$/, '') : '';
-  var seg = custom || (window.CFG && CFG.uid) || '';
+  var custom = (window.CFG && CFG.subUrl) ? String(CFG.subUrl).trim().replace(/^\/+/, '').replace(/\/sub$/, '').replace(/\/+$/, '') : '';
+  var seg = custom || (window.CFG && CFG.uuid) || '';
   var base = seg ? (location.origin + '/' + seg) : (location.origin + APIPATH);
   var u = base + '/sub';
   return fmt ? (u + '/' + fmt) : u;
@@ -814,7 +814,7 @@ function renderDomainTest(out, head, d){
 var RELAY_ZH = { HK: '香港', US: '美国', SG: '新加坡', JP: '日本', KR: '韩国', DE: '德国', SE: '瑞典', NL: '荷兰', FI: '芬兰', GB: '英国' };
 // 地区下拉框的选项来自服务端字段表（与 RELAY_DOMAINS 同源）
 function populateRelaySelects(){
-  [['rl-region', 'rl.rg', '自动（按 Worker 机房）'], ['rl-region2', 'rl.r2', '自动（默认的另一地区）']].forEach(function(c){
+  [['rl-region', 'relay.region', '自动（按 Worker 机房）'], ['rl-region2', 'relay.region2', '自动（默认的另一地区）']].forEach(function(c){
     var el = $(c[0]), d = SCHEMA_BY_KEY[c[1]];
     if (!el || !d) return;
     el.innerHTML = '';
