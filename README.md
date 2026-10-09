@@ -241,7 +241,7 @@
 | `test/` | `node:test` 测试（模拟 KV 与 Workers 运行时，无需安装依赖） |
 | `.github/workflows/ci.yml` | 每次推送运行：`Hopline.js` / `dist/` 与 `src/` 同步检查 → 语法检查 → lint → 测试 |
 | `.github/workflows/tag.yml` | 推送到 `main` 后，若 `Hopline.js` 里的版本号还没有对应的 `v<版本号>` 标签就自动创建；标签已存在但其中的 `dist/panel.html` 或 `dist/clash-template.yaml` 内容不同（改了面板 / Clash 模板却没升版本号）则失败 |
-| `obfuscate.mjs` | 在 `Hopline.js` 基础上用 javascript-obfuscator 再混淆一层，产出 `obf_Hopline.js`（非部署必需，供不想公开可读源码的场景用）；light / medium / heavy 三档，通过 npx 获取（版本固定） |
+| `obfuscate.mjs` | 在 `Hopline.js` 基础上用 javascript-obfuscator 再混淆一层，产出 `obf_Hopline.js`（非部署必需，供不想公开可读源码的场景用）；light / medium / heavy 三档，通过 npx 获取（版本固定）。WebSocket / XHTTP 数据面（`proxy.js` / `relay.js` / `outbound-proxies.js`）单独处理：只做改名与压缩空白，不加字符串数组 / 控制流平坦化等有运行时开销的变换，避免持续代理连接下触发 Worker CPU 时间超限 |
 | `.github/workflows/obfuscate.yml` | 推送到 `main` 且 `Hopline.js` 有变化时自动重新生成并提交 `obf_Hopline.js`（默认 medium 档）；也可手动触发并选择强度 |
 
 ```bash
