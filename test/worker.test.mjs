@@ -446,15 +446,15 @@ test('面板页面注入字段表与共用校验函数', async () => {
   }
 });
 
-test('检测更新：以仓库 Hopline.js 为基准，有更新时直接返回其内容，60 秒内走缓存', async () => {
+test('检测更新：以仓库 obf_Hopline.js 为基准（版本取自混淆横幅），有更新时直接返回其内容，60 秒内走缓存', async () => {
   const env = baseEnv();
   const cookie = await login(env);
   const offline = globalThis.fetch;
   const seen = [];
   globalThis.fetch = async (url) => {
     seen.push(String(url));
-    if (String(url) === 'https://raw.githubusercontent.com/iv7777/Hopline/main/Hopline.js') {
-      return new Response("// banner\nconst VERSION = '9.9.9';\n// …\n");
+    if (String(url) === 'https://raw.githubusercontent.com/iv7777/Hopline/main/obf_Hopline.js') {
+      return new Response("/*!Hopline v9.9.9 obfuscated:medium*/\nconst h0_0r0=h0_0c;function h0_0c(){}\n");
     }
     return new Response('Not Found', { status: 404 });
   };
@@ -463,8 +463,8 @@ test('检测更新：以仓库 Hopline.js 为基准，有更新时直接返回�
     assert.equal(r.ok, true);
     assert.equal(r.data.latest, '9.9.9');
     assert.equal(r.data.hasUpdate, true);
-    assert.match(r.data.code, /const VERSION = '9\.9\.9'/);
-    assert.deepEqual(seen, ['https://raw.githubusercontent.com/iv7777/Hopline/main/Hopline.js'], '只请求一次 Hopline.js');
+    assert.match(r.data.code, /^\/\*!Hopline v9\.9\.9 obfuscated:medium\*\//);
+    assert.deepEqual(seen, ['https://raw.githubusercontent.com/iv7777/Hopline/main/obf_Hopline.js'], '只请求一次 obf_Hopline.js');
     const again = await (await call(env, `/${UUID}/api/update`, { cookie })).json();
     assert.equal(again.data.latest, '9.9.9');
     assert.equal(seen.length, 1, '60 秒内复用缓存');
