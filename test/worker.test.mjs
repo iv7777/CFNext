@@ -446,15 +446,15 @@ test('面板页面注入字段表与共用校验函数', async () => {
   }
 });
 
-test('检测更新：以仓库 Hopline.js 为基准，有更新时直接返回其内容，60 秒内走缓存', async () => {
+test('检测更新：以仓库 obf_Hopline.js 为基准（版本取自混淆横幅），有更新时直接返回其内容，60 秒内走缓存', async () => {
   const env = baseEnv();
   const cookie = await login(env);
   const offline = globalThis.fetch;
   const seen = [];
   globalThis.fetch = async (url) => {
     seen.push(String(url));
-    if (String(url) === 'https://raw.githubusercontent.com/iv7777/Hopline/main/Hopline.js') {
-      return new Response("// banner\nconst VERSION = '9.9.9';\n// …\n");
+    if (String(url) === 'https://raw.githubusercontent.com/iv7777/Hopline/main/obf_Hopline.js') {
+      return new Response("/*!Hopline v9.9.9 obfuscated:medium*/\nconst h0_0r0=h0_0c;function h0_0c(){}\n");
     }
     return new Response('Not Found', { status: 404 });
   };
@@ -463,8 +463,8 @@ test('检测更新：以仓库 Hopline.js 为基准，有更新时直接返回�
     assert.equal(r.ok, true);
     assert.equal(r.data.latest, '9.9.9');
     assert.equal(r.data.hasUpdate, true);
-    assert.match(r.data.code, /const VERSION = '9\.9\.9'/);
-    assert.deepEqual(seen, ['https://raw.githubusercontent.com/iv7777/Hopline/main/Hopline.js'], '只请求一次 Hopline.js');
+    assert.match(r.data.code, /^\/\*!Hopline v9\.9\.9 obfuscated:medium\*\//);
+    assert.deepEqual(seen, ['https://raw.githubusercontent.com/iv7777/Hopline/main/obf_Hopline.js'], '只请求一次 obf_Hopline.js');
     const again = await (await call(env, `/${UUID}/api/update`, { cookie })).json();
     assert.equal(again.data.latest, '9.9.9');
     assert.equal(seen.length, 1, '60 秒内复用缓存');
@@ -827,6 +827,8 @@ globalThis.Response = class extends NodeResponse {
     else super(body, init);
   }
 };
+// 字节流关闭：按规范，挂起中的 BYOB 读取要由数据源 respond(0) 才会以 done 结束（运行时的 socket 内部会处理）
+const closeBytes = (c) => { c.close(); if (c.byobRequest) c.byobRequest.respond(0); };
 // 假网络：net[hostname] = { delay: 毫秒 | 'hang' | 'fail' }；记录每次连接与写入内容
 function fakeNet(net) {
   const log = [];
@@ -839,7 +841,8 @@ function fakeNet(net) {
       : new Promise(r => setTimeout(r, b.delay));
     sock.opened.catch(() => {});
     sock.writable = new WritableStream({ write(c) { sock.written.push(new Uint8Array(c)); } });
-    sock.readable = new ReadableStream({ start(c) { sock.push = (d) => c.enqueue(d); sock.end = () => c.close(); } });
+    // 与运行时的 socket 一致：字节流（支持 BYOB 读取）。enqueue 会转移缓冲区，先复制一份，测试里的原数组保持可用
+    sock.readable = new ReadableStream({ type: 'bytes', start(c) { sock.push = (d) => c.enqueue(new Uint8Array(d)); sock.end = () => closeBytes(c); } });
     sock.close = () => { sock.closedByUs = true; };
     return sock;
   };
@@ -1568,9 +1571,47 @@ import { assemble } from '../build.mjs';
 const internals = (() => {
   const src = assemble()
     .replace(/^import .*$/m, '').replace('export default {', 'const __default = {');
-  return new Function('connect', src + '\n;return { md5hex, sha224hex, sha1Bytes, hmacSha1, hkdfSha1, poly1305, chacha20Poly1305Seal, chacha20Poly1305Open, parseVlessHeader, parseTrojanHeader, HTTP_PORTS, ipInCidrV6, isValidIp, parseProxyAddress, loginRateKey, relayPlan, RELAY_DOMAINS, SERVER_CHECKS, effectivePrefDomains, DEFAULT_PREFERRED_DOMAINS };')(() => { throw new Error('no sockets'); });
+  return new Function('connect', src + '\n;return { md5hex, sha224hex, sha1Bytes, hmacSha1, hkdfSha1, poly1305, chacha20Poly1305Seal, chacha20Poly1305Open, parseVlessHeader, parseTrojanHeader, HTTP_PORTS, ipInCidrV6, isValidIp, parseProxyAddress, loginRateKey, relayPlan, RELAY_DOMAINS, SERVER_CHECKS, effectivePrefDomains, DEFAULT_PREFERRED_DOMAINS, pumpReadable };')(() => { throw new Error('no sockets'); });
 })();
 const hex = (u8) => Buffer.from(u8).toString('hex');
+
+// ---- WS 下行管道 pumpReadable：BYOB 64KB 读取 / 非字节流回退 ----
+// 收集 send 的消息；消息内容在管道结束后才检查：ws.send 不立即复制数据，若读取缓冲被复用，先发出的消息会被后读的数据覆盖
+const pumpAll = async (readable) => {
+  const sent = []; let done = 0;
+  await internals.pumpReadable(readable, (m) => sent.push(m), () => done++);
+  return { sent, done, bytes: Buffer.concat(sent.map(m => Buffer.from(m.buffer, m.byteOffset, m.byteLength))) };
+};
+const pattern = (n, seed) => Uint8Array.from({ length: n }, (_, i) => (i * 31 + seed) & 255);
+
+test('WS 下行 BYOB：已到达的数据一次读取最多 64KB 作为一条消息；大小块混合时字节完整，先发出的消息不被后续读取覆盖', async () => {
+  const sizes = [3, 4096, 100000, 70, 65536, 1, 32768, 32767, 200000, 5];
+  const chunks = sizes.map((n, i) => pattern(n, i));
+  let k = 0;
+  // 每次 pull 只给一块（模拟数据陆续到达），大块会被 64KB 缓冲拆成多次读取
+  const { sent, done, bytes } = await pumpAll(new ReadableStream({ type: 'bytes', pull(c) { if (k < chunks.length) c.enqueue(chunks[k++].slice()); else closeBytes(c); } }));
+  assert.equal(done, 1, 'onDone 调用一次');
+  assert.ok(bytes.equals(Buffer.concat(chunks.map(c => Buffer.from(c)))), '字节顺序与内容完整');
+  assert.ok(sent.every(m => m.byteLength > 0 && m.byteLength <= 64 * 1024), '每条消息 1B–64KB');
+  // 同时到达的 100 个 4KB 块（400KB）：BYOB 一次读取取走 64KB → 7 条消息
+  const blocks = Array.from({ length: 100 }, (_, i) => new Uint8Array(4096).fill(i));
+  const r = await pumpAll(new ReadableStream({ type: 'bytes', start(c) { for (const b of blocks) c.enqueue(b.slice()); }, pull(c) { closeBytes(c); } }));
+  assert.equal(r.sent.length, 7);
+  assert.ok(r.bytes.equals(Buffer.concat(blocks.map(b => Buffer.from(b)))));
+});
+
+test('WS 下行：非字节流（SS 出站解密流）回退为默认读取并合并；出错时同样调用 onDone', async () => {
+  const blocks = Array.from({ length: 40 }, (_, i) => pattern(4096, i));
+  const r = await pumpAll(new ReadableStream({ start(c) { for (const b of blocks) c.enqueue(b); c.close(); } }));
+  assert.equal(r.done, 1);
+  assert.ok(r.bytes.equals(Buffer.concat(blocks.map(b => Buffer.from(b)))));
+  assert.ok(r.sent.length < blocks.length, `合并为 ${r.sent.length} 条`);
+  for (const type of ['bytes', undefined]) {
+    const e = await pumpAll(new ReadableStream({ type, start(c) { c.enqueue(new Uint8Array([1, 2, 3])); }, pull(c) { c.error(new Error('reset')); } }));
+    assert.equal(e.done, 1, `${type || 'default'}：出错后 onDone 调用一次`);
+    assert.deepEqual([...e.bytes], [1, 2, 3]);
+  }
+});
 const fromHexStr = (h) => new Uint8Array(Buffer.from(h.replace(/\s+/g, ''), 'hex'));
 const lens = [0, 1, 3, 55, 56, 57, 63, 64, 65, 119, 120, 127, 128, 1000];   // 覆盖填充边界
 const msgOf = (n) => 'x'.repeat(n);

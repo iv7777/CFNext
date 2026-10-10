@@ -116,7 +116,7 @@ async function handleWebSocketProxy(request, cfg) {
     if (pending && pending.byteLength > parsed.headerLength) await writer.write(pending.subarray(parsed.headerLength));
     pending = null;   // 出站就绪后清空缓冲，后续消息直接写出站
     pumped = true;
-    pumpToReader(conn.readable.getReader(), send, () => closeWs(1000));
+    pumpReadable(conn.readable, send, () => closeWs(1000));
   };
 
   // WS 0-RTT：先处理握手头中预发的首包，再处理数据帧；校验不通过时 earlyBytes 为 null，走原流程
@@ -133,7 +133,7 @@ async function handleWebSocketProxy(request, cfg) {
     } catch (err) { fail(err); }
   });
   // accept({ allowHalfOpen: true }) 下收到客户端的关闭帧不会自动回应：这里必须自己收尾。
-  // 已有数据转发时，目标连接被关闭后由 pumpToReader 结束并关闭 WS；还没开始转发（握手 / 等首包 / 建连中）时直接关闭，避免连接悬挂
+  // 已有数据转发时，目标连接被关闭后由 pumpReadable 结束并关闭 WS；还没开始转发（握手 / 等首包 / 建连中）时直接关闭，避免连接悬挂
   function cleanup() {
     closed = true;
     if (protoWait) { clearTimeout(protoWait); protoWait = null; }
