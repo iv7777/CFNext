@@ -32,6 +32,8 @@
 
 > 全程约 5 分钟，只需要 **`Hopline.js`** 一个文件（仓库根目录，已是构建好的成品，直接使用：[raw 链接](https://raw.githubusercontent.com/iv7777/Hopline/main/Hopline.js)）。管理面板的页面（约 80KB）不在这个文件里：Worker 首次打开面板时在服务端按版本标签从 jsDelivr / GitHub 拉取、校验 SHA-256 并缓存，所以部署文件更小，浏览器也不需要访问 GitHub。
 
+> **Fork 后部署**：面板页面与 Clash 配置模板（`/sub/clash`、`/sub/stash`）都是这样按版本标签从仓库拉取的，拉取地址固定写在 `src/worker/update.js` 的 `UPDATE_REPO`（默认即本仓库 `iv7777/Hopline`）。**Fork 后直接部署未经修改的 `Hopline.js` 可以正常使用**——此时拉取的是本仓库里与之匹配的版本，不受影响；但这也意味着长期依赖本仓库继续存在、保留对应版本标签。如果你改动了面板（`src/panel/`）或 Clash 模板（`src/worker/clash-template.yaml`）并重新构建，必须先把 `UPDATE_REPO` 改成自己的仓库再推送到自己仓库的 `main`（`tag.yml` 会自动打上匹配的版本标签），否则 Worker 仍会从本仓库拉取未经你修改的版本，看不到你的改动（哈希校验保证不会显示错的内容，只会报错或维持旧版本）。
+
 ### 2.1 准备
 
 - 一个 Cloudflare 账号（Workers / Pages）
