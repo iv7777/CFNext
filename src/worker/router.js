@@ -204,7 +204,7 @@ async function handleRequest(request, env, state) {
   // ---------- 版本接口（仅登录后可用；公开会让扫描器识别部署与版本） ----------
   if (segs[0] === 'version') {
     if (!(await requireAuth(request, cfg, state))) return new Response('Not Found', { status: 404 });
-    return json({ version: VERSION });
+    return json({ version: VERSION, obfuscated: IS_OBFUSCATED });
   }
 
   // ---------- 登录 ----------
@@ -355,7 +355,7 @@ async function handleRequest(request, env, state) {
     }
 
     if (apiName === 'status') {
-      return json({ ok: true, data: { version: VERSION, host: url.hostname, path: panelPath, region: (request.cf && request.cf.colo) || 'unknown', kv: !!(kvStore(env) && typeof kvStore(env).get === 'function'), workersDev: /\.workers\.dev$/i.test(url.hostname) } });
+      return json({ ok: true, data: { version: VERSION, obfuscated: IS_OBFUSCATED, host: url.hostname, path: panelPath, region: (request.cf && request.cf.colo) || 'unknown', kv: !!(kvStore(env) && typeof kvStore(env).get === 'function'), workersDev: /\.workers\.dev$/i.test(url.hostname) } });
     }
 
     if (apiName === 'update') {

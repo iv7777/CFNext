@@ -1,4 +1,4 @@
-/*!Hopline v2.4.5*/
+/*!Hopline v2.4.6*/
 // ============================================================================
 //  Hopline —— 代理订阅面板 · 全新独立编写
 //  ----------------------------------------------------------------------------
@@ -18,13 +18,16 @@
 // ============================================================================
 import { connect } from 'cloudflare:sockets';
 
-const VERSION = '2.4.5';
+const VERSION = '2.4.6';
+// 本文件是否为混淆产物：obfuscate.mjs 按原文精确替换为 true（混淆后仍是这个布尔值，只是字面量的编码方式不同）。
+// 据此决定更新检测拉取哪个文件、面板上怎么标注当前部署——保证拉取与当前运行的是同一种
+const IS_OBFUSCATED = false;
 
 // 更新检测：点击版本号后拉取仓库代码比对版本号；有新版本时返回最新代码供面板复制
-// 版本基准与复制的代码都是仓库 main 分支根目录的 obf_Hopline.js（由 obfuscate.mjs 在 Hopline.js 基础上生成的混淆部署文件）。
-// 它在 Hopline.js 更新后由 CI 另行提交，会比 Hopline.js 晚几十秒；这段时间内检测不到新版本，版本号与代码始终来自同一个文件
+// 版本基准与复制的代码都是仓库 main 分支根目录下与当前部署同类型的文件（Hopline.js 或 obf_Hopline.js，按 IS_OBFUSCATED）；
+// obf_Hopline.js 在 Hopline.js 更新后由 CI 另行提交，会比 Hopline.js 晚几十秒，这段时间内混淆部署检测不到新版本
 const UPDATE_REPO = 'iv7777/Hopline';
-const UPDATE_FILE = 'obf_Hopline.js';
+const UPDATE_FILE = IS_OBFUSCATED ? 'obf_Hopline.js' : 'Hopline.js';
 let UPDATE_CACHE = null; // { t, r } 60 秒缓存
 
 function parseVer(v){
@@ -60,7 +63,7 @@ async function fetchRepoFile(name){
 async function checkUpdate(){
   const now = Date.now();
   if (UPDATE_CACHE && now - UPDATE_CACHE.t < 60000) return UPDATE_CACHE.r;
-  // 拉取仓库 obf_Hopline.js：比对版本号，有更新时直接把这次拉取的内容作为最新代码返回
+  // 拉取仓库里与当前部署同类型的文件：比对版本号，有更新时直接把这次拉取的内容作为最新代码返回
   const r = await fetchRepoFile(UPDATE_FILE);
   if (!r.version) return { current: VERSION, latest: null, hasUpdate: false, code: '', error: r.error || '未在仓库中找到版本信息' };
   UPDATE_CACHE = { t: now, r: { current: VERSION, latest: r.version, hasUpdate: cmpVer(r.version, VERSION) > 0, code: r.txt, checkedAt: now } };
@@ -3415,7 +3418,7 @@ const ASSET_CACHE_TTL = 30 * 86400;
 function pinnedAsset(name, path, sha256) {
   return { name, path, sha256, text: null, loading: null, failedAt: 0 };   // text：已校验的内容（每个 isolate 只加载一次）；loading：进行中的加载（并发请求共用）
 }
-const PANEL_ASSET = pinnedAsset('panel', '/dist/panel.html', '1e4ae0ea883b5914bb43c61ae4451126da1b91884da07c2d404922b761efa671');
+const PANEL_ASSET = pinnedAsset('panel', '/dist/panel.html', 'd36a408795ac5cf3916af938dc6eec0b83ab4c3f08e7d48a7fa6c710d88e505f');
 const CLASH_ASSET = pinnedAsset('clash', '/dist/clash-template.yaml', 'd838e14ef6be7bb3644e314fa5e085539d1ff307e40b08f44271bbd7cc7634fa');
 
 function assetSources(a) {
@@ -3743,7 +3746,7 @@ async function handleRequest(request, env, state) {
   // ---------- 版本接口（仅登录后可用；公开会让扫描器识别部署与版本） ----------
   if (segs[0] === 'version') {
     if (!(await requireAuth(request, cfg, state))) return new Response('Not Found', { status: 404 });
-    return json({ version: VERSION });
+    return json({ version: VERSION, obfuscated: IS_OBFUSCATED });
   }
 
   // ---------- 登录 ----------
@@ -3894,7 +3897,7 @@ async function handleRequest(request, env, state) {
     }
 
     if (apiName === 'status') {
-      return json({ ok: true, data: { version: VERSION, host: url.hostname, path: panelPath, region: (request.cf && request.cf.colo) || 'unknown', kv: !!(kvStore(env) && typeof kvStore(env).get === 'function'), workersDev: /\.workers\.dev$/i.test(url.hostname) } });
+      return json({ ok: true, data: { version: VERSION, obfuscated: IS_OBFUSCATED, host: url.hostname, path: panelPath, region: (request.cf && request.cf.colo) || 'unknown', kv: !!(kvStore(env) && typeof kvStore(env).get === 'function'), workersDev: /\.workers\.dev$/i.test(url.hostname) } });
     }
 
     if (apiName === 'update') {

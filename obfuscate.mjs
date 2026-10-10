@@ -18,6 +18,8 @@
 //     这几个文件在 src/worker.js 的 @include 列表中相邻，在拼接后的 Hopline.js 里是连续的一段，按原文定位后单独处理，
 //     其余部分整体处理，再按原顺序拼接——不影响输出结果，只是分段喂给混淆器。
 //   - 顶层函数/变量名从不改名（renameGlobals 关闭且为默认值），分段处理后相互调用的名字保持一致。
+//   - 产物里 src/worker/update.js 的 IS_OBFUSCATED 会被改写为 true：面板据此标注当前是混淆版，
+//     「检测更新」也据此只拉取仓库里同为混淆版的 obf_Hopline.js（而不是 Hopline.js），两边版本号与代码始终对应。
 //   - 通过 npx 调用（与 `npm run lint` 使用 eslint 的方式一致），版本固定以保证可复现。
 import { readFileSync, writeFileSync, existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
@@ -153,11 +155,20 @@ function main() {
     console.error(`未找到源文件：${SRC}（请先运行 node build.mjs）`);
     process.exit(1);
   }
-  const code = readFileSync(SRC, 'utf8').replace(/\r\n/g, '\n');
+  let code = readFileSync(SRC, 'utf8').replace(/\r\n/g, '\n');
   if (!code.trim()) {
     console.error(`${SRC} 为空文件`);
     process.exit(1);
   }
+
+  // 标记本次产物是混淆版：src/worker/update.js 据此决定更新检测拉取哪个文件、面板上怎么标注当前部署。
+  // 在混淆之前对纯文本做替换——值本身之后会随该段代码一起被混淆器处理（字符串数组等），不影响运行时的实际取值；
+  // 精确匹配原文，不存在就直接报错，避免 update.js 改了写法后这里悄悄失效，产物却还自称是非混淆版
+  const IS_OBFUSCATED_DECL = 'const IS_OBFUSCATED = false;';
+  if (!code.includes(IS_OBFUSCATED_DECL)) {
+    throw new Error(`在 ${SRC} 中找不到 "${IS_OBFUSCATED_DECL}"（src/worker/update.js 的写法变了？），无法标记混淆产物`);
+  }
+  code = code.replace(IS_OBFUSCATED_DECL, 'const IS_OBFUSCATED = true;');
 
   const versionBanner = (code.match(/^\/\*!Hopline v[\d.]+\*\//) || [''])[0];
   const segments = splitHotCold(code);

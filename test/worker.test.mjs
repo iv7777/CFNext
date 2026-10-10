@@ -446,15 +446,17 @@ test('面板页面注入字段表与共用校验函数', async () => {
   }
 });
 
-test('检测更新：以仓库 obf_Hopline.js 为基准（版本取自混淆横幅），有更新时直接返回其内容，60 秒内走缓存', async () => {
+test('检测更新：以仓库 Hopline.js 为基准，有更新时直接返回其内容，60 秒内走缓存；/api/status 标注非混淆部署', async () => {
   const env = baseEnv();
   const cookie = await login(env);
+  const status = await (await call(env, `/${UUID}/api/status`, { cookie })).json();
+  assert.equal(status.data.obfuscated, false, '本构建非混淆产物');
   const offline = globalThis.fetch;
   const seen = [];
   globalThis.fetch = async (url) => {
     seen.push(String(url));
-    if (String(url) === 'https://raw.githubusercontent.com/iv7777/Hopline/main/obf_Hopline.js') {
-      return new Response("/*!Hopline v9.9.9 obfuscated:medium*/\nconst h0_0r0=h0_0c;function h0_0c(){}\n");
+    if (String(url) === 'https://raw.githubusercontent.com/iv7777/Hopline/main/Hopline.js') {
+      return new Response("/*!Hopline v9.9.9*/\nconst a=1;\n");
     }
     return new Response('Not Found', { status: 404 });
   };
@@ -463,11 +465,43 @@ test('检测更新：以仓库 obf_Hopline.js 为基准（版本取自混淆横�
     assert.equal(r.ok, true);
     assert.equal(r.data.latest, '9.9.9');
     assert.equal(r.data.hasUpdate, true);
-    assert.match(r.data.code, /^\/\*!Hopline v9\.9\.9 obfuscated:medium\*\//);
-    assert.deepEqual(seen, ['https://raw.githubusercontent.com/iv7777/Hopline/main/obf_Hopline.js'], '只请求一次 obf_Hopline.js');
+    assert.match(r.data.code, /^\/\*!Hopline v9\.9\.9\*\//);
+    assert.deepEqual(seen, ['https://raw.githubusercontent.com/iv7777/Hopline/main/Hopline.js'], '非混淆部署只请求 Hopline.js，不请求 obf_Hopline.js');
     const again = await (await call(env, `/${UUID}/api/update`, { cookie })).json();
     assert.equal(again.data.latest, '9.9.9');
     assert.equal(seen.length, 1, '60 秒内复用缓存');
+  } finally {
+    globalThis.fetch = offline;
+  }
+});
+
+test('检测更新（混淆部署）：按部署类型自动切换为仓库 obf_Hopline.js；/api/status 标注混淆部署', async () => {
+  const obfWorker = (await import('../obf_Hopline.js?update-test=' + Math.random())).default;
+  const env = baseEnv();
+  const loginRes = await obfWorker.fetch(new Request('https://node.example.com/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'CF-Connecting-IP': '203.0.113.9' },
+    body: 'username=admin&password=pw&next=' + encodeURIComponent('/' + UUID),
+  }), env, {});
+  const cookie = loginRes.headers.get('Set-Cookie').split(';')[0];
+  const get = (path) => obfWorker.fetch(new Request('https://node.example.com/' + UUID + path, { headers: { Cookie: cookie } }), env, {});
+  const status = await (await get('/api/status')).json();
+  assert.equal(status.data.obfuscated, true, 'obf_Hopline.js 应标注 obfuscated: true');
+  const offline = globalThis.fetch;
+  const seen = [];
+  globalThis.fetch = async (url) => {
+    seen.push(String(url));
+    if (String(url) === 'https://raw.githubusercontent.com/iv7777/Hopline/main/obf_Hopline.js') {
+      return new Response("/*!Hopline v9.9.9 obfuscated:medium*/\nconst a=1;\n");
+    }
+    return new Response('Not Found', { status: 404 });
+  };
+  try {
+    const r = await (await get('/api/update')).json();
+    assert.equal(r.ok, true);
+    assert.equal(r.data.latest, '9.9.9');
+    assert.equal(r.data.hasUpdate, true);
+    assert.deepEqual(seen, ['https://raw.githubusercontent.com/iv7777/Hopline/main/obf_Hopline.js'], '混淆部署只请求 obf_Hopline.js，不请求 Hopline.js');
   } finally {
     globalThis.fetch = offline;
   }

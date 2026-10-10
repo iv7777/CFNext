@@ -118,6 +118,7 @@ applyTheme();
 
 /* ===== 更新检测 ===== */
 var topVerText = 'v—';
+var verTag = '';   // 当前部署是否为混淆版，由 renderStatus() 按 /api/status 的 obfuscated 字段写入，checkUpdate() 重建版本号时沿用
 function legacyCopy(t){
   try {
     var ta = document.createElement('textarea');
@@ -158,7 +159,7 @@ function checkUpdate(){
     sv.classList.remove('checking');
     if (!r || !r.ok || !r.data) { sv.textContent = topVerText; toast('检测更新失败，请稍后重试', 'err'); return; }
     var d = r.data;
-    topVerText = 'v' + d.current;
+    topVerText = 'v' + d.current + verTag;
     sv.textContent = topVerText;
     if (d.hasUpdate && d.code) {
       sv.classList.add('has-update');
@@ -225,9 +226,10 @@ function renderStatus(d){
   $('aKv').textContent = kvTxt;
   $('aKv').className = 'v ' + (kv ? 'ok' : 'bad');
   var v = d.version || '—';
-  $('sideVer').textContent = 'v' + v;
-  topVerText = 'v' + v;
-  $('aVer').textContent = v;
+  verTag = d.obfuscated ? ' · 混淆版' : '';
+  $('sideVer').textContent = 'v' + v + verTag;
+  topVerText = 'v' + v + verTag;
+  $('aVer').textContent = v + verTag;
 }
 function protoText(){
   if (!CFG) return '—';
